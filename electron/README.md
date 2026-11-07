@@ -11,8 +11,12 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **agent loop**：turn/step、流式 chunk、工具调用、并行执行、取消、死循环检测
 - **LLM 适配器**：`openai-completions`、`openai-responses`、`anthropic-messages`，
   共享 `StreamAssembler` 保证三条流发出同一套 `StreamChunk`
-- **会话存储**：`<home>/sessions/<id>/session.jsonl`，首行 header，之后逐条
-  envelope；append 即广播，崩溃遗留轮次加载时补 `turn-end {aborted, disposed}`
+- **会话存储**：与 Rust 版共用 `~/.denia`，`sessions/<id>/session.jsonl` 格式
+  对齐（header version 0 / UUID id / seq 连续）；崩溃遗留轮次加载时补
+  `turn-end {aborted, disposed}`
+- **共享配置**：读取 `settings.yaml` 的 `llm-openai.providers`、从
+  `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；工作区读写 `workspaces.json`
+  的 map+order 结构；随附 preset（standard / creator / minimal）与 Rust 对齐
 - **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、`todo_write`
 - **HTTP/SSE 宿主**：会话列表/创建/快照/分页/发消息/取消/引导、follow SSE、
   全局事件 SSE、模型目录、设置、工作区、文件树/文件读取
@@ -34,16 +38,20 @@ npm start
 ```
 
 宿主默认监听 `127.0.0.1:43655`（Rust 版占用 43654，两个版本可同时运行），home 为
-`~/.denia-electron`。可用环境变量覆盖：
+`~/.denia`，与 Rust 版共用同一份会话、设置、凭据与工作区。可用环境变量覆盖：
 
 - `DENIA_HOME`：会话、配置、工作区记录的根目录
 - `DENIA_PORT`：监听端口（`0` 表示随机）
 - `DENIA_WEB_DIR`：前端构建产物目录（默认 `../web/dist`）
 - `DENIA_WEB_URL`：开发时改加载 Vite 地址（`web/` 的 `/api` 代理需指向本宿主）
 - `DENIA_OPENAI_BASE_URL` / `DENIA_OPENAI_API_KEY` / `DENIA_OPENAI_MODELS`：
-  在没有 `config.json` 时构造默认提供商
+  在既没有 `settings.yaml` 也没有 `config.json` 时构造默认提供商
 
-配置文件位于 `<home>/config.json`：
+提供商解析顺序：`<home>/config.json`（本地覆盖，测试/联调用）→
+`<home>/settings.yaml` 的 `llm-openai.providers` → 环境变量/内置默认。密钥按
+`apiKeyEnv` 先查进程环境、再查 `<home>/.credentials.yaml` 的 `refs`。
+
+本地覆盖文件示例（不存在时不需要创建）：
 
 ```json
 {
@@ -87,7 +95,7 @@ npm run dist
 - `pnpm build` 会先跑前端 QA 套件；本机 `check-follow` 在无联调环境时会失败，
   它不参与产物，直接跑上面三条构建命令即可。
 - 打包使用 `build/icon.ico`（由 `128x128@2x.png` 生成的 256×256 图标）。
-- 静默安装：`Denia-Electron-0.1.0-setup.exe /S`（默认按用户安装，无需管理员）。
+- 静默安装：`Denia-Electron-0.2.0-setup.exe /S`（默认按用户安装，无需管理员）。
 
 ## 目录
 

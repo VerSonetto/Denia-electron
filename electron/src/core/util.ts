@@ -1,15 +1,13 @@
 // Small shared helpers: ids, clock, truncation, JSON parsing.
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 
 export function nowMillis(): number {
   return Date.now()
 }
 
 export function newSessionId(): string {
-  const stamp = Date.now().toString(36)
-  const random = randomBytes(4).toString('hex')
-  return `s_${stamp}_${random}`
+  return randomUUID()
 }
 
 export function newRequestId(): string {

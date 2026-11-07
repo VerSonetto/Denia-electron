@@ -18,7 +18,7 @@ import type {
 } from '../core/wire.ts'
 import { newSessionId } from '../core/util.ts'
 
-const SESSION_FORMAT_VERSION = 1
+const SESSION_FORMAT_VERSION = 0
 const EXCERPT_CHARS = 160
 
 interface SummaryCache {
@@ -285,6 +285,7 @@ export class SessionStore {
     const events = liveSession?.events ?? readEnvelopes(file)
     const excerpt = firstUserText(events)
     const title = lastTitle(events)
+    const preset = lastAgentPreset(events)
     const summary: SessionSummary = {
       id,
       created_at: header.created_at,
@@ -294,7 +295,7 @@ export class SessionStore {
       sandbox: header.sandbox,
       cwd_alive: isDirectory(header.cwd),
       ...(header.parent_session ? { parent_session: header.parent_session } : {}),
-      ...(header.agent_preset ? { agent_preset: header.agent_preset } : {}),
+      ...(header.agent_preset || preset ? { agent_preset: preset ?? header.agent_preset } : {}),
     }
     this.cache.set(id, { mtimeMs: stat.mtimeMs, size: stat.size, summary })
     return summary
@@ -347,6 +348,14 @@ function lastTitle(events: Envelope[]): string | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event?.type === 'session-title') return (event as { title: string }).title
+  }
+  return null
+}
+
+function lastAgentPreset(events: Envelope[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type === 'agent-preset') return (event as { preset: string }).preset
   }
   return null
 }

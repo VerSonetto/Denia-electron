@@ -13,20 +13,25 @@ import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { randomBytes } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 
 import { SessionDriver } from '../agent/loop.ts'
 import { buildSystemPrompt } from '../agent/system-prompt.ts'
-import type { AppConfig, ProviderConfig } from '../config.ts'
+import type { AppConfig } from '../config.ts'
 import {
-  findProvider,
+  credentialInfo,
   loadConfig,
+  loadCredentialRefs,
+  loadSettings,
   resolveHome,
-  saveConfig,
+  saveSettingsNamespace,
+  setCredential,
   settingsDescribe,
+  unsetCredential,
+  workspacesPath,
 } from '../config.ts'
 import type { Envelope, ImageData, ModelSelection, SessionEvent } from '../core/wire.ts'
-import { errorMessage } from '../core/util.ts'
+import { errorMessage, isRecord } from '../core/util.ts'
 import { SessionStore } from '../session/store.ts'
 import { ToolRegistry } from '../tools/index.ts'
 
@@ -66,7 +71,9 @@ interface GlobalEventEntry {
 }
 
 interface WorkspaceFile {
-  workspaces: WorkspaceRecord[]
+  initialized: boolean
+  order: string[]
+  workspaces: Record<string, WorkspaceRecord>
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -182,6 +189,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const store = new SessionStore(home)
   const registry = ToolRegistry.builtin()
   const workspaces = loadWorkspaces(home)
+  const defaultPermissionMode = consolePermissionMode(home)
 
   // —— global push ring + SSE clients ——
   const sseClients = new Set<ServerResponse>()
@@ -214,7 +222,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const runningSessionIds = (): string[] => driver.runningIds()
 
   const saveWorkspaces = (): void => {
-    fs.writeFileSync(path.join(home, 'workspaces.json'), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
+    fs.writeFileSync(workspacesPath(home), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
   }
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -251,7 +259,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : undefined
         let cwd = typeof body.cwd === 'string' ? body.cwd.trim() : ''
         if (workspaceId) {
-          const workspace = workspaces.workspaces.find((entry) => entry.id === workspaceId)
+          const workspace = workspaces.workspaces[workspaceId]
           if (!workspace) {
             apiError(res, 404, 'workspace/not-found', 'workspace not found')
             return
@@ -268,12 +276,12 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         }
         const preset = typeof body.agentPreset === 'string' && body.agentPreset.trim()
           ? body.agentPreset.trim()
-          : 'develop'
+          : 'standard'
         const header = store.create(cwd, { sandbox: true })
-        store.append(header.id, { type: 'permission-mode', mode: 'auto-edit' })
+        store.append(header.id, { type: 'permission-mode', mode: defaultPermissionMode })
         store.append(header.id, { type: 'agent-preset', preset })
         if (workspaceId) {
-          const workspace = workspaces.workspaces.find((entry) => entry.id === workspaceId)
+          const workspace = workspaces.workspaces[workspaceId]
           if (workspace) {
             workspace.sessionIds = [header.id, ...workspace.sessionIds.filter((id) => id !== header.id)]
             saveWorkspaces()
@@ -318,7 +326,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         }
         store.flush(sessionId)
         store.delete(sessionId)
-        for (const workspace of workspaces.workspaces) {
+        for (const workspace of Object.values(workspaces.workspaces)) {
           workspace.sessionIds = workspace.sessionIds.filter((id) => id !== sessionId)
         }
         saveWorkspaces()
@@ -398,7 +406,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       }
       if (rest === '/agent-preset' && method === 'PUT') {
         const body = await readJson(req)
-        const preset = typeof body.preset === 'string' ? body.preset : 'develop'
+        const preset = typeof body.preset === 'string' ? body.preset : 'standard'
         store.append(sessionId, { type: 'agent-preset', preset })
         json(res, 200, { preset })
         return
@@ -499,7 +507,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     // —— workspaces ——
     if (pathname === '/api/workspaces') {
       if (method === 'GET') {
-        json(res, 200, { workspaces: workspaces.workspaces })
+        json(res, 200, { workspaces: workspaceList(workspaces) })
         return
       }
       if (method === 'POST') {
@@ -510,13 +518,14 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           return
         }
         const record: WorkspaceRecord = {
-          id: `w_${Date.now().toString(36)}_${randomBytes(3).toString('hex')}`,
+          id: randomUUID(),
           path: dir,
           title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : path.basename(dir),
           createdAt: Date.now(),
           sessionIds: [],
         }
-        workspaces.workspaces = [record, ...workspaces.workspaces]
+        workspaces.workspaces[record.id] = record
+        workspaces.order = [record.id, ...workspaces.order.filter((id) => id !== record.id)]
         saveWorkspaces()
         broadcast({ type: 'sessions-updated' })
         json(res, 201, { workspace: record })
@@ -526,7 +535,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     const workspaceMatch = /^\/api\/workspaces\/([^/]+)$/.exec(pathname)
     if (workspaceMatch && method === 'DELETE') {
       const id = workspaceMatch[1]!
-      workspaces.workspaces = workspaces.workspaces.filter((entry) => entry.id !== id)
+      delete workspaces.workspaces[id]
+      workspaces.order = workspaces.order.filter((entry) => entry !== id)
       saveWorkspaces()
       broadcast({ type: 'sessions-updated' })
       json(res, 200, { ok: true })
@@ -579,7 +589,11 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       }
       try {
         const headers: Record<string, string> = { accept: 'application/json' }
-        const key = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
+        let key = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
+        if (!key && typeof body.apiKeyEnv === 'string' && body.apiKeyEnv.trim()) {
+          const ref = body.apiKeyEnv.trim()
+          key = process.env[ref]?.trim() || loadCredentialRefs(home)[ref]?.trim() || ''
+        }
         if (key) headers.authorization = `Bearer ${key}`
         const response = await fetch(`${baseURL.replace(/\/+$/, '')}/models`, { headers })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -604,39 +618,61 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     if (settingsMatch && (method === 'PATCH' || method === 'PUT')) {
       const ns = safeDecode(settingsMatch[1]!)
       const body = await readJson(req)
-      config = applySettingsPatch(config, ns, body.value)
-      saveConfig(home, config)
+      saveSettingsNamespace(home, ns, body.value)
+      config = loadConfig(home)
       broadcast({ type: 'settings-updated' })
       json(res, 200, { revision: 1, applies: 'restart' })
       return
     }
     if (pathname === '/api/credentials' && method === 'GET') {
-      json(res, 200, {})
+      const refs = (url.searchParams.get('refs') ?? '')
+        .split(',')
+        .map((ref) => ref.trim())
+        .filter(Boolean)
+      json(res, 200, { credentials: credentialInfo(home, refs) })
       return
     }
     if (pathname.startsWith('/api/credentials/') && (method === 'PUT' || method === 'DELETE')) {
-      json(res, 200, { ok: true })
+      const ref = safeDecode(pathname.slice('/api/credentials/'.length))
+      try {
+        if (method === 'PUT') {
+          const body = await readJson(req)
+          if (typeof body.value !== 'string') {
+            apiError(res, 400, 'credential/invalid-value', 'value 必须是字符串')
+            return
+          }
+          setCredential(home, ref, body.value)
+        } else {
+          unsetCredential(home, ref)
+        }
+        broadcast({ type: 'credentials-updated' })
+        json(res, 200, { ok: true, credentials: credentialInfo(home, [ref]) })
+      } catch (error) {
+        apiError(res, 400, 'credential/invalid', errorMessage(error))
+      }
       return
     }
 
     // —— agent presets ——
     if (pathname === '/api/agent-presets' && method === 'GET') {
       json(res, 200, {
-        default: 'develop',
-        modeSelection: false,
-        root: path.join(home, 'presets'),
+        default: 'standard',
+        modeSelection: true,
+        root: path.join(home, 'agent-presets'),
         tools: registry.names().sort(),
-        presets: [agentPresetRow(registry.names())],
+        presets: builtinPresetRows(),
       })
       return
     }
     const presetMatch = /^\/api\/agent-presets\/([^/]+)$/.exec(pathname)
     if (presetMatch && method === 'GET') {
-      json(res, 200, {
-        preset: agentPresetRow(registry.names()),
-        text: '',
-        spec: null,
-      })
+      const id = safeDecode(presetMatch[1]!)
+      const preset = builtinPresetRows().find((entry) => entry.id === id)
+      if (!preset) {
+        apiError(res, 404, 'preset/not-found', 'preset not found')
+        return
+      }
+      json(res, 200, { preset, text: '', spec: null })
       return
     }
     if (pathname.startsWith('/api/agent-presets') && method !== 'GET') {
@@ -890,13 +926,63 @@ function isDirectory(dir: string): boolean {
 }
 
 function loadWorkspaces(home: string): WorkspaceFile {
-  const file = path.join(home, 'workspaces.json')
-  if (!fs.existsSync(file)) return { workspaces: [] }
+  const empty: WorkspaceFile = { initialized: true, order: [], workspaces: {} }
+  const file = workspacesPath(home)
+  if (!fs.existsSync(file)) return empty
+  let parsed: unknown
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as WorkspaceFile
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
   } catch {
-    return { workspaces: [] }
+    return empty
   }
+  if (!isRecord(parsed)) return empty
+  const rawWorkspaces = parsed.workspaces
+  if (Array.isArray(rawWorkspaces)) {
+    // Legacy TypeScript shape: plain array.
+    const map: Record<string, WorkspaceRecord> = {}
+    const order: string[] = []
+    for (const entry of rawWorkspaces) {
+      const record = normalizeWorkspace(entry)
+      if (!record) continue
+      map[record.id] = record
+      order.push(record.id)
+    }
+    return { initialized: true, order, workspaces: map }
+  }
+  if (!isRecord(rawWorkspaces)) return empty
+  const map: Record<string, WorkspaceRecord> = {}
+  for (const [id, entry] of Object.entries(rawWorkspaces)) {
+    const record = normalizeWorkspace(entry, id)
+    if (record) map[record.id] = record
+  }
+  const order = Array.isArray(parsed.order)
+    ? parsed.order.filter((id): id is string => typeof id === 'string' && id in map)
+    : []
+  for (const id of Object.keys(map)) {
+    if (!order.includes(id)) order.push(id)
+  }
+  return { initialized: true, order, workspaces: map }
+}
+
+function normalizeWorkspace(raw: unknown, fallbackId?: string): WorkspaceRecord | null {
+  if (!isRecord(raw)) return null
+  const id = typeof raw.id === 'string' && raw.id !== '' ? raw.id : fallbackId
+  if (!id || typeof raw.path !== 'string' || raw.path === '') return null
+  return {
+    id,
+    path: raw.path,
+    title: typeof raw.title === 'string' && raw.title !== '' ? raw.title : path.basename(raw.path),
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+    sessionIds: Array.isArray(raw.sessionIds)
+      ? raw.sessionIds.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+  }
+}
+
+function workspaceList(file: WorkspaceFile): WorkspaceRecord[] {
+  return file.order
+    .map((id) => file.workspaces[id])
+    .filter((record): record is WorkspaceRecord => record !== undefined)
 }
 
 function parseImages(value: unknown): ImageData[] {
@@ -907,60 +993,63 @@ function parseImages(value: unknown): ImageData[] {
     .map((entry) => ({ mime: entry.mime as string, data: entry.data as string }))
 }
 
-function applySettingsPatch(config: AppConfig, ns: string, value: unknown): AppConfig {
-  if (!ns.startsWith('llm-openai/') || typeof value !== 'object' || value === null) return config
-  const id = ns.slice('llm-openai/'.length)
-  const provider = findProvider(config, id)
-  if (!provider) return config
-  const patch = value as Record<string, unknown>
-  const next: ProviderConfig = { ...provider }
-  if (typeof patch.baseURL === 'string') next.baseURL = patch.baseURL
-  if (typeof patch.displayName === 'string') next.name = patch.displayName
-  if (typeof patch.apiKey === 'string') {
-    next.apiKey = patch.apiKey
-    next.apiKeyEnv = undefined
-  }
-  if (typeof patch.apiKeyEnv === 'string') next.apiKeyEnv = patch.apiKeyEnv
-  if (Array.isArray(patch.models)) {
-    next.models = patch.models
-      .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
-      .filter((entry) => typeof entry.id === 'string')
-      .map((entry) => ({
-        id: entry.id as string,
-        ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
-        ...(typeof entry.contextWindow === 'number' ? { contextWindow: entry.contextWindow } : {}),
-      }))
-  }
-  if (typeof patch.defaultContextWindow === 'number') next.defaultContextWindow = patch.defaultContextWindow
+function consolePermissionMode(home: string): 'read-only' | 'auto-edit' | 'full' {
+  const document = loadSettings(home)
+  const section = document && isRecord(document.console) ? document.console : null
+  const mode = section && typeof section.defaultPermissionMode === 'string'
+    ? section.defaultPermissionMode
+    : ''
+  return mode === 'read-only' || mode === 'full' || mode === 'auto-edit' ? mode : 'auto-edit'
+}
+
+function allFeatures(enabled: boolean) {
   return {
-    ...config,
-    providers: config.providers.map((entry) => (entry.id === id ? next : entry)),
+    agentsMd: enabled,
+    memory: enabled,
+    compaction: enabled,
+    goal: enabled,
+    taskLedger: enabled,
+    skills: enabled,
+    subagents: enabled,
+    jobs: enabled,
+    browser: enabled,
+    ask: enabled,
+    planMode: enabled,
   }
 }
 
-function agentPresetRow(toolNames: string[]) {
-  return {
-    id: 'develop',
-    trust: 'shipped' as const,
-    name: 'Develop',
-    description: '默认开发预设:完整工具面与基础协作纪律。',
-    hasPersona: false,
-    writable: false,
-    features: {
-      agentsMd: false,
-      memory: false,
-      compaction: false,
-      goal: false,
-      taskLedger: false,
-      skills: false,
-      subagents: false,
-      jobs: false,
-      browser: false,
-      ask: false,
-      planMode: false,
+/** Shipped presets, mirroring `denia_core::preset::builtin_presets`. */
+function builtinPresetRows() {
+  return [
+    {
+      id: 'standard',
+      trust: 'shipped' as const,
+      name: '标准模式',
+      description: '功能完整的编码 Agent:文件读写、Shell、检索、计划、目标、子代理与后台任务。',
+      hasPersona: false,
+      writable: false,
+      features: allFeatures(true),
     },
-    tools: toolNames,
-  }
+    {
+      id: 'creator',
+      trust: 'shipped' as const,
+      name: '创造模式',
+      description: '让 Agent 帮你创建新预设:通过提问收集 persona、工具面与功能开关,直接落盘可用的 preset.yml。',
+      hasPersona: true,
+      writable: false,
+      features: allFeatures(true),
+    },
+    {
+      id: 'minimal',
+      trust: 'shipped' as const,
+      name: '极简模式',
+      description: '只有持久 shell 的极简 Agent:系统提示一句话,无检索、记忆、计划与委派。',
+      tools: ['bash'],
+      hasPersona: true,
+      writable: false,
+      features: allFeatures(false),
+    },
+  ]
 }
 
 function serveStatic(res: ServerResponse, webDir: string, pathname: string): void {
