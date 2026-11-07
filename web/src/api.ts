@@ -942,12 +942,26 @@ export function steerSession(
 /** 切换当前会话权限预设。 */
 export function setSessionPermission(
   id: string,
-  mode: PermissionMode,
-): Promise<{ mode: PermissionMode }> {
+  mode: PermissionMode | 'approve-for-me',
+): Promise<{ mode: PermissionMode | 'approve-for-me' }> {
   return http(`/api/sessions/${encodeURIComponent(id)}/permission`, {
     method: 'PUT',
     body: JSON.stringify({ mode }),
   })
+}
+
+/** 权限能力探测:Electron 宿主额外提供「自动审批」;Rust 宿主返回 404。 */
+export interface PermissionCatalog {
+  modes: string[]
+  default?: string
+}
+
+export async function permissionCatalog(): Promise<PermissionCatalog | null> {
+  try {
+    return await http<PermissionCatalog>('/api/permissions/catalog')
+  } catch {
+    return null
+  }
 }
 
 /** 会话可用技能条目(`/` 直调候选与输入框 token 装饰共用;字段为后端 camelCase 投影)。 */

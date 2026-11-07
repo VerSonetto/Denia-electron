@@ -297,6 +297,15 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   ): Promise<void> => {
     const method = req.method ?? 'GET'
 
+    // —— permissions ——
+    if (pathname === '/api/permissions/catalog' && method === 'GET') {
+      json(res, 200, {
+        modes: ['read-only', 'workspace-write', 'approve-for-me', 'full-access'],
+        default: 'workspace-write',
+      })
+      return
+    }
+
     // —— sessions ——
     if (pathname === '/api/sessions') {
       if (method === 'GET') {
@@ -466,7 +475,20 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           json(res, 200, { mode, selection: next })
           return
         }
-        // Preset-level write (the Codex agent-mode selector).
+        if (mode === 'approve-for-me') {
+          const next = presetState('approve-for-me')
+          store.append(sessionId, { type: 'permission-mode', mode: legacyModeOf(next) })
+          store.append(sessionId, {
+            type: 'permission-selection',
+            sandbox: next.sandbox,
+            approval: next.approval,
+            reviewer: next.reviewer,
+            collaboration: next.collaboration,
+          })
+          json(res, 200, { mode, selection: next })
+          return
+        }
+        // Preset-level write (the agent-mode selector).
         const agentMode = body.agentMode
         if (agentMode === 'read-only' || agentMode === 'workspace-write' || agentMode === 'approve-for-me' || agentMode === 'full-access') {
           const next = presetState(agentMode)
@@ -1093,7 +1115,7 @@ function approvalAnswerOf(body: Record<string, unknown>): ApprovalAnswer | null 
   const decision = body.decision
   let choice: ApprovalAnswer['choice']
   switch (decision) {
-    // Legacy web UI values and the Codex-style values are both accepted.
+    // Legacy web UI values and the preset values are both accepted.
     case 'allow-once':
     case 'accept':
       choice = 'accept'

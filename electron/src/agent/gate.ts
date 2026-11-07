@@ -1,6 +1,6 @@
 // Dispatch-time permission gate.
 //
-// Mirrors Codex's approval pipeline:
+// The approval pipeline:
 //   1. classify the call (read / write / delete / network / plan-submit);
 //   2. let the execpolicy rules speak first, then fall back to the sandbox
 //      profile + approval policy (`decideAction` in `core/permission.ts`);

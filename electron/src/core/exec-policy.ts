@@ -1,8 +1,8 @@
-// Command-policy rule engine (port of `codex-rs/execpolicy`).
+// Command-policy rule engine.
 //
 // Rules are prefix matches over the normalized command tokens, each carrying a
 // decision. Multiple matches combine "strictest wins" (allow < prompt <
-// prompt-user < forbidden), exactly like `Evaluation::from_matches` in Codex.
+// prompt-user < forbidden).
 //
 // Rules live in `<home>/execpolicy.json`; `accept-with-rule` approvals append
 // an allow rule and persist it, so the same command stops prompting in later

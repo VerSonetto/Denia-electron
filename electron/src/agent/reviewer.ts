@@ -1,13 +1,11 @@
-// Automatic approval review ("Approve for me"), ported from Codex
-// `codex-rs/ext/guardian-reviewer`.
+// Automatic approval review ("Approve for me").
 //
 // The reviewer sees the recent conversation plus one planned action and answers
 // with strict JSON: risk level, how strongly the user authorized it, and an
 // allow/deny outcome. Everything that goes wrong (timeout, transport error,
 // unparsable output) resolves to *deny* — an unfinished review never approves.
 //
-// The shipped policy is a condensed version of Codex's
-// `prompts/templates/guardian/policy_template.md`.
+// The reviewer prompt below is the deployed policy.
 
 import type { ActionClass } from '../core/permission.ts'
 

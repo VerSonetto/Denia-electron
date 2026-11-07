@@ -541,7 +541,7 @@ export default function SessionsPage({
   const {
     permission, setPermission, permissionBusy, fullAccessConfirm, confirmFullAccess,
     cancelFullAccess, approvalReq, requestPermissionChange,
-    handleApproval, planReview, handlePlanDecision, handlePlanExit,
+    handleApproval, planReview, handlePlanDecision, handlePlanExit, showApproveForMe,
     agentPresetCatalog, agentPresetChoice, agentPresetBusy, agentPresetId, changeAgentPreset,
   } = usePermissions({ activeId, activeSession, catalogTick, applySelection })
   const contextSelectionRef = useRef({ start: 0, end: 0 })
@@ -1769,6 +1769,7 @@ export default function SessionsPage({
             value={permission}
             onChange={requestPermissionChange}
             disabled={inert || permissionBusy}
+            showApproveForMe={showApproveForMe}
           />
         </div>
         {/* 右组:模型 → 思考强度 → 优化 → 上下文 → 发送,一条从左到右的链。 */}

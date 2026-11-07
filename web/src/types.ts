@@ -241,6 +241,18 @@ export function normalizePermissionMode(raw: string): PermissionMode {
   return 'auto-edit'
 }
 
+/**
+ * 权限选择器可选值:后端四档之外,Electron 宿主多一个「自动审批」。
+ * 不支持的宿主没有该值,前端用能力探测(`/api/permissions/catalog`)
+ * 决定是否展示。
+ */
+export type PermissionChoice = PermissionMode | 'approve-for-me'
+
+export function normalizePermissionChoice(raw: string): PermissionChoice {
+  if (raw === 'approve-for-me') return 'approve-for-me'
+  return normalizePermissionMode(raw)
+}
+
 export interface SessionSummary {
   /** 子代理运行快照（wire 类型由 Rust 生成；旧日志由 serde default 补齐）。 */
   subagent?: SubagentDescriptor

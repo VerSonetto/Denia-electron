@@ -3,10 +3,10 @@ import * as api from '../../api';
 import type { ApprovalDecisionPayload } from '../../api';
 import { notify } from '../../appStore';
 import { attach } from '../../sessionStreams';
-import { consoleDefaultPermission, latestPendingApproval, latestPermissionMode } from './sessionState';
+import { consoleDefaultPermission, latestPendingApproval, latestPermissionChoice } from './sessionState';
 import type { ApprovalDecision, ApprovalRequest } from '../../components/ApprovalDialog';
 import { hasStoredPermission, loadPermission } from '../../components/PermissionSelector';
-import { normalizePermissionMode, type PermissionMode, type ModelSelection, type SessionSummary } from '../../types';
+import { normalizePermissionChoice, type PermissionChoice, type ModelSelection, type SessionSummary } from '../../types';
 
 /** 权限档位与审批:本地三态、后端写入口、审批弹窗与计划审批的完整簇。 */
 export function usePermissions({
@@ -22,12 +22,12 @@ export function usePermissions({
 }) {
   // 用户显式选过档位 → 用本地记忆;否则跟随设置里的"默认权限模式"
   // (异步拉取,见下方 default-permission 效应)。会话级档位优先,由事件流覆盖。
-  const [permission, setPermission] = useState<PermissionMode>(() =>
+  const [permission, setPermission] = useState<PermissionChoice>(() =>
     hasStoredPermission() ? loadPermission() : 'auto-edit',
   )
   const [permissionBusy, setPermissionBusy] = useState(false)
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
-  const pendingFullAccessRef = useRef<PermissionMode | null>(null)
+  const pendingFullAccessRef = useRef<PermissionChoice | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
 
   // 设置里的默认档位只在"当前没有已加载会话 + 用户没显式选过"时生效
@@ -50,7 +50,7 @@ export function usePermissions({
 
   /** 切换当前会话权限(活动会话直接写后端;无活动会话先记本地,首次发送时带上)。 */
   const applyPermission = useCallback(
-    (level: PermissionMode) => {
+    (level: PermissionChoice) => {
       if (activeId && level === permission) return
       setPermission(level)
       try {
@@ -73,7 +73,7 @@ export function usePermissions({
 
   /** 选择权限:完全访问走风险确认,其余直接写。 */
   const requestPermissionChange = useCallback(
-    (level: PermissionMode) => {
+    (level: PermissionChoice) => {
       if (level === 'full' && permission !== 'full') {
         pendingFullAccessRef.current = level
         setFullAccessConfirm(true)
@@ -160,13 +160,24 @@ export function usePermissions({
     }
     const unsubscribe = attach(activeId, {
       onSnapshot: (_header, events) => {
-        const mode = latestPermissionMode(events)
-        if (mode) setPermission(mode)
+        const choice = latestPermissionChoice(events)
+        if (choice) setPermission(choice)
         setApprovalReq(latestPendingApproval(events))
       },
       onEnvelope: (event) => {
         if (event.type === 'permission-mode') {
-          setPermission(normalizePermissionMode(event.mode))
+          setPermission(normalizePermissionChoice(event.mode))
+        } else if ((event as { type: string }).type === 'permission-selection') {
+          const selection = event as unknown as {
+            sandbox?: string
+            reviewer?: string
+            collaboration?: string
+          }
+          if (selection.reviewer === 'auto-review') setPermission('approve-for-me')
+          else if (selection.collaboration === 'plan') setPermission('plan')
+          else if (selection.sandbox === 'read-only') setPermission('read-only')
+          else if (selection.sandbox === 'danger-full-access') setPermission('full')
+          else setPermission('auto-edit')
         } else if (event.type === 'approval-asked') {
           setApprovalReq({
             requestId: event.request_id,
@@ -190,6 +201,23 @@ export function usePermissions({
   // agent preset(预设):名册来自服务端;当前值优先取用户在新会话页的选择,
   // 其次取会话摘要里记的预设(列表接口携带),最后落到部署默认值。
   // 会话一旦产出内容就没有改选入口——选择器只长在新会话页那一行。
+  // 能力探测:Electron 宿主提供「自动审批」档位,Rust 宿主没有。
+  const [showApproveForMe, setShowApproveForMe] = useState(false)
+  useEffect(() => {
+    let alive = true
+    void api
+      .permissionCatalog()
+      .then((catalog) => {
+        if (alive) setShowApproveForMe(Boolean(catalog?.modes.includes('approve-for-me')))
+      })
+      .catch(() => {
+        /* 探测失败按不支持处理 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [catalogTick])
+
   const [agentPresetCatalog, setAgentPresetCatalog] = useState<api.AgentPresetsView | null>(null)
   const [agentPresetChoice, setAgentPresetChoice] = useState<string | null>(null)
   const [agentPresetBusy, setAgentPresetBusy] = useState(false)
@@ -258,6 +286,7 @@ export function usePermissions({
     planReview,
     handlePlanDecision,
     handlePlanExit,
+    showApproveForMe,
     agentPresetCatalog,
     agentPresetChoice,
     agentPresetBusy,

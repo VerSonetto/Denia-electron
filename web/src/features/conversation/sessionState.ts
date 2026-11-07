@@ -2,7 +2,7 @@ import * as api from '../../api'
 import type { ApprovalRequest } from '../../components/ApprovalDialog'
 import type { TrajectoryQuote } from '../../trajectory'
 import type { ModelCatalog, ModelSelection, PermissionMode, SessionEnvelope, QueuedMessage, PastedImage, PendingAttachment, UserMessageImage } from '../../types'
-import { normalizePermissionMode } from '../../types'
+import { normalizePermissionChoice, normalizePermissionMode, type PermissionChoice } from '../../types'
 import { resolveSessionReasoningEffort } from '../../modelCatalog'
 
 export function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): ModelSelection {
@@ -96,6 +96,33 @@ export function latestPermissionMode(events: SessionEnvelope[]): PermissionMode 
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event.type === 'permission-mode') return normalizePermissionMode(event.mode)
+  }
+  return null
+}
+
+/**
+ * 精确权限选择:优先读 Electron 的 `permission-selection`(能区分自动审批),
+ * 回退到旧的四档 `permission-mode`。
+ */
+export function latestPermissionChoice(events: SessionEnvelope[]): PermissionChoice | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index] as unknown as {
+      type: string
+      sandbox?: string
+      reviewer?: string
+      collaboration?: string
+      mode?: string
+    }
+    if (event.type === 'permission-selection') {
+      if (event.reviewer === 'auto-review') return 'approve-for-me'
+      if (event.collaboration === 'plan') return 'plan'
+      if (event.sandbox === 'read-only') return 'read-only'
+      if (event.sandbox === 'danger-full-access') return 'full'
+      return 'auto-edit'
+    }
+    if (event.type === 'permission-mode' && typeof event.mode === 'string') {
+      return normalizePermissionChoice(event.mode)
+    }
   }
   return null
 }

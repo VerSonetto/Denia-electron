@@ -18,7 +18,7 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
   `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；工作区读写 `workspaces.json`
   的 map+order 结构；随附 preset（standard / creator / minimal）与 Rust 对齐
 - **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、`todo_write`、`exit_plan`
-- **权限（Codex 式三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
+- **权限（三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
   只读 / 工作区编辑 / 自动审批（Approve for me）/ 完全访问；四值决策
   （allow / prompt / prompt-user / forbid）；五值审批（accept、accept-for-session、
   accept-with-rule、decline、cancel）；execpolicy 命令前缀规则

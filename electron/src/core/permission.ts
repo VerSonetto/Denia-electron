@@ -1,6 +1,5 @@
-// Permission policy — Codex-style, not a single-dimensional mode switch.
-//
-// Modelled on `codex-rs/protocol/src/{models,permissions,protocol}.rs`:
+// Permission policy: three orthogonal dimensions (sandbox profile, approval
+// policy, reviewer) instead of a single-dimensional mode switch.
 //   - a sandbox profile (`read-only` / `workspace-write` / `danger-full-access`)
 //   - an approval policy (`untrusted` / `on-request` / `granular` / `never`)
 //   - an approvals reviewer (`user` / `auto-review`)
@@ -15,17 +14,17 @@
 
 import type { PermissionMode as LegacyPermissionMode } from './wire.ts'
 
-/** How much the sandbox lets a tool touch. Mirrors Codex `SandboxMode`. */
+/** How much the sandbox lets a tool touch. */
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
-/** Mirrors Codex `AskForApproval`. */
+/** When approval prompts may reach a reviewer, and when they are refused outright. */
 export type AskForApproval =
   | 'untrusted'
   | 'on-request'
   | { granular: GranularApprovalConfig }
   | 'never'
 
-/** Mirrors Codex `GranularApprovalConfig` (camelCase on our side). */
+/** Per-flow switches for the fine-grained approval policy. */
 export interface GranularApprovalConfig {
   sandboxApproval: boolean
   rules: boolean
@@ -34,13 +33,13 @@ export interface GranularApprovalConfig {
   mcpElicitations: boolean
 }
 
-/** Mirrors Codex `ApprovalsReviewer`. */
+/** Who answers an approval request. */
 export type ApprovalsReviewer = 'user' | 'auto-review'
 
-/** Mirrors Codex `ModeKind`: plan is not a permission level. */
+/** Plan is a collaboration mode, not a permission level. */
 export type CollaborationMode = 'default' | 'plan'
 
-/** The four presets the permission catalog exposes (mirrors Codex, minus granular/custom). */
+/** The four presets the permission catalog exposes. */
 export type AgentMode =
   | 'read-only'
   | 'workspace-write'
@@ -66,8 +65,8 @@ export interface AgentModePreset {
 }
 
 /**
- * The permission catalog, ported from the Codex desktop bundle
- * (`app.asar` → `.vite/build/early-bootstrap.js`, module 65972).
+ * The permission catalog: each preset is a named combination of the three
+ * fields above, so the UI can expose four choices over one state model.
  */
 export const AGENT_MODE_CATALOG: Record<AgentMode, AgentModePreset> = {
   'read-only': {
@@ -203,7 +202,7 @@ export function parsePermissionState(value: unknown): PermissionState | null {
 /** Action class of one tool call, decided before the policy stage. */
 export type ActionClass = 'read' | 'write' | 'delete' | 'network' | 'plan-submit'
 
-/** Four-valued decision, mirroring Codex `execpolicy::Decision`. */
+/** Four-valued decision: run, ask a reviewer, force a human, or refuse. */
 export type Decision =
   | { kind: 'allow' }
   | { kind: 'prompt'; reason?: string; rulePrompt?: boolean; proposedRule?: string[] }
@@ -220,7 +219,7 @@ export function forbid(reason: string): Decision {
   return { kind: 'forbid', reason }
 }
 
-/** Rank for "most restrictive wins" merging (Codex derives Ord in this order). */
+/** Rank for "most restrictive wins" merging; declaration order is the severity order. */
 export function decisionRank(decision: Decision): number {
   switch (decision.kind) {
     case 'allow':
@@ -266,7 +265,7 @@ export interface PolicyInput {
 
 /**
  * Approval-policy gate: may a prompt of this kind reach its reviewer?
- * Mirrors Codex `prompt_is_rejected_by_policy`.
+ * The approval policy can turn a prompt into a hard refusal.
  */
 function promptGate(approval: AskForApproval, promptIsRule: boolean): string | null {
   if (approval === 'never') return '审批策略为 never:该操作不会询问用户,已被拒绝。'
@@ -290,8 +289,7 @@ function gated(decision: Decision, approval: AskForApproval): Decision {
  *
  * The sandbox profile is what the action runs under. An allow rule from the
  * execpolicy only removes the approval requirement; it never widens the
- * sandbox (Codex: "Only actual approval of an explicit escalation may widen
- * the filesystem").
+ * sandbox: an allow rule only removes the approval requirement.
  */
 export function decideAction(input: PolicyInput): Decision {
   const { state, action } = input
@@ -388,7 +386,7 @@ export function grantedBySession(
 }
 
 // ---------------------------------------------------------------------------
-// Shell heuristics (ported from `crates/tools/src/permission.rs`)
+// Shell heuristics: write / delete / network side effects.
 // ---------------------------------------------------------------------------
 
 /** Files touched by a tool call, for workspace-boundary checks. */

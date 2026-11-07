@@ -65,3 +65,8 @@ export function IconPermissionPlan(props: IconProps) {
 export function IconPermissionFull(props: IconProps) {
   return <Icon {...props}><path d="M10 2.5 17 5v5c0 4-4 6.5-7 8-3-1.5-7-4-7-8V5l7-2.5Z M7 10l2 2 4-4" /></Icon>
 }
+
+/** 自动审批:盾牌里一只审查的眼睛。 */
+export function IconPermissionApprove(props: IconProps) {
+  return <Icon {...props}><path d="M10 2.5 17 5v5c0 4-4 6.5-7 8-3-1.5-7-4-7-8V5l7-2.5Z" /><ellipse cx="10" cy="9.5" rx="4" ry="2.4" /><circle cx="10" cy="9.5" r="1.1" /></Icon>
+}

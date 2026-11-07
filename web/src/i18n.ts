@@ -1059,6 +1059,8 @@ const zh = {
   permissionPlanDesc: '只调研不执行,提交计划等批准后再动手',
   permissionFull: '完全访问',
   permissionFullDesc: '全部自动放行,不做任何限制',
+  permissionApproveForMe: '自动审批',
+  permissionApproveForMeDesc: '工作区内编辑自动放行;高风险操作先交给自动审查,拿不准才问你',
   approvalLabel: '审批',
   approvalWaiting: '等待审批',
   approvalAllowOnce: '允许一次',
@@ -2475,6 +2477,9 @@ const en: typeof zh = {
   permissionPlan: 'Plan',
   permissionPlanDesc: 'Research without executing; submit a plan and wait for approval',
   permissionFull: 'Full access',
+  permissionApproveForMe: 'Auto review',
+  permissionApproveForMeDesc:
+    'Edits inside the workspace run directly; risky actions go to automatic review first and only uncertain ones ask you',
   permissionFullDesc: 'Everything runs automatically, no restrictions',
   approvalLabel: 'Approval',
   approvalWaiting: 'Waiting for approval',

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
 import { useClampedPopover } from '../hooks/useClampedPopover'
 import { IconCheck, IconChevronDown } from './icons'
-import { IconPermissionRead, IconPermissionEdit, IconPermissionPlan, IconPermissionFull } from './SettingsIcons'
-import { normalizePermissionMode } from '../types'
-import type { PermissionMode } from '../types'
+import { IconPermissionRead, IconPermissionEdit, IconPermissionPlan, IconPermissionFull, IconPermissionApprove } from './SettingsIcons'
+import { normalizePermissionChoice } from '../types'
+import type { PermissionChoice, PermissionMode } from '../types'
 import type { ComponentType } from 'react'
 
 /** i18n 文案键类型(zh 为源键集)。 */
@@ -14,7 +14,7 @@ const PERMISSION_KEY = 'denia.permission'
 /** 占位期默认 full 迁移标记:只把旧默认清一次,之后用户显式选 full 保留。 */
 const PERMISSION_MIGRATED_KEY = 'denia.permission.migrated'
 
-function loadPermission(): PermissionMode {
+function loadPermission(): PermissionChoice {
   const raw = window.localStorage.getItem(PERMISSION_KEY)
   if (raw === 'full' && !window.localStorage.getItem(PERMISSION_MIGRATED_KEY)) {
     // 占位期默认 full 且无实际约束;迁移到默认自动编辑。
@@ -27,7 +27,7 @@ function loadPermission(): PermissionMode {
     return 'auto-edit'
   }
   // 三档时代的 workspace-write 是 auto-edit 的旧名,直接映射。
-  return raw ? normalizePermissionMode(raw) : 'auto-edit'
+  return raw ? normalizePermissionChoice(raw) : 'auto-edit'
 }
 
 /** 四档权限的展示元数据:名称与描述均走 i18n。 */
@@ -43,8 +43,38 @@ export const PERMISSION_LEVELS: ReadonlyArray<{
   { level: 'full', icon: IconPermissionFull, nameKey: 'permissionFull', descKey: 'permissionFullDesc' },
 ]
 
-function levelMeta(level: PermissionMode) {
-  return PERMISSION_LEVELS.find((entry) => entry.level === level) ?? PERMISSION_LEVELS[1]
+/** 自动审批项:只有 Electron 宿主(能力探测通过)才展示。 */
+const APPROVE_FOR_ME_LEVEL: {
+  level: PermissionChoice
+  icon: ComponentType<{ size?: number }>
+  nameKey: MessageKey
+  descKey: MessageKey
+} = {
+  level: 'approve-for-me',
+  icon: IconPermissionApprove,
+  nameKey: 'permissionApproveForMe',
+  descKey: 'permissionApproveForMeDesc',
+}
+
+/** 选择器最终展示的档位:计划模式保留 Denia 原样,自动审批按需追加。 */
+function levelsFor(showApproveForMe: boolean): ReadonlyArray<{
+  level: PermissionChoice
+  icon: ComponentType<{ size?: number }>
+  nameKey: MessageKey
+  descKey: MessageKey
+}> {
+  if (!showApproveForMe) return PERMISSION_LEVELS
+  return [
+    PERMISSION_LEVELS[0]!,
+    PERMISSION_LEVELS[1]!,
+    APPROVE_FOR_ME_LEVEL,
+    PERMISSION_LEVELS[2]!,
+    PERMISSION_LEVELS[3]!,
+  ]
+}
+
+function levelMeta(level: PermissionChoice, levels: ReturnType<typeof levelsFor>) {
+  return levels.find((entry) => entry.level === level) ?? levels[1] ?? PERMISSION_LEVELS[1]!
 }
 
 /**
@@ -58,10 +88,13 @@ export function PermissionSelector({
   value,
   onChange,
   disabled,
+  showApproveForMe = false,
 }: {
-  value: PermissionMode
-  onChange: (level: PermissionMode) => void
+  value: PermissionChoice
+  onChange: (level: PermissionChoice) => void
   disabled?: boolean
+  /** Electron 宿主提供「自动审批」档位;Rust 宿主没有该能力。 */
+  showApproveForMe?: boolean
 }) {
   const [open, setOpen] = useState(false)
   // 浮层夹取:分屏窗格窄时,贴 chip 展开的菜单会被窗格裁掉(见 hook 注释)。
@@ -79,13 +112,14 @@ export function PermissionSelector({
     return () => document.removeEventListener('keydown', onKey)
   }, [open])
 
-  const selectPermission = (level: PermissionMode) => {
+  const selectPermission = (level: PermissionChoice) => {
     // 持久化由父级负责:完全访问档要先过风险确认,不能在这里提前落盘。
     onChange(level)
     setOpen(false)
   }
 
-  const active = levelMeta(value)
+  const levels = levelsFor(showApproveForMe)
+  const active = levelMeta(value, levels)
   const ActiveIcon = active.icon
   const activeLabel = t(active.nameKey)
 
@@ -112,7 +146,7 @@ export function PermissionSelector({
           <div className="menu-backdrop" onClick={() => setOpen(false)} />
           <div className="permission-menu" role="menu" aria-label={t('permissionLabel')} ref={menuRef} style={menuStyle}>
             <div className="permission-menu-heading">{t('permissionLabel')}</div>
-            {PERMISSION_LEVELS.map(({ level, icon: Icon, nameKey, descKey }) => {
+            {levels.map(({ level, icon: Icon, nameKey, descKey }) => {
               const selected = value === level
               return (
                 <button
@@ -154,7 +188,7 @@ export function hasStoredPermission(): boolean {
  * 落盘权限档位:设置里的默认档位保存后同步写入,让新草稿态的输入框
  * 立刻跟随新默认值(会话内仍以会话日志里的档位为准)。
  */
-export function storePermission(level: PermissionMode): void {
+export function storePermission(level: PermissionChoice): void {
   try {
     window.localStorage.setItem(PERMISSION_KEY, level)
     if (level === 'full') window.localStorage.setItem(PERMISSION_MIGRATED_KEY, '1')
