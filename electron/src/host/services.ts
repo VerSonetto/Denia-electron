@@ -18,12 +18,15 @@ import type { McpManager } from '../mcp/manager.ts'
 import type { SubagentPromptContext } from '../agent/system-prompt.ts'
 import type { SessionServices } from '../agent/loop.ts'
 import type { ToolContext } from '../tools/types.ts'
+import type { Tool } from '../tools/types.ts'
 import { textOutput } from '../tools/types.ts'
 import { McpListTool, McpTool } from '../tools/mcp.ts'
+import { createJobTools } from '../tools/jobs.ts'
+import type { JobManager } from '../jobs/manager.ts'
 import { legacyChildTools } from '../subagents/types.ts'
 import type { SubagentRuntime } from '../subagents/runtime.ts'
 import type { SessionStore } from '../session/store.ts'
-import { discoverSkills, renderEmptySkillCatalog, renderSkillCatalog } from '../skills/skills.ts'
+import { discoverSkills, loadSkill, renderEmptySkillCatalog, renderSkillCatalog } from '../skills/skills.ts'
 import {
   memoryRoot,
   readIndexForInjection,
@@ -38,6 +41,8 @@ import {
 export interface HostServicesOptions {
   mcp: McpManager
   subagents: SubagentRuntime
+  /** Background-job registry; absent in bare deployments and unit tests. */
+  jobs?: JobManager
   home: string
   store: SessionStore
   memoryEnabled?: boolean
@@ -49,6 +54,8 @@ export interface HostServicesOptions {
 export class HostServices implements SessionServices {
   private readonly mcp: McpManager
   private readonly subagents: SubagentRuntime
+  private readonly jobManager: JobManager | undefined
+  private readonly jobTools: Tool[]
   private readonly home: string
   private readonly store: SessionStore
   private readonly memoryEnabled: boolean
@@ -62,6 +69,8 @@ export class HostServices implements SessionServices {
   constructor(options: HostServicesOptions) {
     this.mcp = options.mcp
     this.subagents = options.subagents
+    this.jobManager = options.jobs
+    this.jobTools = options.jobs ? createJobTools(options.jobs) : []
     this.home = options.home
     this.store = options.store
     this.memoryEnabled = options.memoryEnabled ?? true
@@ -106,8 +115,17 @@ export class HostServices implements SessionServices {
       if (!this.allowed(header, schema.name)) continue
       out.push(schema)
     }
+    for (const tool of this.jobTools) {
+      if (!this.allowed(header, tool.schema.name)) continue
+      out.push(tool.schema)
+    }
     void state
     return out
+  }
+
+  /** The job manager, for the loop to hand down to the `bash` tool. */
+  get jobs(): JobManager | undefined {
+    return this.jobManager
   }
 
   intercept(call: ToolCallRef, sessionId: string): ToolOutput | undefined {
@@ -140,6 +158,8 @@ export class HostServices implements SessionServices {
         this.mcpToolOf(name, snapshot.descriptionOf(name), snapshot.schemaOf(name))
       return tool.execute(args, ctx)
     }
+    const jobTool = this.jobTools.find((tool) => tool.schema.name === name)
+    if (jobTool) return jobTool.execute(args, ctx)
     const result = await this.subagents.executeTool(name, args, {
       sessionId: ctx.sessionId,
       cwd: ctx.cwd,
@@ -151,6 +171,10 @@ export class HostServices implements SessionServices {
 
   drainInbox(sessionId: string): void {
     this.subagents.drainInbox(sessionId)
+  }
+
+  onTurnStart(sessionId: string): void {
+    this.subagents.onTurnStart(sessionId)
   }
 
   onTurnEnd(sessionId: string): void {
@@ -218,6 +242,23 @@ export class HostServices implements SessionServices {
 
   context(sessionId: string): SubagentPromptContext | null {
     return this.subagents.contextOf(sessionId)
+  }
+
+  /**
+   * Load a user-invocable skill body for `/skill-name` and explicit `/skill`
+   * selections. Unknown or model-only skills resolve to null: the gesture then
+   * stays plain text instead of failing the turn.
+   */
+  userSkill(sessionId: string, name: string): { name: string; source: string; body: string } | null {
+    const header = this.store.header(sessionId)
+    if (!header) return null
+    const skills = discoverSkills(this.home, header.cwd).skills
+    try {
+      const loaded = loadSkill(skills, name, true)
+      return { name: loaded.skill.name, source: loaded.skill.source, body: loaded.body }
+    } catch {
+      return null
+    }
   }
 
   selectionFor(sessionId: string): ModelSelection | undefined {

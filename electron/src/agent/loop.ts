@@ -51,6 +51,8 @@ import {
 import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.ts'
 import { deriveHistory, hasOpenTurn, lastTurn } from './history.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
+import { isValidSkillName } from '../skills/skills.ts'
+import type { JobManager } from '../jobs/manager.ts'
 
 const MAX_STEPS = 100
 const MAX_PARALLEL = 10
@@ -63,6 +65,8 @@ export interface StartTurnOptions {
   images?: ImageData[]
   /** Prompt origin, recorded for future trajectory tooling. */
   source?: string
+  /** User-invocable skills the composer collected (`/name` tokens). */
+  skills?: string[]
   /** Resume from the inbox: do not append an empty user message. */
   continueOnly?: boolean
 }
@@ -72,6 +76,10 @@ export interface StartTurnOptions {
  * subagent capability tools, MCP tools and the agent inbox.
  */
 export interface SessionServices {
+  /** Background-job registry handed to the `bash` tool (`run_in_background`). */
+  jobs?: JobManager
+  /** Load a user-invocable skill body (`/skill-name`); null when unknown. */
+  userSkill?(sessionId: string, name: string): { name: string; source: string; body: string } | null
   extraSchemas(sessionId: string, header: SessionHeader, state: PermissionState): ToolSchema[]
   executeExtra(
     name: string,
@@ -82,6 +90,8 @@ export interface SessionServices {
   intercept?(call: ToolCallRef, sessionId: string): ToolOutput | undefined
   /** Turn queued agent-inbox events into model-visible deliveries. */
   drainInbox?(sessionId: string): void
+  /** A human-initiated turn started: reset completion-wake budgets. */
+  onTurnStart?(sessionId: string): void
   /** A turn closed; settle subagents and wake pending inboxes. */
   onTurnEnd?(sessionId: string): void
   /** Extra system prompt sections (catalog, MCP discipline, memory). */
@@ -285,13 +295,47 @@ export class SessionDriver {
     let currentStep = 0
     append({ type: 'turn-start', turn })
     turnOpen = true
+    if (!options.continueOnly) this.services?.onTurnStart?.(sessionId)
     if (!options.continueOnly) {
+      const explicitSkills = [
+        ...new Set((options.skills ?? []).filter((name) => isValidSkillName(name))),
+      ]
+      const gesture = skillGesture(prompt)
+      const injected: { name: string; source: string; body: string; gesture: boolean }[] = []
+      for (const name of explicitSkills) {
+        const skill = this.services?.userSkill?.(sessionId, name)
+        if (skill) injected.push({ ...skill, gesture: false })
+      }
+      if (gesture !== null && !explicitSkills.includes(gesture)) {
+        const skill = this.services?.userSkill?.(sessionId, gesture)
+        if (skill) injected.push({ ...skill, gesture: true })
+      }
+      // Explicit selections come before the question; the `/name` gesture sits
+      // right after it (closest to the answer), mirroring the Rust ordering.
+      for (const skill of injected) {
+        if (skill.gesture) continue
+        append({
+          type: 'user-message',
+          text: `[用户显式调用技能：${skill.name}（来源：${skill.source}）]\n${skill.body}`,
+          injected: true,
+          channel: 'skill-invocation',
+        })
+      }
       append({
         type: 'user-message',
         text: prompt,
         injected: false,
         ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
       })
+      for (const skill of injected) {
+        if (!skill.gesture) continue
+        append({
+          type: 'user-message',
+          text: `[技能正文 ${skill.name}（来源：${skill.source}）]\n${skill.body}`,
+          injected: true,
+          channel: 'gesture-skill',
+        })
+      }
     }
 
     const signatures = new Map<string, number>()
@@ -419,6 +463,7 @@ export class SessionDriver {
           selection,
           permission,
           memoryRoot: this.services?.memoryRoot?.(sessionId, session.header) ?? null,
+          ...(this.services?.jobs ? { jobs: this.services.jobs } : {}),
           emit: (event) => {
             append(event)
           },
@@ -884,6 +929,14 @@ export class SessionDriver {
 
 export function isSessionBusy(events: Envelope[]): boolean {
   return hasOpenTurn(events)
+}
+
+/** First-line `/skill-name` gesture; only kebab-case names count. */
+function skillGesture(prompt: string): string | null {
+  const first = prompt.split('\n', 1)[0]?.trim() ?? ''
+  if (!first.startsWith('/')) return null
+  const name = first.slice(1)
+  return isValidSkillName(name) ? name : null
 }
 
 /** A write_file/edit call whose target sits inside the project memory dir. */

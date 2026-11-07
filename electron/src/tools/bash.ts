@@ -10,7 +10,7 @@ import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 
 import type { ToolContext } from './types.ts'
-import { expectString, optionalNumber, schema, textOutput, toolError } from './types.ts'
+import { expectString, optionalBoolean, optionalNumber, schema, textOutput, toolError } from './types.ts'
 
 export const DEFAULT_TIMEOUT_MS = 120_000
 export const MAX_TIMEOUT_MS = 600_000
@@ -66,7 +66,7 @@ export function shellChoice(): ShellChoice {
   return cachedShell
 }
 
-function killTree(child: ChildProcess): void {
+export function killTree(child: ChildProcess): void {
   if (child.exitCode !== null || child.killed) return
   if (process.platform === 'win32' && child.pid !== undefined) {
     spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
@@ -95,12 +95,33 @@ export const BashTool = {
           maximum: MAX_TIMEOUT_MS,
           description: '超时时间(毫秒),默认 120000,最大 600000。',
         },
+        run_in_background: {
+          type: 'boolean',
+          description: '后台执行并立即返回任务 id;用 job_output 读取输出、job_kill 停止。',
+        },
       },
       required: ['command'],
     },
   ),
   async execute(args: Record<string, unknown>, ctx: ToolContext) {
     const command = expectString(args, 'command')
+    if (optionalBoolean(args, 'run_in_background') === true) {
+      if (!ctx.jobs) {
+        return toolError('当前部署未启用后台任务;请直接用前台 bash,或把长任务拆成更小的命令。')
+      }
+      try {
+        const job = ctx.jobs.start({
+          owner: ctx.sessionId,
+          cwd: ctx.cwd,
+          command,
+          ...(ctx.permission ? { permission: ctx.permission } : {}),
+          cancel: ctx.cancel,
+        })
+        return textOutput(JSON.stringify(job))
+      } catch (error) {
+        return toolError(error instanceof Error ? error.message : String(error))
+      }
+    }
     const timeoutMs = Math.min(
       MAX_TIMEOUT_MS,
       Math.max(1, Math.round(optionalNumber(args, 'timeout_ms') ?? DEFAULT_TIMEOUT_MS)),

@@ -48,6 +48,8 @@ import { ToolRegistry } from '../tools/index.ts'
 import { ServerApprovalBridge } from './approval-bridge.ts'
 import { HostServices } from './services.ts'
 import { SkillTool } from '../tools/skill.ts'
+import { JOB_TOOL_NAMES } from '../tools/jobs.ts'
+import { JOB_OUTPUT_CAP, JobManager } from '../jobs/manager.ts'
 import { McpManager } from '../mcp/manager.ts'
 import type { McpServerConfig } from '../mcp/config.ts'
 import {
@@ -327,14 +329,44 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     append: (sessionId, event) => store.append(sessionId, event),
     permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
   }, { maxConcurrentRuns: subagentPolicyConcurrency(home) })
+  const jobs = new JobManager({
+    onDone: (job) => {
+      // The completion notice is enqueued as an inbox event and only becomes
+      // model-visible at the next step boundary, so a busy turn is never
+      // interrupted mid-action.
+      let text = `[后台任务完成]\n${JSON.stringify(jobs.peek(job.id, job.owner))}`
+      if (text.length > JOB_OUTPUT_CAP) {
+        text = `${Array.from(text).slice(0, JOB_OUTPUT_CAP).join('')}\n（后台任务结果已截断，完整输出请用 job_output 读取。）`
+      }
+      try {
+        subagents.enqueue(job.owner, `job:${job.id}`, text, 'job-completed')
+      } catch {
+        // The owning session is gone; the result stays readable while retained.
+      }
+    },
+  })
   const describedToolNames = (): string[] =>
     [...new Set([
       ...registry.names(),
       ...subagentCapabilityNames(),
+      ...JOB_TOOL_NAMES,
       ...mcp.snapshot().toolNames(),
     ])].sort()
   subagents.setToolNames(describedToolNames)
-  driver.attachServices(new HostServices({ mcp, subagents, home, store }))
+  // A settled child must not leave background processes behind: they belong to
+  // the child's lifetime, and the notice lists what was cancelled.
+  subagents.setJobCleaner((sessionId) => jobs.removeOwner(sessionId))
+  driver.attachServices(new HostServices({ mcp, subagents, jobs, home, store }))
+
+  // Startup recovery: results enqueued before the host stopped are still in the
+  // session log; replay recent child completions and wake their sessions.
+  setImmediate(() => {
+    try {
+      for (const summary of store.list()) subagents.recover(summary.id)
+    } catch (error) {
+      console.error('[denia] 完成结果恢复失败:', errorMessage(error))
+    }
+  })
 
   const saveWorkspaces = (): void => {
     fs.writeFileSync(workspacesPath(home), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
@@ -463,6 +495,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           return
         }
         subagents.removeOwner(sessionId)
+        jobs.removeOwner(sessionId)
         store.flush(sessionId)
         store.delete(sessionId)
         for (const workspace of Object.values(workspaces.workspaces)) {
@@ -506,9 +539,18 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
               }
             : undefined
         const images = parseImages(body.images)
+        const skills = Array.isArray(body.skills)
+          ? [...new Set(
+              body.skills
+                .filter((name): name is string => typeof name === 'string')
+                .map((name) => name.trim())
+                .filter((name) => name !== ''),
+            )]
+          : []
         void driver.startTurn(sessionId, prompt, {
           ...(selection ? { selection } : {}),
           ...(images.length > 0 ? { images } : {}),
+          ...(skills.length > 0 ? { skills } : {}),
           ...(typeof body.source === 'string' ? { source: body.source } : {}),
         })
         void scheduleSessionTitle({
@@ -773,8 +815,27 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest === '/jobs' && method === 'GET') {
-        json(res, 200, { jobs: [] })
+        json(res, 200, { jobs: jobs.list(sessionId) })
         return
+      }
+      const jobMatch = /^\/jobs\/([^/]+)\/(output|kill)$/.exec(rest)
+      if (jobMatch) {
+        const jobId = jobMatch[1]!
+        const action = jobMatch[2]
+        try {
+          if (action === 'output' && method === 'GET') {
+            json(res, 200, jobs.peek(jobId, sessionId))
+            return
+          }
+          if (action === 'kill' && method === 'POST') {
+            jobs.kill(jobId, sessionId)
+            json(res, 200, { ok: true })
+            return
+          }
+        } catch (error) {
+          apiError(res, 400, 'job/not-found', errorMessage(error))
+          return
+        }
       }
       notImplemented(res, pathname)
       return

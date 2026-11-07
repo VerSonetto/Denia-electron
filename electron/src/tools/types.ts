@@ -5,6 +5,19 @@ import path from 'node:path'
 import type { ModelSelection, SessionEvent, ToolOutput, ToolSchema } from '../core/wire.ts'
 import type { PermissionState } from '../core/permission.ts'
 
+/** The slice of the job manager the `bash` tool needs for background runs. */
+export interface BackgroundJobs {
+  start(input: {
+    owner: string
+    cwd: string
+    command: string
+    label?: string
+    timeoutMs?: number
+    permission?: PermissionState
+    cancel?: AbortSignal
+  }): unknown
+}
+
 export interface ToolContext {
   sessionId: string
   /** The model call this execution belongs to (used by live output events). */
@@ -20,6 +33,8 @@ export interface ToolContext {
   permission?: PermissionState
   /** Project memory directory (writes here are harness behavior). */
   memoryRoot?: string | null
+  /** Background-job manager, when the deployment has one. */
+  jobs?: BackgroundJobs
   /** Log-only event sink (todo snapshots, live bash output). */
   emit(event: SessionEvent): void
 }

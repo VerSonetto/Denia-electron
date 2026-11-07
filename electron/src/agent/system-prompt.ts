@@ -91,6 +91,12 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
       '- Use `bash` for builds, tests, git and other commands. Do not claim a command passed unless it actually ran and its exit code was 0.',
     )
   }
+  if (hasTool(options.tools, 'job_start')) {
+    lines.push(
+      '- Long-running work belongs in `job_start`: it returns a job id immediately. `job_output` returns the current output right away and `job_kill` stops the job. Do not poll or sleep to wait — the completion result is delivered automatically at the next step, and `pending` / `ready` never mean success or failure.',
+      '- Background commands are not an exploration tool: listing, searching and reading still use `ls` / `glob` / `grep` / `read_file`; the same holds for `job_start` when `bash` is unavailable.',
+    )
+  }
   lines.push(
     '- Keep the user informed: short progress notes between tool batches are welcome; do not narrate every internal thought.',
     '- Do not invent files, APIs or results. If something is unknown, inspect it or say so.',

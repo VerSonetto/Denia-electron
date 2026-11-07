@@ -114,6 +114,10 @@ export interface SubagentHandoff {
 
 const DEFAULT_CATALOG_BYTES = 8192
 const DEFAULT_OUTPUT_BYTES = 64 * 1024
+/** Automatic wakes in a row before waiting for a human turn to reset the budget. */
+const MAX_CONSECUTIVE_WAKES = 3
+/** Startup replay window: older child completions are history, not pending work. */
+const RECOVERY_WINDOW_MS = 10 * 60 * 1000
 const CATALOG_HEADER = '[denia 子代理目录]'
 const CATALOG_DISCIPLINE = [
   '',
@@ -131,6 +135,8 @@ export class SubagentRuntime {
   private readonly outputBytes: number
   private readonly children = new Map<string, Child>()
   private readonly paused = new Set<string>()
+  private readonly wakeAttempts = new Map<string, number>()
+  private jobCleaner: ((sessionId: string) => string[]) | undefined
 
   constructor(
     store: SessionStore,
@@ -363,6 +369,14 @@ export class SubagentRuntime {
     this.toolNames = names
   }
 
+  /**
+   * Host hook used when a child settles or is stopped: every background job it
+   * started is shut down, and the cancelled labels are reported to the parent.
+   */
+  setJobCleaner(cleaner: (sessionId: string) => string[]): void {
+    this.jobCleaner = cleaner
+  }
+
   // —— inbox / delivery ——
 
   enqueue(target: string, id: string, text: string, source: string): string {
@@ -375,6 +389,7 @@ export class SubagentRuntime {
     }
     if (delivered.has(id)) return id
     if (source.startsWith('agent:')) this.paused.delete(target)
+    this.wakeAttempts.delete(target)
     this.store.append(target, { type: 'agent-inbox', id, text, source })
     this.store.flush(target)
     this.wake(target)
@@ -417,6 +432,11 @@ export class SubagentRuntime {
   wake(sessionId: string): void {
     if (this.paused.has(sessionId) || this.port.isRunning(sessionId)) return
     if (!this.hasPending(sessionId)) return
+    // A pending result that keeps failing to drain must not spin forever; the
+    // budget resets on the next human turn (or the next explicit message).
+    const attempts = this.wakeAttempts.get(sessionId) ?? 0
+    if (attempts >= MAX_CONSECUTIVE_WAKES) return
+    this.wakeAttempts.set(sessionId, attempts + 1)
     void this.port
       .startTurn(sessionId, '', { continueOnly: true })
       .then(() => this.onIdle(sessionId))
@@ -426,6 +446,7 @@ export class SubagentRuntime {
   }
 
   onTurnStart(sessionId: string): void {
+    this.wakeAttempts.delete(sessionId)
     if (this.store.header(sessionId)?.subagent) this.paused.delete(sessionId)
   }
 
@@ -441,26 +462,67 @@ export class SubagentRuntime {
     if (this.hasPending(sessionId)) this.wake(sessionId)
   }
 
+  /**
+   * Startup recovery: replay a recent child completion and wake any session
+   * whose inbox still holds undelivered results. Older history is left alone
+   * so a restart never re-announces stale subagents.
+   */
+  recover(sessionId: string): void {
+    const header = this.store.header(sessionId)
+    if (!header) return
+    if (header.subagent) {
+      const session = this.store.read(sessionId)
+      const lastEnd = session ? this.lastTurnEnd(session.events) : null
+      if (lastEnd && Date.now() - lastEnd.time <= RECOVERY_WINDOW_MS) {
+        this.captureCompletion(sessionId)
+      }
+    }
+    if (this.hasPending(sessionId)) this.wake(sessionId)
+  }
+
   // —— completion capture ——
+
+  private lastTurnEnd(events: Envelope[]): Extract<Envelope, { type: 'turn-end' }> | null {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!
+      if (event.type === 'turn-end') return event
+    }
+    return null
+  }
+
+  /** Cancel jobs the child left running; returns their labels for the notice. */
+  private cleanJobs(sessionId: string): string[] {
+    try {
+      return this.jobCleaner?.(sessionId) ?? []
+    } catch {
+      return []
+    }
+  }
 
   private captureCompletion(childId: string): void {
     const child = this.childOf(childId)
     if (!child) return
-    const session = this.store.read(childId)
+    let session = this.store.read(childId)
     if (!session || this.port.isRunning(childId)) return
-    const events = session.events
-    let lastEnd: Extract<Envelope, { type: 'turn-end' }> | null = null
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]!
-      if (event.type === 'turn-end') {
-        lastEnd = event
-        break
-      }
+    let events = session.events
+    let lastEnd = this.lastTurnEnd(events)
+    if (!lastEnd) {
+      // A child can stop without a closing turn-end (host shutdown, killed
+      // process). Record one so the parent still receives the result.
+      const open = openTurnOf(events)
+      if (open === null) return
+      this.store.append(childId, { type: 'turn-end', turn: open, reason: { kind: 'interrupted' } })
+      this.store.flush(childId)
+      session = this.store.read(childId)
+      if (!session) return
+      events = session.events
+      lastEnd = this.lastTurnEnd(events)
+      if (!lastEnd) return
     }
-    if (!lastEnd) return
+    const cancelled = this.cleanJobs(childId)
     const handoff = this.handoffOf(child, events, false)
     const body = this.lastAssistantText(events, lastEnd.turn)
-    const notice = this.noticeText(handoff, body)
+    const notice = this.noticeText(handoff, body, cancelled)
     const noticeId = `settled:${childId}:turn:${lastEnd.turn}:seq:${lastEnd.seq}`
     try {
       this.enqueue(child.parentId, noticeId, notice, 'subagent-settled')
@@ -604,6 +666,7 @@ export class SubagentRuntime {
     }
     this.paused.add(target)
     this.port.cancel(target)
+    this.cleanJobs(target)
   }
 
   ensureRemovable(owner: string): void {
@@ -615,6 +678,7 @@ export class SubagentRuntime {
   removeOwner(owner: string): void {
     const descendants = this.descendants(owner).reverse()
     for (const child of descendants) {
+      this.cleanJobs(child.id)
       this.paused.delete(child.id)
       this.store.delete(child.id)
       this.children.delete(child.id)
@@ -965,7 +1029,7 @@ export class SubagentRuntime {
     }
   }
 
-  private noticeText(handoff: SubagentHandoff, body: string): string {
+  private noticeText(handoff: SubagentHandoff, body: string, cancelled: string[] = []): string {
     const changed = handoff.changedPaths.length === 0 ? '（无）' : handoff.changedPaths.join('、')
     const reason = handoff.terminal.reason ?? '未知（没有终态事件）'
     const lines = [
@@ -977,6 +1041,11 @@ export class SubagentRuntime {
       `变更文件：${changed}`,
       '产物：（无）',
       `验证：${handoff.verificationNote}`,
+      ...(cancelled.length > 0
+        ? [
+            `[已取消的子代理后台工作] 共 ${cancelled.length} 项未完成，宿主已要求终止并清理（长时间服务应交回主代理启动）：${cancelled.join('、')}`,
+          ]
+        : []),
       `结果引用：会话 ${handoff.id} 的日志与产物（read_tool_output 只能读本会话，父代理需要全文时用 wait_agent 查看该子代理）`,
       ...handoff.advisories,
       `变更文件口径：${handoff.changedPathsNote}`,
@@ -1046,6 +1115,16 @@ function parseModelChoice(raw: unknown): SubagentProfile['model'] {
         : {}),
     },
   }
+}
+
+/** Turn number of the last unclosed turn-start, or null when everything closed. */
+function openTurnOf(events: Envelope[]): number | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.type === 'turn-end') return null
+    if (event.type === 'turn-start') return event.turn
+  }
+  return null
 }
 
 function terminalOf(
