@@ -20,6 +20,7 @@ import type { SubagentPromptContext } from '../agent/system-prompt.ts'
 import type { SessionServices } from '../agent/loop.ts'
 import type { ToolContext } from '../tools/types.ts'
 import type { Tool } from '../tools/types.ts'
+import type { FileHistoryBackend } from '../tools/types.ts'
 import { textOutput } from '../tools/types.ts'
 import { McpListTool, McpTool } from '../tools/mcp.ts'
 import { createJobTools } from '../tools/jobs.ts'
@@ -27,6 +28,7 @@ import type { JobManager } from '../jobs/manager.ts'
 import { legacyChildTools } from '../subagents/types.ts'
 import type { SubagentRuntime } from '../subagents/runtime.ts'
 import type { SessionStore } from '../session/store.ts'
+import type { FileHistoryStore } from '../session/file-history.ts'
 import { discoverSkills, loadSkill, renderEmptySkillCatalog, renderSkillCatalog } from '../skills/skills.ts'
 import {
   memoryRoot,
@@ -46,6 +48,8 @@ export interface HostServicesOptions {
   jobs?: JobManager
   home: string
   store: SessionStore
+  /** File rewind history shared by tool backups and the HTTP rewind routes. */
+  fileHistory: FileHistoryStore
   /** Current permission state for runtime-context snapshots. */
   permissionStateOf: (sessionId: string) => PermissionState
   memoryEnabled?: boolean
@@ -61,6 +65,7 @@ export class HostServices implements SessionServices {
   private readonly jobTools: Tool[]
   private readonly home: string
   private readonly store: SessionStore
+  private readonly fileHistoryStore: FileHistoryStore
   private readonly permissionStateOf: (sessionId: string) => PermissionState
   private readonly memoryEnabled: boolean
   private readonly memoryIndexMaxBytes: number
@@ -77,6 +82,7 @@ export class HostServices implements SessionServices {
     this.jobTools = options.jobs ? createJobTools(options.jobs) : []
     this.home = options.home
     this.store = options.store
+    this.fileHistoryStore = options.fileHistory
     this.permissionStateOf = options.permissionStateOf
     this.memoryEnabled = options.memoryEnabled ?? true
     this.memoryIndexMaxBytes = options.memoryIndexMaxBytes ?? 25_600
@@ -176,6 +182,14 @@ export class HostServices implements SessionServices {
 
   drainInbox(sessionId: string): void {
     this.subagents.drainInbox(sessionId)
+  }
+
+  fileSnapshot(sessionId: string, cwd: string, messageSeq: number): void {
+    this.fileHistoryStore.snapshot(sessionId, cwd, messageSeq)
+  }
+
+  fileHistory(sessionId: string, cwd: string): FileHistoryBackend {
+    return this.fileHistoryStore.backend(sessionId, cwd)
   }
 
   onTurnStart(sessionId: string): void {

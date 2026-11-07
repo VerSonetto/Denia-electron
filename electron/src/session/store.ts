@@ -28,6 +28,12 @@ interface SummaryCache {
   summary: SessionSummary
 }
 
+export interface RewindOutcome {
+  toSeq: number
+  toMessage: string
+  removedEvents: number
+}
+
 class LogWriter {
   private readonly file: string
   private buffer: string[] = []
@@ -47,7 +53,9 @@ class LogWriter {
 
   flush(): void {
     if (this.buffer.length === 0) return
-    const payload = this.buffer.join('') + '\n'
+    // One JSON envelope per line: joining without the separator would merge
+    // buffered events into an unparsable line (and drop them on reload).
+    const payload = this.buffer.join('\n') + '\n'
     this.buffer = []
     this.bytes = 0
     fs.appendFileSync(this.file, payload, 'utf8')
@@ -217,6 +225,49 @@ export class SessionStore {
     return { header: session.header, events: [...session.events] }
   }
 
+  /**
+   * Physically truncate the log just before `toSeq`, which must be a
+   * non-injected user message (a checkpoint). The cut removes that message and
+   * everything after it; the caller restores file history first.
+   */
+  rewind(id: string, toSeq: number): RewindOutcome {
+    const session = this.live.get(id) ?? this.load(id)
+    if (!session) throw new Error(`会话不存在: ${id}`)
+    if (!Number.isInteger(toSeq) || toSeq <= 0) throw new Error('回退点必须是正整数 seq')
+    const index = session.events.findIndex((event) => event.seq === toSeq)
+    if (index < 0) throw new Error(`回退点不存在: seq ${toSeq}`)
+    const target = session.events[index]!
+    if (target.type !== 'user-message' || target.injected) {
+      throw new Error('只能回退到用户消息')
+    }
+    // Flush buffered envelopes first: the truncation offset is computed from
+    // the file bytes, so every retained line must already be on disk.
+    session.writer.flush()
+    const file = this.logFile(id)
+    const before = session.events.length
+    const removedEvents = before - index
+    session.events.splice(index)
+    // Older logs wrote `turn-start` before the user message. Cutting at the
+    // message would leave that turn open, so close it: drop the stale turn
+    // head (nothing of that turn survived) or mark a mid-turn cut interrupted.
+    const synthesized = closeRewoundTail(session.events)
+    const lastSeq = session.events[session.events.length - 1]?.seq
+    const cut = synthesized || lastSeq === undefined
+      ? null
+      : truncateOffsetOf(file, lastSeq)
+    if (cut !== null) {
+      fs.truncateSync(file, cut)
+    } else {
+      // Logs written by older builds could contain several envelopes on one
+      // line (the writer used to join its buffer without newlines), so the
+      // target cannot be located by scanning. Rewrite the retained events into
+      // a canonical one-envelope-per-line file instead.
+      rewriteLog(file, session.header, session.events)
+    }
+    this.cache.delete(id)
+    return { toSeq, toMessage: target.text, removedEvents }
+  }
+
   readPage(id: string, before?: number, limit = 500): SessionPage | null {
     const session = this.load(id)
     if (!session) return null
@@ -329,6 +380,7 @@ export class SessionStore {
     const summary: SessionSummary = {
       id,
       created_at: header.created_at,
+      updated_at: stat.mtimeMs,
       excerpt,
       title,
       cwd: header.cwd,
@@ -354,6 +406,81 @@ function readFirstLine(file: string): string | null {
   } finally {
     fs.closeSync(fd)
   }
+}
+
+/**
+ * Byte offset just after the line carrying `seq`. Torn or unparsable lines are
+ * skipped: the target is found by its parsed envelope, not by line number.
+ */
+function truncateOffsetOf(file: string, seq: number): number | null {
+  const buffer = fs.readFileSync(file)
+  const matches = (start: number, end: number): boolean => {
+    if (end <= start) return false
+    try {
+      const parsed = JSON.parse(buffer.subarray(start, end).toString('utf8')) as {
+        seq?: unknown
+      }
+      return parsed.seq === seq
+    } catch {
+      return false
+    }
+  }
+  let lineStart = 0
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] !== 0x0a) continue
+    if (matches(lineStart, index)) return index + 1
+    lineStart = index + 1
+  }
+  // A crash can leave the target as the final line without a trailing newline.
+  if (lineStart < buffer.length && matches(lineStart, buffer.length)) return buffer.length
+  return null
+}
+
+/** Canonical one-envelope-per-line rewrite, used when the old file cannot be
+ *  cut at a line boundary. */
+function rewriteLog(file: string, header: SessionHeader, events: Envelope[]): void {
+  const lines = [JSON.stringify(header), ...events.map((event) => JSON.stringify(event))]
+  const temporary = `${file}.rewrite.tmp`
+  fs.writeFileSync(temporary, lines.join('\n') + '\n', 'utf8')
+  fs.renameSync(temporary, file)
+}
+
+/**
+ * Close a trailing open turn left by the cut. Returns true when a synthetic
+ * `turn-end` was appended (so the log must be rewritten rather than truncated).
+ *
+ * Two shapes exist:
+ * - old-format cut (turn-start before the user message): nothing from that turn
+ *   survives, so drop the opening marker and the injected input before it;
+ * - mid-turn cut (a steering message): earlier steps are still in the branch,
+ *   so close the turn as interrupted instead of deleting those messages.
+ */
+function closeRewoundTail(events: Envelope[]): boolean {
+  let open = -1
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]!
+    if (event.type === 'turn-start') open = index
+    else if (event.type === 'turn-end') open = -1
+  }
+  if (open < 0) return false
+  const start = events[open]
+  if (start?.type !== 'turn-start') return false
+  const hasSteps = events
+    .slice(open + 1)
+    .some((event) => event.type === 'step-start')
+  if (!hasSteps) {
+    events.length = open
+    return false
+  }
+  const last = events[events.length - 1]!
+  events.push({
+    seq: last.seq + 1,
+    time: Date.now(),
+    type: 'turn-end',
+    turn: start.turn,
+    reason: { kind: 'interrupted' },
+  })
+  return true
 }
 
 function readEnvelopes(file: string): Envelope[] {

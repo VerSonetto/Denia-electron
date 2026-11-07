@@ -44,6 +44,7 @@ import { streamFor } from '../llm/index.ts'
 import type { Envelope, ImageData, ModelSelection, SessionEvent, ToolCallRef } from '../core/wire.ts'
 import { errorMessage, isRecord } from '../core/util.ts'
 import { SessionStore } from '../session/store.ts'
+import { FileHistoryStore } from '../session/file-history.ts'
 import { ToolRegistry } from '../tools/index.ts'
 import { ServerApprovalBridge } from './approval-bridge.ts'
 import { HostServices } from './services.ts'
@@ -246,6 +247,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
 
   let config = loadConfig(home)
   const store = new SessionStore(home)
+  const fileHistory = new FileHistoryStore(home)
   const registry = ToolRegistry.builtin()
   registry.register(new SkillTool(home))
   const workspaces = loadWorkspaces(home)
@@ -394,6 +396,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     jobs,
     home,
     store,
+    fileHistory,
     permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
   }))
 
@@ -533,6 +536,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         jobs.removeOwner(sessionId)
         store.flush(sessionId)
         store.delete(sessionId)
+        fileHistory.forget(sessionId)
         for (const workspace of Object.values(workspaces.workspaces)) {
           workspace.sessionIds = workspace.sessionIds.filter((id) => id !== sessionId)
         }
@@ -806,7 +810,75 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest === '/checkpoints' && method === 'GET') {
-        json(res, 200, { checkpoints: [] })
+        const session = store.read(sessionId)
+        if (!session) {
+          apiError(res, 404, 'session/not-found', 'session not found')
+          return
+        }
+        const checkpoints: { seq: number; time: number; text: string }[] = []
+        for (const event of session.events) {
+          if (event.type !== 'user-message' || event.injected) continue
+          checkpoints.push({ seq: event.seq, time: event.time, text: event.text })
+        }
+        json(res, 200, { checkpoints })
+        return
+      }
+      const checkpointDiff = /^\/checkpoints\/(\d+)\/diff$/.exec(rest)
+      if (checkpointDiff && method === 'GET') {
+        const header = store.header(sessionId)!
+        const seq = Number(checkpointDiff[1])
+        try {
+          json(res, 200, { changes: fileHistory.diff(sessionId, header.cwd, seq) })
+        } catch (error) {
+          apiError(res, 400, 'file-history/diff', errorMessage(error))
+        }
+        return
+      }
+      if (rest === '/rewind' && method === 'POST') {
+        if (driver.isRunning(sessionId)) {
+          apiError(res, 409, 'session/running', 'cancel the running turn before rewinding')
+          return
+        }
+        const body = await readJson(req)
+        const toSeq = typeof body.toSeq === 'number' ? body.toSeq : Number.NaN
+        if (!Number.isInteger(toSeq) || toSeq <= 0) {
+          apiError(res, 400, 'session/not-rewind-point', '回退点必须是正整数 seq')
+          return
+        }
+        // Validate the target before touching files: a rejected rewind must not
+        // restore half the workspace.
+        const target = store.read(sessionId)?.events.find((event) => event.seq === toSeq)
+        if (!target || target.type !== 'user-message' || target.injected) {
+          apiError(res, 400, 'session/not-rewind-point', '只能回退到用户消息')
+          return
+        }
+        const header = store.header(sessionId)!
+        let changedFiles: string[]
+        try {
+          // Files first: if restoring fails the conversation log is untouched.
+          changedFiles = fileHistory.rewind(sessionId, header.cwd, toSeq)
+        } catch (error) {
+          apiError(res, 400, 'file-history/rewind', errorMessage(error))
+          return
+        }
+        let outcome
+        try {
+          outcome = store.rewind(sessionId, toSeq)
+        } catch (error) {
+          apiError(res, 400, 'session/rewind', errorMessage(error))
+          return
+        }
+        // The removed branch may have left paused flags or auto-wake budgets;
+        // both point at events that no longer exist on the new branch.
+        subagents.onSessionRewound(sessionId)
+        broadcast({ type: 'sessions-updated' })
+        json(res, 200, {
+          ok: true,
+          toSeq: outcome.toSeq,
+          toMessage: outcome.toMessage,
+          removedEvents: outcome.removedEvents,
+          changedFiles,
+        })
         return
       }
       if (rest === '/skills' && method === 'GET') {

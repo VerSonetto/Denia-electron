@@ -33,7 +33,7 @@ import { errorMessage, truncateChars } from '../core/util.ts'
 import { streamFor } from '../llm/index.ts'
 import type { SessionStore } from '../session/store.ts'
 import type { ToolRegistry } from '../tools/index.ts'
-import type { ToolContext } from '../tools/types.ts'
+import type { ToolContext, FileHistoryBackend } from '../tools/types.ts'
 import { toolError } from '../tools/types.ts'
 import type { SubagentPromptContext } from './system-prompt.ts'
 import type {
@@ -90,6 +90,10 @@ export interface SessionServices {
   intercept?(call: ToolCallRef, sessionId: string): ToolOutput | undefined
   /** Turn queued agent-inbox events into model-visible deliveries. */
   drainInbox?(sessionId: string): void
+  /** Pin file state to a user message so it can be rewound to later. */
+  fileSnapshot?(sessionId: string, cwd: string, messageSeq: number): void
+  /** Backup handle handed to write/edit for the current turn. */
+  fileHistory?(sessionId: string, cwd: string): FileHistoryBackend
   /** A human-initiated turn started: reset completion-wake budgets. */
   onTurnStart?(sessionId: string): void
   /** A turn closed; settle subagents and wake pending inboxes. */
@@ -293,8 +297,6 @@ export class SessionDriver {
     }
 
     let currentStep = 0
-    append({ type: 'turn-start', turn })
-    turnOpen = true
     if (!options.continueOnly) this.services?.onTurnStart?.(sessionId)
     if (!options.continueOnly) {
       const explicitSkills = [
@@ -321,12 +323,22 @@ export class SessionDriver {
           channel: 'skill-invocation',
         })
       }
-      append({
+      const userEnvelope = append({
         type: 'user-message',
         text: prompt,
         injected: false,
         ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
       })
+      // Pin the pre-turn file state to this message so a rewind restores the
+      // exact bytes the turn started from. Snapshot failure is logged but does
+      // not abort the turn (the checkpoint simply has no file history).
+      if (userEnvelope) {
+        try {
+          this.services?.fileSnapshot?.(sessionId, session.header.cwd, userEnvelope.seq)
+        } catch (error) {
+          console.warn('[denia] 文件历史快照失败:', errorMessage(error))
+        }
+      }
       for (const skill of injected) {
         if (!skill.gesture) continue
         append({
@@ -337,6 +349,12 @@ export class SessionDriver {
         })
       }
     }
+
+    // The user's message is the rewind point, so it must precede `turn-start`:
+    // truncating at that seq keeps no half-open turn behind, mirroring the
+    // Rust event order.
+    append({ type: 'turn-start', turn })
+    turnOpen = true
 
     const signatures = new Map<string, number>()
 
@@ -480,6 +498,9 @@ export class SessionDriver {
           permission,
           memoryRoot: this.services?.memoryRoot?.(sessionId, session.header) ?? null,
           ...(this.services?.jobs ? { jobs: this.services.jobs } : {}),
+          ...(this.services?.fileHistory
+            ? { fileHistory: this.services.fileHistory(sessionId, session.header.cwd) }
+            : {}),
           emit: (event) => {
             append(event)
           },

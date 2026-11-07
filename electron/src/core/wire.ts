@@ -251,6 +251,8 @@ export interface SessionHeader {
 export interface SessionSummary {
   id: string
   created_at: number
+  /** 最近一次活动时间（会话日志 mtime）；侧栏按它排序与显示相对时间。 */
+  updated_at?: number
   excerpt: string | null
   title: string | null
   cwd?: string

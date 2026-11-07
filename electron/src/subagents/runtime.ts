@@ -460,6 +460,16 @@ export class SubagentRuntime {
     if (this.store.header(sessionId)?.subagent) this.paused.delete(sessionId)
   }
 
+  /**
+   * A physical log truncation invalidated the removed branch's queued work:
+   * drop the pause mark and auto-wake budget that were accounted against it.
+   * Pending inbox entries need no reset — they are re-scanned from the log.
+   */
+  onSessionRewound(sessionId: string): void {
+    this.paused.delete(sessionId)
+    this.wakeAttempts.delete(sessionId)
+  }
+
   onTurnEnd(sessionId: string): void {
     const header = this.store.header(sessionId)
     if (!header) return

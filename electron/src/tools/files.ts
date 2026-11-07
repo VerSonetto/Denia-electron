@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { ToolContext } from './types.ts'
+import type { ToolOutput } from '../core/wire.ts'
 import {
   expectString,
   optionalBoolean,
@@ -23,6 +24,23 @@ const MAX_LINE_CHARS = 4000
 function guardLine(line: string): string {
   if (line.length <= MAX_LINE_CHARS) return line
   return line.slice(0, MAX_LINE_CHARS) + '…[本行超长,已截断]'
+}
+
+/**
+ * Back up the file before a write tool changes it. A failed backup aborts the
+ * write: proceeding would leave the rewind history unable to restore the file.
+ */
+function backupBeforeWrite(file: string, ctx: ToolContext): ToolOutput | null {
+  if (!ctx.fileHistory) return null
+  try {
+    ctx.fileHistory.trackBeforeWrite(file)
+    return null
+  } catch (error) {
+    return toolError(
+      `文件历史备份失败:${error instanceof Error ? error.message : String(error)}`,
+      '备份失败时不会写入;可重试一次,持续失败请报告',
+    )
+  }
 }
 
 export const ReadFileTool = {
@@ -98,6 +116,8 @@ export const WriteFileTool = {
         '相对路径锚定会话工作区;沙箱开启时不能写工作区之外的路径',
       )
     }
+    const backupError = backupBeforeWrite(file, ctx)
+    if (backupError) return backupError
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true })
       fs.writeFileSync(file, content, 'utf8')
@@ -237,6 +257,8 @@ export const EditTool = {
           ? working.split(spec.old_string).join(spec.new_string)
           : working.slice(0, index) + spec.new_string + working.slice(index + spec.old_string.length)
     }
+    const backupError = backupBeforeWrite(file, ctx)
+    if (backupError) return backupError
     try {
       fs.writeFileSync(file, working, 'utf8')
     } catch (error) {

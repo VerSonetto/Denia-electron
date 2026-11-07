@@ -18,6 +18,12 @@ export interface BackgroundJobs {
   }): unknown
 }
 
+/** Backups taken by the host right before a write tool overwrites a file. */
+export interface FileHistoryBackend {
+  /** Throws when the original file could not be backed up; the write must not proceed. */
+  trackBeforeWrite(file: string): void
+}
+
 export interface ToolContext {
   sessionId: string
   /** The model call this execution belongs to (used by live output events). */
@@ -35,6 +41,8 @@ export interface ToolContext {
   memoryRoot?: string | null
   /** Background-job manager, when the deployment has one. */
   jobs?: BackgroundJobs
+  /** File-history backend: back up the original bytes before a write tool runs. */
+  fileHistory?: FileHistoryBackend
   /** Log-only event sink (todo snapshots, live bash output). */
   emit(event: SessionEvent): void
 }
