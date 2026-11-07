@@ -257,6 +257,7 @@ export interface SessionSummary {
   sandbox?: boolean
   cwd_alive?: boolean
   parent_session?: string
+  subagent?: SubagentDescriptor
   agent_preset?: string
 }
 

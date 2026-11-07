@@ -63,6 +63,10 @@ export interface SubagentRuntimeOptions {
   maxConcurrentRuns?: number
   catalogMaxBytes?: number
   outputBytes?: number
+  /** The child session exists; attach it before its first task is enqueued. */
+  childCreated?(childId: string, parentId: string): void
+  /** The child session is gone (dispatch rollback or parent cascade). */
+  childRemoved?(childId: string): void
 }
 
 interface Child {
@@ -133,6 +137,8 @@ export class SubagentRuntime {
   private readonly maxConcurrentRuns: number
   private readonly catalogMaxBytes: number
   private readonly outputBytes: number
+  private readonly childCreated: ((childId: string, parentId: string) => void) | undefined
+  private readonly childRemoved: ((childId: string) => void) | undefined
   private readonly children = new Map<string, Child>()
   private readonly paused = new Set<string>()
   private readonly wakeAttempts = new Map<string, number>()
@@ -150,6 +156,8 @@ export class SubagentRuntime {
     this.maxConcurrentRuns = options.maxConcurrentRuns ?? 8
     this.catalogMaxBytes = options.catalogMaxBytes ?? DEFAULT_CATALOG_BYTES
     this.outputBytes = options.outputBytes ?? DEFAULT_OUTPUT_BYTES
+    this.childCreated = options.childCreated
+    this.childRemoved = options.childRemoved
   }
 
   // —— dispatch ——
@@ -260,6 +268,7 @@ export class SubagentRuntime {
       }
       this.applyPermission(header.id, childPermission, parentPermission)
       this.children.set(header.id, { id: header.id, parentId: owner, descriptor })
+      this.childCreated?.(header.id, owner)
       const messageId = randomUUID()
       this.enqueue(
         header.id,
@@ -300,6 +309,7 @@ export class SubagentRuntime {
     } catch (error) {
       this.store.delete(header.id)
       this.children.delete(header.id)
+      this.childRemoved?.(header.id)
       throw error
     }
   }
@@ -682,6 +692,7 @@ export class SubagentRuntime {
       this.paused.delete(child.id)
       this.store.delete(child.id)
       this.children.delete(child.id)
+      this.childRemoved?.(child.id)
     }
   }
 

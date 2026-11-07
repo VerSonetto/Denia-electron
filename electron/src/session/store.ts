@@ -321,7 +321,9 @@ export class SessionStore {
     const header = liveSession?.header ?? this.header(id)
     if (!header) return null
     const events = liveSession?.events ?? readEnvelopes(file)
-    const excerpt = firstUserText(events)
+    // A subagent has no human prompt; its label is the only meaningful row
+    // title until (and unless) a generated title arrives.
+    const excerpt = header.subagent?.label ?? firstUserText(events)
     const title = lastTitle(events)
     const preset = lastAgentPreset(events)
     const summary: SessionSummary = {
@@ -333,6 +335,7 @@ export class SessionStore {
       sandbox: header.sandbox,
       cwd_alive: isDirectory(header.cwd),
       ...(header.parent_session ? { parent_session: header.parent_session } : {}),
+      ...(header.subagent ? { subagent: header.subagent } : {}),
       ...(header.agent_preset || preset ? { agent_preset: preset ?? header.agent_preset } : {}),
     }
     this.cache.set(id, { mtimeMs: stat.mtimeMs, size: stat.size, summary })

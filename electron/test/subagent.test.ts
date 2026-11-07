@@ -57,11 +57,22 @@ async function prompt(host: Host, id: string, text: string): Promise<void> {
   assert.equal(response.status, 202)
 }
 
-async function createSession(host: Host, cwd: string): Promise<string> {
+async function createWorkspace(host: Host, cwd: string): Promise<string> {
+  const response = await fetch(`${host.baseUrl}/api/workspaces`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: cwd }),
+  })
+  assert.equal(response.status, 201)
+  const body = (await response.json()) as { workspace: { id: string } }
+  return body.workspace.id
+}
+
+async function createSession(host: Host, cwd: string, workspaceId?: string): Promise<string> {
   const response = await fetch(`${host.baseUrl}/api/sessions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ cwd }),
+    body: JSON.stringify(workspaceId ? { workspaceId } : { cwd }),
   })
   const body = (await response.json()) as { session: { id: string } }
   return body.session.id
@@ -409,7 +420,8 @@ test('runtime: spawn explore, deliver completion, list/wait and parent-child mes
   writeConfig(home, mock.baseURL)
   const host = await startHost({ home, webDir, port: 0 })
   try {
-    const parentId = await createSession(host, cwd)
+    const workspaceId = await createWorkspace(host, cwd)
+    const parentId = await createSession(host, cwd, workspaceId)
     await prompt(host, parentId, 'delegate')
     const parentEvents = await waitFor(async () => {
       const current = await snapshot(host, parentId)
@@ -423,6 +435,17 @@ test('runtime: spawn explore, deliver completion, list/wait and parent-child mes
     const child = sessions.sessions.find((entry) => entry.parent_session === parentId)
     assert.ok(child, 'the child session must be listed with parent_session')
     const childId = child.id as string
+    const childDescriptor = child.subagent as { label?: string } | undefined
+    assert.ok(childDescriptor, 'the child summary must carry the subagent descriptor')
+    assert.equal(child.excerpt, childDescriptor.label, 'the sidebar row falls back to the descriptor label')
+
+    const workspaceRows = (await (await fetch(`${host.baseUrl}/api/workspaces`)).json()) as {
+      workspaces: { id: string; sessionIds: string[] }[]
+    }
+    const workspace = workspaceRows.workspaces.find((entry) => entry.id === workspaceId)
+    assert.ok(workspace, 'the workspace must exist')
+    assert.ok(workspace.sessionIds.includes(parentId), 'the parent must stay in its workspace')
+    assert.ok(workspace.sessionIds.includes(childId), 'the child must join the parent workspace')
 
     const childSnapshot = await snapshot(host, childId)
     assert.ok(childSnapshot.header.subagent, 'the child header must carry the descriptor')

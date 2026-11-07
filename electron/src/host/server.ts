@@ -295,6 +295,34 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     for (const client of sseClients) writeSse(client, event)
   }
 
+  const saveWorkspaces = (): void => {
+    fs.writeFileSync(workspacesPath(home), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
+  }
+
+  /** Child sessions inherit the parent's workspace membership, like the Rust host. */
+  const attachToParentWorkspaces = (childId: string, parentId: string): void => {
+    let changed = false
+    for (const workspace of Object.values(workspaces.workspaces)) {
+      if (!workspace.sessionIds.includes(parentId)) continue
+      if (workspace.sessionIds.includes(childId)) continue
+      workspace.sessionIds = [childId, ...workspace.sessionIds]
+      changed = true
+    }
+    if (changed) saveWorkspaces()
+    broadcast({ type: 'sessions-updated' })
+  }
+
+  const detachFromWorkspaces = (childId: string): void => {
+    let changed = false
+    for (const workspace of Object.values(workspaces.workspaces)) {
+      const before = workspace.sessionIds.length
+      workspace.sessionIds = workspace.sessionIds.filter((id) => id !== childId)
+      if (workspace.sessionIds.length !== before) changed = true
+    }
+    if (changed) saveWorkspaces()
+    broadcast({ type: 'sessions-updated' })
+  }
+
   const driver = new SessionDriver(
     store,
     registry,
@@ -328,7 +356,11 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     isRunning: (sessionId) => driver.isRunning(sessionId),
     append: (sessionId, event) => store.append(sessionId, event),
     permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
-  }, { maxConcurrentRuns: subagentPolicyConcurrency(home) })
+  }, {
+    maxConcurrentRuns: subagentPolicyConcurrency(home),
+    childCreated: attachToParentWorkspaces,
+    childRemoved: detachFromWorkspaces,
+  })
   const jobs = new JobManager({
     onDone: (job) => {
       // The completion notice is enqueued as an inbox event and only becomes
@@ -367,10 +399,6 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       console.error('[denia] 完成结果恢复失败:', errorMessage(error))
     }
   })
-
-  const saveWorkspaces = (): void => {
-    fs.writeFileSync(workspacesPath(home), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
-  }
 
   const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://localhost')
