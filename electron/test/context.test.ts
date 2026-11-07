@@ -336,6 +336,43 @@ test('host integrations: skill tool, catalog injection, memory write and APIs', 
           event.text.includes('project rules for tests'),
       ),
     )
+    assert.ok(
+      afterSkill.some(
+        (event) => event.type === 'user-message' &&
+          event.channel === 'capability' &&
+          event.text.includes('当前代理：') &&
+          event.text.includes('父代理：无'),
+      ),
+      'the transcript needs a capability-context injection',
+    )
+    assert.ok(
+      afterSkill.some(
+        (event) => event.type === 'user-message' &&
+          event.channel === 'subagent-catalog' &&
+          event.text.startsWith('[denia 子代理目录]'),
+      ),
+      'the delegation catalog must be a visible injection, not a prompt section',
+    )
+    assert.ok(
+      afterSkill.some(
+        (event) => event.type === 'user-message' &&
+          event.channel === 'runtime-context' &&
+          event.text.startsWith('Current runtime context.') &&
+          event.text.includes(project),
+      ),
+      'the runtime snapshot must be visible in the transcript',
+    )
+
+    const systemPrompts = afterSkill.filter(
+      (event): event is Extract<Envelope, { type: 'system-prompt' }> =>
+        event.type === 'system-prompt',
+    )
+    assert.equal(systemPrompts.length, 1, 'the unchanged prompt is logged once')
+    assert.ok(
+      systemPrompts[0]?.text.includes('Working rules:') &&
+        systemPrompts[0]?.text.includes('# 项目记忆'),
+      'the transcript must carry the full prompt, not a persona-only projection',
+    )
 
     await prompt(host, sessionId, 'remember')
     await waitFor(async () => {

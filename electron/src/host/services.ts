@@ -15,6 +15,7 @@ import type {
   ToolSchema,
 } from '../core/wire.ts'
 import type { McpManager } from '../mcp/manager.ts'
+import { buildRuntimeContext } from '../agent/system-prompt.ts'
 import type { SubagentPromptContext } from '../agent/system-prompt.ts'
 import type { SessionServices } from '../agent/loop.ts'
 import type { ToolContext } from '../tools/types.ts'
@@ -45,6 +46,8 @@ export interface HostServicesOptions {
   jobs?: JobManager
   home: string
   store: SessionStore
+  /** Current permission state for runtime-context snapshots. */
+  permissionStateOf: (sessionId: string) => PermissionState
   memoryEnabled?: boolean
   memoryIndexMaxBytes?: number
   workspaceInstructionsMaxBytes?: number
@@ -58,6 +61,7 @@ export class HostServices implements SessionServices {
   private readonly jobTools: Tool[]
   private readonly home: string
   private readonly store: SessionStore
+  private readonly permissionStateOf: (sessionId: string) => PermissionState
   private readonly memoryEnabled: boolean
   private readonly memoryIndexMaxBytes: number
   private readonly workspaceInstructionsMaxBytes: number
@@ -73,6 +77,7 @@ export class HostServices implements SessionServices {
     this.jobTools = options.jobs ? createJobTools(options.jobs) : []
     this.home = options.home
     this.store = options.store
+    this.permissionStateOf = options.permissionStateOf
     this.memoryEnabled = options.memoryEnabled ?? true
     this.memoryIndexMaxBytes = options.memoryIndexMaxBytes ?? 25_600
     this.workspaceInstructionsMaxBytes = options.workspaceInstructionsMaxBytes ?? 65_536
@@ -186,8 +191,6 @@ export class HostServices implements SessionServices {
     if (!header.subagent && this.memoryEnabled) {
       sections.push(renderMemorySection(memoryRoot(this.home, header.cwd)))
     }
-    const catalog = this.subagents.catalogText(sessionId)
-    if (catalog) sections.push(catalog)
     const mcp = this.mcpDiscipline()
     if (mcp) sections.push(mcp)
     return sections
@@ -217,6 +220,11 @@ export class HostServices implements SessionServices {
     )
     if (workspace) out.push({ channel: 'workspace-instructions', text: workspace })
 
+    out.push({
+      channel: 'capability',
+      text: `[denia 能力上下文]\n当前代理：${sessionId}；父代理：${header.parent_session ?? '无'}。`,
+    })
+
     if (this.allowed(header, 'skill')) {
       const skills = discoverSkills(this.home, header.cwd).skills
       const catalog = renderSkillCatalog(skills, this.skillCatalogDescriptionMaxChars)
@@ -231,6 +239,20 @@ export class HostServices implements SessionServices {
       const index = readIndexForInjection(root, this.memoryIndexMaxBytes)
       if (index) out.push({ channel: 'project-memory', text: renderIndexBlock(root, index) })
     }
+
+    // Rust injects the delegation catalog as a step-boundary message so the
+    // transcript can show it; it is not a system-prompt section.
+    const catalog = this.subagents.catalogText(sessionId)
+    if (catalog) out.push({ channel: 'subagent-catalog', text: catalog })
+
+    out.push({
+      channel: 'runtime-context',
+      text: buildRuntimeContext({
+        cwd: header.cwd,
+        sandbox: header.sandbox,
+        permission: this.permissionStateOf(sessionId),
+      }),
+    })
     return out
   }
 

@@ -1,8 +1,10 @@
-// System prompt assembly: base identity + permission snapshot + role additions.
+// System prompt assembly: base identity + tool rules + role additions.
 //
-// The base prompt stays byte-stable for ordinary sessions. Subagents get their
-// definition instructions appended (never replacing the parent persona), plus
-// hard constraints that keep delegation one level deep.
+// Runtime facts (workspace, platform, permissions) live in an injected
+// conversation snapshot instead of the system prompt, so the transcript can
+// show the same facts the model sees. Subagents get their definition
+// instructions appended (never replacing the parent persona), plus hard
+// constraints that keep delegation one level deep.
 
 import os from 'node:os'
 
@@ -19,12 +21,13 @@ export interface SubagentPromptContext {
 }
 
 export interface SystemPromptOptions {
+  /** Runtime-context inputs; not embedded in the system prompt itself. */
   cwd: string
   sandbox: boolean
-  tools: ToolSchema[]
   permission: PermissionState
+  tools: ToolSchema[]
   subagent?: SubagentPromptContext
-  /** Extra sections appended after the working rules (catalog, MCP, memory). */
+  /** Extra sections appended after the working rules (MCP, memory). */
   extraSections?: string[]
 }
 
@@ -62,23 +65,37 @@ function hasTool(tools: ToolSchema[], name: string): boolean {
   return tools.some((tool) => tool.name === name)
 }
 
-export function buildSystemPrompt(options: SystemPromptOptions): string {
+/**
+ * Runtime facts live in the conversation as an injected snapshot, not in the
+ * byte-stable system prompt. The transcript shows the same text the model
+ * receives, so the UI never has to invent a separate "runtime" view.
+ */
+export function buildRuntimeContext(
+  options: Pick<SystemPromptOptions, 'cwd' | 'sandbox' | 'permission'>,
+): string {
   const platform = `${process.platform} ${os.arch()}`
   const shellNote =
     process.platform === 'win32'
       ? '命令经 Git Bash(或 cmd.exe)执行;路径使用系统原生形式。'
       : '命令经 bash 执行。'
-  const lines = [
-    "You are Denia, an AI coding agent working directly in the user's local workspace.",
+  const date = new Date().toISOString().slice(0, 10)
+  const sandbox = options.sandbox
+    ? 'File tools are confined to the workspace; absolute paths outside it are rejected.'
+    : 'File tools may access paths outside the workspace.'
+  return [
+    'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
     '',
-    `Workspace: ${options.cwd}`,
-    `Platform: ${platform}`,
+    `工作目录:${options.cwd}（相对路径以它为根）。平台:${platform}。日期:${date}。`,
     shellNote,
-    options.sandbox
-      ? 'File tools are confined to the workspace; absolute paths outside it are rejected.'
-      : 'File tools may access paths outside the workspace.',
+    sandbox,
     '',
     permissionSection(options.permission),
+  ].join('\n')
+}
+
+export function buildSystemPrompt(options: SystemPromptOptions): string {
+  const lines = [
+    "You are Denia, an AI coding agent working directly in the user's local workspace.",
     '',
     'Working rules:',
     '- Read before you edit. Prefer `read_file` / `grep` / `glob` to understand code, then make the smallest change that solves the task.',

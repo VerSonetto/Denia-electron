@@ -382,6 +382,22 @@ export class SessionDriver {
             ? { extraSections: this.services.promptSections(sessionId, session.header) }
             : {}),
         })
+        // The transcript shows the full prompt that the model actually gets,
+        // not a persona-only projection. Unchanged prompts are logged once:
+        // the UI already collapses consecutive identical rows, and repeating
+        // several KB of prompt on every step would only bloat the log.
+        let previousSystemPrompt: string | null = null
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index]!
+          if (event.type === 'system-prompt') {
+            previousSystemPrompt = event.text
+            break
+          }
+        }
+        if (previousSystemPrompt !== system) {
+          append({ type: 'system-prompt', turn, step, text: system })
+        }
+
         append({
           type: 'request-context',
           turn,

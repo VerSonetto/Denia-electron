@@ -388,7 +388,14 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   // A settled child must not leave background processes behind: they belong to
   // the child's lifetime, and the notice lists what was cancelled.
   subagents.setJobCleaner((sessionId) => jobs.removeOwner(sessionId))
-  driver.attachServices(new HostServices({ mcp, subagents, jobs, home, store }))
+  driver.attachServices(new HostServices({
+    mcp,
+    subagents,
+    jobs,
+    home,
+    store,
+    permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
+  }))
 
   // Startup recovery: results enqueued before the host stopped are still in the
   // session log; replay recent child completions and wake their sessions.

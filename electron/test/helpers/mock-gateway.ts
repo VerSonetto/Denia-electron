@@ -138,7 +138,8 @@ export function lastUserText(request: GatewayRequest): string {
       if (
         text.startsWith('<available_skills>') ||
         text.startsWith('<system-reminder>') ||
-        text.startsWith('[denia ')
+        text.startsWith('[denia ') ||
+        text.startsWith('Current runtime context.')
       ) {
         continue
       }
