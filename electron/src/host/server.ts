@@ -21,6 +21,8 @@ import type { ApprovalAnswer } from '../agent/gate.ts'
 import { createModelReviewer } from '../agent/reviewer.ts'
 import type { Reviewer } from '../agent/reviewer.ts'
 import { buildSystemPrompt } from '../agent/system-prompt.ts'
+import { scheduleSessionTitle } from '../agent/session-title.ts'
+import { compactSession, estimateTokens } from '../agent/compact.ts'
 import type { AppConfig } from '../config.ts'
 import {
   credentialInfo,
@@ -39,11 +41,50 @@ import {
 import { ExecPolicy } from '../core/exec-policy.ts'
 import { legacyModeOf, presetState, stateFromLegacy } from '../core/permission.ts'
 import { streamFor } from '../llm/index.ts'
-import type { Envelope, ImageData, ModelSelection, SessionEvent } from '../core/wire.ts'
+import type { Envelope, ImageData, ModelSelection, SessionEvent, ToolCallRef } from '../core/wire.ts'
 import { errorMessage, isRecord } from '../core/util.ts'
 import { SessionStore } from '../session/store.ts'
 import { ToolRegistry } from '../tools/index.ts'
 import { ServerApprovalBridge } from './approval-bridge.ts'
+import { HostServices } from './services.ts'
+import { SkillTool } from '../tools/skill.ts'
+import { McpManager } from '../mcp/manager.ts'
+import type { McpServerConfig } from '../mcp/config.ts'
+import {
+  mergeServerConfig,
+  normalizeServerConfig,
+  validateMcpNamespace,
+} from '../mcp/config.ts'
+import { loadMcpSettings, mcpRevision, saveMcpSettings } from '../mcp/settings.ts'
+import {
+  deleteSkill,
+  discoverSkills,
+  getManagedSkill,
+  importSkills,
+  listManagedSkills,
+  saveSkill,
+  setSkillEnabled,
+} from '../skills/skills.ts'
+import {
+  deleteMemoryFile,
+  memoryHealth,
+  memoryRoot,
+  readMemoryFile,
+  rebuildIndex,
+  scanManifest,
+  searchMemories,
+} from '../context/memory.ts'
+import { ProfileError, ProfileStore } from '../subagents/profiles.ts'
+import { SubagentRuntime, subagentCapabilityNames } from '../subagents/runtime.ts'
+import {
+  modeOfPermission,
+  normalizeInlineSpec,
+  parentGrant,
+  resolveDispatch,
+  toolCatalogRows,
+  effectivePermissionMode,
+} from '../subagents/resolver.ts'
+import { PROFILE_COLORS } from '../subagents/types.ts'
 
 const HEARTBEAT_MS = 15_000
 const POLL_MAX_SEC = 30
@@ -204,6 +245,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   let config = loadConfig(home)
   const store = new SessionStore(home)
   const registry = ToolRegistry.builtin()
+  registry.register(new SkillTool(home))
   const workspaces = loadWorkspaces(home)
   const defaultPermissionMode = consolePermissionMode(home)
   const policy = options.policy ?? ExecPolicy.load(path.join(home, 'execpolicy.json'))
@@ -269,6 +311,30 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   )
 
   const runningSessionIds = (): string[] => driver.runningIds()
+
+  // —— MCP + subagents ——
+  const mcp = new McpManager(registry.names())
+  let mcpSettings = loadMcpSettings(home)
+  let mcpReady = mcp.reload(mcpSettings.servers).catch((error: unknown) => {
+    console.error('[denia] MCP 初始化失败:', errorMessage(error))
+  })
+  const profiles = new ProfileStore(home)
+  const subagents = new SubagentRuntime(store, profiles, {
+    startTurn: (sessionId, prompt, turnOptions) =>
+      driver.startTurn(sessionId, prompt, turnOptions ?? {}),
+    cancel: (sessionId) => driver.cancel(sessionId),
+    isRunning: (sessionId) => driver.isRunning(sessionId),
+    append: (sessionId, event) => store.append(sessionId, event),
+    permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
+  }, { maxConcurrentRuns: subagentPolicyConcurrency(home) })
+  const describedToolNames = (): string[] =>
+    [...new Set([
+      ...registry.names(),
+      ...subagentCapabilityNames(),
+      ...mcp.snapshot().toolNames(),
+    ])].sort()
+  subagents.setToolNames(describedToolNames)
+  driver.attachServices(new HostServices({ mcp, subagents, home, store }))
 
   const saveWorkspaces = (): void => {
     fs.writeFileSync(workspacesPath(home), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
@@ -390,6 +456,13 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           apiError(res, 409, 'session/running', 'cancel the running turn before deleting')
           return
         }
+        try {
+          subagents.ensureRemovable(sessionId)
+        } catch (error) {
+          apiError(res, 409, 'session/agents-running', errorMessage(error))
+          return
+        }
+        subagents.removeOwner(sessionId)
         store.flush(sessionId)
         store.delete(sessionId)
         for (const workspace of Object.values(workspaces.workspaces)) {
@@ -437,6 +510,14 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           ...(selection ? { selection } : {}),
           ...(images.length > 0 ? { images } : {}),
           ...(typeof body.source === 'string' ? { source: body.source } : {}),
+        })
+        void scheduleSessionTitle({
+          store,
+          config,
+          sessionId,
+          ...(selection ? { selection } : {}),
+          prompt,
+          onUpdated: () => broadcast({ type: 'sessions-updated' }),
         })
         broadcast({ type: 'running-snapshot', ids: runningSessionIds() })
         json(res, 202, { accepted: true })
@@ -550,20 +631,100 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest === '/compact' && method === 'POST') {
-        json(res, 202, { accepted: false })
+        if (driver.isRunning(sessionId)) {
+          apiError(res, 409, 'session/running', '会话正在运行，压缩不可用')
+          return
+        }
+        json(res, 202, { accepted: true, id: sessionId })
+        void compactSession({
+          store,
+          config,
+          sessionId,
+          onFailed: (message) =>
+            broadcast({ type: 'compaction-failed', id: sessionId, message }),
+          onUpdated: () => broadcast({ type: 'sessions-updated' }),
+        })
         return
       }
       if (rest === '/context-breakdown' && method === 'GET') {
+        const events = store.read(sessionId)?.events ?? []
+        const permission = driver.permissionStateOf(sessionId)
+        const tools = registry.schemas()
+        const system = buildSystemPrompt({
+          cwd: store.header(sessionId)?.cwd ?? '',
+          sandbox: store.header(sessionId)?.sandbox ?? false,
+          tools,
+          permission,
+        })
+        const messageChars = events.reduce((sum, event) => {
+          if (event.type === 'user-message') return sum + event.text.length
+          if (event.type === 'assistant-message') {
+            return (
+              sum +
+              event.blocks.reduce(
+                (inner, block) =>
+                  inner + (block.type === 'text' ? block.text.length : block.type === 'tool-call' ? block.arguments.length : 0),
+                0,
+              )
+            )
+          }
+          if (event.type === 'tool-result') return sum + event.content.length
+          return sum
+        }, 0)
+        let lastWindow: number | undefined
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index]!
+          if (event.type === 'request-context' && event.context_window) {
+            lastWindow = event.context_window
+            break
+          }
+        }
+        const usage = {
+          uncachedInputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+        }
+        let pressureTokens: number | undefined
+        let anchorIndex = -1
+        for (let index = 0; index < events.length; index += 1) {
+          const event = events[index]!
+          if (event.type !== 'assistant-message' || !event.usage) continue
+          usage.uncachedInputTokens += event.usage.inputTokens ?? 0
+          usage.outputTokens += event.usage.outputTokens ?? 0
+          usage.cacheReadTokens += event.usage.cacheReadTokens ?? 0
+          usage.reasoningTokens += event.usage.reasoningTokens ?? 0
+          pressureTokens = (event.usage.inputTokens ?? 0) + (event.usage.cacheReadTokens ?? 0)
+          anchorIndex = index
+        }
+        let trailingChars = 0
+        for (let index = anchorIndex + 1; index < events.length; index += 1) {
+          const event = events[index]!
+          if (event.type === 'user-message') trailingChars += event.text.length
+          else if (event.type === 'tool-result') trailingChars += event.content.length
+          else if (event.type === 'assistant-message') {
+            trailingChars += event.blocks.reduce(
+              (inner, block) =>
+                inner + (block.type === 'text' ? block.text.length : block.type === 'tool-call' ? block.arguments.length : 0),
+              0,
+            )
+          }
+        }
         json(res, 200, {
-          breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 },
-          pressure: {},
-          usage: {
-            uncachedInputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            cacheWriteTokens: 0,
-            reasoningTokens: 0,
+          breakdown: {
+            systemTokens: estimateTokens(system),
+            toolsTokens: estimateTokens(JSON.stringify(tools)),
+            messageTokens: Math.ceil(messageChars / 4),
           },
+          pressure: {
+            ...(lastWindow ? { contextWindow: lastWindow } : {}),
+            ...(pressureTokens !== undefined ? { pressureTokens } : {}),
+            ...(pressureTokens !== undefined
+              ? { projectedTokens: pressureTokens + Math.ceil(trailingChars / 4) }
+              : {}),
+          },
+          usage,
         })
         return
       }
@@ -572,11 +733,43 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest === '/skills' && method === 'GET') {
-        json(res, 200, { skills: [] })
+        const header = store.header(sessionId)
+        const skills = header ? discoverSkills(home, header.cwd).skills : []
+        json(res, 200, {
+          skills: skills.map((skill) => ({
+            name: skill.name,
+            description: skill.description,
+            source: skill.source,
+            modelInvocable: skill.modelInvocable,
+            userInvocable: skill.userInvocable,
+          })),
+        })
         return
       }
       if (rest === '/agents' && method === 'GET') {
-        json(res, 200, { agents: [] })
+        json(res, 200, { agents: subagents.list(sessionId) })
+        return
+      }
+      const agentActionMatch = /^\/agents\/([^/]+)\/(message|interrupt)$/.exec(rest)
+      if (agentActionMatch && method === 'POST') {
+        const target = safeDecode(agentActionMatch[1]!)
+        const action = agentActionMatch[2]!
+        try {
+          if (action === 'message') {
+            const body = await readJson(req)
+            const message = typeof body.message === 'string' ? body.message : ''
+            if (message.trim() === '') {
+              apiError(res, 400, 'subagent/message-empty', '消息不能为空')
+              return
+            }
+            json(res, 202, subagents.send(sessionId, target, message))
+          } else {
+            subagents.interrupt(sessionId, target)
+            json(res, 200, { ok: true })
+          }
+        } catch (error) {
+          apiError(res, 400, 'subagent/control-failed', errorMessage(error))
+        }
         return
       }
       if (rest === '/jobs' && method === 'GET') {
@@ -733,6 +926,12 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       const body = await readJson(req)
       saveSettingsNamespace(home, ns, body.value)
       config = loadConfig(home)
+      if (ns === 'mcp') {
+        mcpSettings = loadMcpSettings(home)
+        mcpReady = mcp.reload(mcpSettings.servers)
+        await mcpReady
+        broadcast({ type: 'mcp-updated' })
+      }
       broadcast({ type: 'settings-updated' })
       json(res, 200, { revision: 1, applies: 'restart' })
       return
@@ -861,27 +1060,627 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       })
       return
     }
-    if (pathname === '/api/global-rules' && method === 'GET') {
-      json(res, 200, { text: '', source: 'default', displayPath: '', path: '' })
+    if (pathname === '/api/global-rules') {
+      const file = path.join(home, 'AGENTS.md')
+      const view = () => {
+        let text = ''
+        try {
+          text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')
+        } catch {
+          /* not configured */
+        }
+        return {
+          text,
+          source: text === '' ? ('default' as const) : ('file' as const),
+          displayPath: '~/AGENTS.md',
+          path: file,
+        }
+      }
+      if (method === 'GET') {
+        json(res, 200, view())
+        return
+      }
+      if (method === 'PUT') {
+        const body = await readJson(req)
+        const text = typeof body.text === 'string' ? body.text : ''
+        if (Buffer.byteLength(text, 'utf8') > 1_048_576) {
+          apiError(res, 413, 'rules/too-large', '全局规则超过 1 MiB 上限')
+          return
+        }
+        if (text.trim() === '') fs.rmSync(file, { force: true })
+        else fs.writeFileSync(file, text, 'utf8')
+        json(res, 200, view())
+        return
+      }
+    }
+
+    // —— MCP ——
+    const describeMcp = () => ({
+      servers: mcp.snapshot().servers,
+      toolCount: mcp.snapshot().toolDefs().length,
+    })
+    if (pathname === '/api/mcp' && method === 'GET') {
+      await mcpReady
+      json(res, 200, describeMcp())
+      return
+    }
+    if (pathname === '/api/mcp/servers' && method === 'PUT') {
+      const body = await readJson(req)
+      if (!isRecord(body.server)) {
+        apiError(res, 400, 'mcp/invalid-server', 'server 必须是对象')
+        return
+      }
+      const incoming = normalizeServerConfig(body.server)
+      const preserve = body.preserveSecrets === true
+      const existing = mcpSettings.servers.find((server) => server.id === incoming.id)
+      const merged = existing ? mergeServerConfig(existing, incoming, preserve) : incoming
+      const servers = existing
+        ? mcpSettings.servers.map((server) => (server.id === merged.id ? merged : server))
+        : [...mcpSettings.servers, merged]
+      try {
+        validateMcpNamespace({ servers })
+      } catch (error) {
+        apiError(res, 400, 'mcp/invalid-config', errorMessage(error))
+        return
+      }
+      const expected = typeof body.expectedRevision === 'number' ? body.expectedRevision : undefined
+      if (expected !== undefined && expected !== mcpRevision(home)) {
+        apiError(res, 409, 'mcp/revision-conflict', 'MCP 配置已被外部修改，请刷新后重试')
+        return
+      }
+      try {
+        saveMcpSettings(home, { servers })
+      } catch (error) {
+        apiError(res, 400, 'mcp/invalid-config', errorMessage(error))
+        return
+      }
+      mcpSettings = loadMcpSettings(home)
+      mcpReady = mcp.reload(mcpSettings.servers)
+      await mcpReady
+      broadcast({ type: 'mcp-updated' })
+      json(res, 200, describeMcp())
+      return
+    }
+    const mcpServerMatch = /^\/api\/mcp\/servers\/([^/]+)$/.exec(pathname)
+    if (mcpServerMatch) {
+      const id = safeDecode(mcpServerMatch[1]!)
+      if (method === 'DELETE') {
+        if (!mcpSettings.servers.some((server) => server.id === id)) {
+          apiError(res, 404, 'mcp/unknown-server', `未知的 MCP 服务器:${id}`)
+          return
+        }
+        const servers = mcpSettings.servers.filter((server) => server.id !== id)
+        saveMcpSettings(home, { servers })
+        mcpSettings = loadMcpSettings(home)
+        mcpReady = mcp.reload(mcpSettings.servers)
+        await mcpReady
+        broadcast({ type: 'mcp-updated' })
+        json(res, 200, describeMcp())
+        return
+      }
+      if (method === 'POST') {
+        const body = await readJson(req)
+        const action = typeof body.action === 'string' ? body.action : ''
+        const existing = mcpSettings.servers.find((server) => server.id === id)
+        if (action === 'reconnect') {
+          if (!existing) {
+            apiError(res, 404, 'mcp/unknown-server', `未知的 MCP 服务器:${id}`)
+            return
+          }
+          await mcp.disconnect(id)
+          mcpReady = mcp.reload(mcpSettings.servers)
+          await mcpReady
+        } else if (action === 'enable' || action === 'disable') {
+          if (!existing) {
+            apiError(res, 404, 'mcp/unknown-server', `未知的 MCP 服务器:${id}`)
+            return
+          }
+          const servers = mcpSettings.servers.map((server) =>
+            server.id === id ? { ...server, enabled: action === 'enable' } : server,
+          )
+          saveMcpSettings(home, { servers })
+          mcpSettings = loadMcpSettings(home)
+          mcpReady = mcp.reload(mcpSettings.servers)
+          await mcpReady
+        } else {
+          apiError(res, 400, 'mcp/unknown-action', `未知的 action:${action}(可用:enable / disable / reconnect)`)
+          return
+        }
+        broadcast({ type: 'mcp-updated' })
+        json(res, 200, describeMcp())
+        return
+      }
+    }
+    if (pathname === '/api/mcp/tools' && method === 'POST') {
+      const body = await readJson(req)
+      const serverId = typeof body.server === 'string' ? body.server : ''
+      const tool = typeof body.tool === 'string' ? body.tool : ''
+      const enabled = body.enabled === true
+      const existing = mcpSettings.servers.find((server) => server.id === serverId)
+      if (!existing) {
+        apiError(res, 404, 'mcp/unknown-server', `未知的 MCP 服务器:${serverId}`)
+        return
+      }
+      const disabledTools = enabled
+        ? existing.disabledTools.filter((name) => name !== tool)
+        : existing.disabledTools.includes(tool)
+          ? existing.disabledTools
+          : [...existing.disabledTools, tool]
+      const servers = mcpSettings.servers.map((server) =>
+        server.id === serverId ? { ...server, disabledTools } : server,
+      )
+      saveMcpSettings(home, { servers })
+      mcpSettings = loadMcpSettings(home)
+      mcpReady = mcp.reload(mcpSettings.servers)
+      await mcpReady
+      broadcast({ type: 'mcp-updated' })
+      json(res, 200, describeMcp())
       return
     }
 
-    // —— small reads the UI may open ——
-    if (pathname === '/api/mcp' && method === 'GET') {
-      json(res, 200, { servers: [], toolCount: 0 })
+    // —— subagent definitions ——
+    const scopeRoot = (sessionId: string | null, cwd: string | null): string | null => {
+      if (sessionId) {
+        const header = store.header(sessionId)
+        if (!header) throw new ProfileError('subagent/profile-not-found', `未知的会话:${sessionId}`)
+        if (!isDirectory(header.cwd)) {
+          throw new ProfileError('subagent/cwd-missing', `会话 ${sessionId} 的工作目录已不存在：${header.cwd}`)
+        }
+        return ProfileStore.projectRoot(header.cwd)
+      }
+      if (cwd) {
+        if (!isDirectory(cwd)) {
+          throw new ProfileError('subagent/cwd-missing', `项目目录不存在：${cwd}`)
+        }
+        return ProfileStore.projectRoot(cwd)
+      }
+      return null
+    }
+    const profileError = (res: ServerResponse, error: unknown): void => {
+      if (error instanceof ProfileError) {
+        const status = error.code === 'subagent/profile-not-found'
+          ? 404
+          : error.code === 'subagent/profile-exists' ||
+              error.code === 'subagent/revision-conflict' ||
+              error.code === 'subagent/profile-shadowed'
+            ? 409
+            : error.code === 'subagent/scope-forbidden'
+              ? 403
+              : error.code === 'subagent/ambiguous-spec' ||
+                  error.code === 'subagent/depth-config-removed' ||
+                  error.code === 'subagent/cwd-missing'
+                ? 400
+                : 422
+        let message = error.message
+        if (error.field) message += `（字段：${error.field}）`
+        if (error.candidates.length > 0) message += `；可用候选：${error.candidates.join('、')}`
+        apiError(res, status, error.code, message)
+        return
+      }
+      apiError(res, 400, 'subagent/invalid', errorMessage(error))
+    }
+    const profileFromBody = (raw: unknown): {
+      profile: import('../subagents/types.ts').SubagentProfile
+      body: string
+    } => {
+      if (!isRecord(raw)) throw new ProfileError('subagent/profile-invalid', 'profile 必须是对象', 'profile')
+      const profile: import('../subagents/types.ts').SubagentProfile = {
+        schemaVersion: typeof raw.schemaVersion === 'number' ? raw.schemaVersion : 1,
+        id: typeof raw.id === 'string' ? raw.id : '',
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        instructions: typeof raw.instructions === 'string' ? raw.instructions : '',
+        enabled: raw.enabled !== false,
+        tools: isRecord(raw.tools)
+          ? raw.tools.mode === 'allowlist'
+            ? {
+                mode: 'allowlist',
+                names: Array.isArray(raw.tools.names)
+                  ? raw.tools.names.filter((name): name is string => typeof name === 'string')
+                  : [],
+              }
+            : { mode: 'inherit' }
+          : { mode: 'inherit' },
+        model: isRecord(raw.model) && raw.model.mode === 'explicit' && isRecord(raw.model.selection)
+          ? {
+              mode: 'explicit',
+              selection: {
+                provider: typeof raw.model.selection.provider === 'string' ? raw.model.selection.provider : '',
+                model: typeof raw.model.selection.model === 'string' ? raw.model.selection.model : '',
+                ...(typeof raw.model.selection.reasoningEffort === 'string'
+                  ? { reasoningEffort: raw.model.selection.reasoningEffort }
+                  : {}),
+              },
+            }
+          : { mode: 'inherit' },
+        permissionCeiling: raw.permissionCeiling === 'read-only' ? 'read-only' : 'inherit',
+        ...(typeof raw.color === 'string' && (PROFILE_COLORS as string[]).includes(raw.color)
+          ? { color: raw.color as import('../subagents/types.ts').ProfileColor }
+          : {}),
+      }
+      return { profile, body: profile.instructions }
+    }
+
+    if (pathname === '/api/subagent-profiles' && method === 'GET') {
+      try {
+        const root = scopeRoot(url.searchParams.get('sessionId'), url.searchParams.get('cwd'))
+        const catalog = profiles.catalog(root)
+        json(res, 200, {
+          scope: root ? 'project' : 'user',
+          projectRoot: catalog.projectRoot,
+          projectDir: catalog.projectDir,
+          userDir: catalog.userDir,
+          revision: catalog.revision,
+          effective: catalog.effective,
+          shadowed: catalog.shadowed,
+          diagnostics: catalog.diagnostics,
+          colors: PROFILE_COLORS,
+          sources: ['builtin', 'user', 'project'],
+        })
+      } catch (error) {
+        profileError(res, error)
+      }
       return
     }
-    if (pathname === '/api/subagent-profiles' && method === 'GET') {
-      json(res, 200, emptySubagentCatalog())
+    if (pathname === '/api/subagent-profiles' && method === 'POST') {
+      try {
+        const body = await readJson(req)
+        const root = scopeRoot(
+          typeof body.sessionId === 'string' ? body.sessionId : null,
+          typeof body.cwd === 'string' ? body.cwd : null,
+        )
+        const scope = body.scope === 'project' ? 'project' : 'user'
+        const parsed = profileFromBody(body.profile)
+        const view = profiles.create(scope, root, parsed.profile, parsed.body)
+        broadcast({ type: 'subagents-updated' })
+        json(res, 201, { profile: view })
+      } catch (error) {
+        profileError(res, error)
+      }
+      return
+    }
+    if (pathname === '/api/subagent-profiles/preview' && method === 'POST') {
+      const body = await readJson(req)
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : null
+      if (!sessionId) {
+        json(res, 200, {
+          sessionId: null,
+          final: false,
+          note: '未指定父会话：只能显示定义请求集合，不能判断最终可用工具。',
+          requested:
+            typeof body.profileId === 'string'
+              ? body.profileId
+              : isRecord(body.inline) && typeof body.inline.name === 'string'
+                ? body.inline.name
+                : null,
+        })
+        return
+      }
+      try {
+        const header = store.header(sessionId)
+        if (!header) {
+          apiError(res, 404, 'subagent/profile-not-found', `未知的会话:${sessionId}`)
+          return
+        }
+        const root = isDirectory(header.cwd) ? ProfileStore.projectRoot(header.cwd) : null
+        const mode = modeOfPermission(driver.permissionStateOf(sessionId))
+        const selection = lastSelectionOf(store.read(sessionId)?.events ?? [], config)
+        const registered = describedToolNames()
+        const grant = parentGrant(registered, undefined, mode)
+        const profileId = typeof body.profileId === 'string' ? body.profileId : undefined
+        const inline = body.inline
+        const resolved = profileId
+          ? profiles.resolve(root, profileId)
+          : inline === undefined
+            ? profiles.resolveDefault(root)
+            : undefined
+        const dispatch = resolveDispatch({
+          args: {
+            prompt: 'preview',
+            ...(profileId ? { profile_id: profileId } : {}),
+            ...(inline !== undefined ? { inline } : {}),
+          },
+          fork: false,
+          parent: { registered, mode, selection },
+          ...(resolved ? { profile: resolved } : {}),
+          defaulted: profileId === undefined && inline === undefined,
+        })
+        let model = dispatch.selection
+        let origin = dispatch.modelOrigin
+        let modelFallback: string | null = null
+        const provider = findProvider(config, model.provider)
+        if (!provider || !provider.models.some((entry) => entry.id === model.model)) {
+          if (origin === 'profile-explicit') {
+            modelFallback = `定义的模型 ${model.provider}/${model.model} 当前不可用，实际会回退为跟随主会话 ${selection.provider}/${selection.model}`
+            model = selection
+            origin = 'parent'
+          } else {
+            apiError(res, 400, 'subagent/model-unavailable', `模型 ${model.provider}/${model.model} 当前不可用`)
+            return
+          }
+        }
+        json(res, 200, {
+          sessionId,
+          final: true,
+          profile: {
+            qualifiedId: dispatch.qualifiedId,
+            name: dispatch.name,
+            description: dispatch.description,
+            inline: dispatch.inline,
+            revision: dispatch.revision,
+          },
+          tools: dispatch.tools,
+          toolCount: dispatch.tools.length,
+          model,
+          modelOrigin: origin,
+          modelFallback,
+          permissionCeiling: dispatch.permissionCeiling,
+          effectivePermissionMode: effectivePermissionMode(dispatch.permissionCeiling, mode),
+          delegationAllowed: false,
+          instructionScope: 'project-only',
+          fingerprint: previewFingerprint(dispatch.qualifiedId, dispatch.tools, dispatch.instructions),
+        })
+      } catch (error) {
+        profileError(res, error)
+      }
+      return
+    }
+    const resetMatch = /^\/api\/subagent-profiles\/([^/]+)\/reset$/.exec(pathname)
+    if (resetMatch && method === 'POST') {
+      try {
+        const body = await readJson(req)
+        const root = scopeRoot(
+          typeof body.sessionId === 'string' ? body.sessionId : null,
+          typeof body.cwd === 'string' ? body.cwd : null,
+        )
+        const scope = body.scope === 'project' ? 'project' : 'user'
+        const restored = profiles.reset(root, safeDecode(resetMatch[1]!), scope)
+        broadcast({ type: 'subagents-updated' })
+        json(res, 200, { restored })
+      } catch (error) {
+        profileError(res, error)
+      }
+      return
+    }
+    const profileMatch = /^\/api\/subagent-profiles\/([^/]+)$/.exec(pathname)
+    if (profileMatch) {
+      const qualifiedId = safeDecode(profileMatch[1]!)
+      try {
+        if (method === 'PUT') {
+          const body = await readJson(req)
+          const root = scopeRoot(
+            typeof body.sessionId === 'string' ? body.sessionId : null,
+            typeof body.cwd === 'string' ? body.cwd : null,
+          )
+          if (typeof body.expectedRevision !== 'number') {
+            apiError(res, 400, 'subagent/revision-required', 'expectedRevision 必须是数字')
+            return
+          }
+          const parsed = profileFromBody(body.profile)
+          const view = profiles.update(root, qualifiedId, parsed.profile, parsed.body, body.expectedRevision)
+          broadcast({ type: 'subagents-updated' })
+          json(res, 200, { profile: view })
+          return
+        }
+        if (method === 'DELETE') {
+          const root = scopeRoot(
+            url.searchParams.get('sessionId'),
+            url.searchParams.get('cwd'),
+          )
+          const expectedRaw = url.searchParams.get('expectedRevision')
+          const expected = expectedRaw === null ? undefined : Number(expectedRaw)
+          let scope: import('../subagents/types.ts').ProfileWriteScope | undefined =
+            url.searchParams.get('scope') === 'project'
+              ? 'project'
+              : url.searchParams.get('scope') === 'user'
+                ? 'user'
+                : undefined
+          if (!scope) {
+            const catalog = profiles.catalog(root)
+            const view = catalog.effective.find((entry) => entry.qualifiedId === qualifiedId)
+            if (!view) {
+              throw new ProfileError('subagent/profile-not-found', `未知的子代理定义：${qualifiedId}`)
+            }
+            scope = profiles.writeScopeFor(view)
+          }
+          const restored = profiles.delete(root, qualifiedId, scope, expected)
+          broadcast({ type: 'subagents-updated' })
+          json(res, 200, { restored })
+          return
+        }
+      } catch (error) {
+        profileError(res, error)
+        return
+      }
+      notImplemented(res, pathname)
       return
     }
     if (pathname === '/api/subagent-tools' && method === 'GET') {
-      json(res, 200, { registered: registry.names().length, tools: [] })
+      try {
+        const sessionId = url.searchParams.get('sessionId')
+        const registered = describedToolNames()
+        let grant: string[] | null = null
+        if (sessionId) {
+          const header = store.header(sessionId)
+          if (!header) {
+            apiError(res, 404, 'subagent/profile-not-found', `未知的会话:${sessionId}`)
+            return
+          }
+          grant = parentGrant(registered, undefined, modeOfPermission(driver.permissionStateOf(sessionId)))
+        } else if (url.searchParams.get('cwd')) {
+          scopeRoot(null, url.searchParams.get('cwd'))
+        }
+        json(res, 200, {
+          sessionId,
+          registered: registered.length,
+          tools: toolCatalogRows(registered, grant),
+        })
+      } catch (error) {
+        profileError(res, error)
+      }
       return
     }
-    if (pathname === '/api/memories/projects' && method === 'GET') {
-      json(res, 200, { projects: [] })
+    // —— skills management ——
+    const skillError = (res: ServerResponse, error: unknown): void => {
+      const message = errorMessage(error)
+      const status = message.includes('找不到') ? 404 : 400
+      apiError(res, status, 'skills/invalid', message)
+    }
+    const skillCwd = url.searchParams.get('cwd')
+    if (pathname === '/api/skills' && method === 'GET') {
+      try {
+        json(res, 200, {
+          skills: listManagedSkills(home, skillCwd),
+          directory: path.join(home, 'skills'),
+        })
+      } catch (error) {
+        skillError(res, error)
+      }
       return
+    }
+    if (pathname === '/api/skills/import' && method === 'POST') {
+      try {
+        const body = await readJson(req)
+        const imported = importSkills(
+          home,
+          typeof body.cwd === 'string' ? body.cwd : null,
+          typeof body.path === 'string' ? body.path : '',
+          body.scope === 'project' ? 'project' : 'user',
+        )
+        broadcast({ type: 'skills-updated' })
+        json(res, 200, { skills: imported })
+      } catch (error) {
+        skillError(res, error)
+      }
+      return
+    }
+    const skillEnabledMatch = /^\/api\/skills\/([^/]+)\/enabled$/.exec(pathname)
+    if (skillEnabledMatch && method === 'POST') {
+      try {
+        const body = await readJson(req)
+        const skill = setSkillEnabled(
+          home,
+          typeof body.cwd === 'string' ? body.cwd : null,
+          safeDecode(skillEnabledMatch[1]!),
+          body.enabled !== false,
+        )
+        broadcast({ type: 'skills-updated' })
+        json(res, 200, { skill })
+      } catch (error) {
+        skillError(res, error)
+      }
+      return
+    }
+    const skillMatch = /^\/api\/skills\/([^/]+)$/.exec(pathname)
+    if (skillMatch) {
+      const name = safeDecode(skillMatch[1]!)
+      try {
+        if (method === 'GET') {
+          json(res, 200, getManagedSkill(home, skillCwd, name))
+          return
+        }
+        if (method === 'PUT') {
+          const body = await readJson(req)
+          if (typeof body.content !== 'string') {
+            apiError(res, 400, 'skills/invalid-content', 'content 必须是字符串')
+            return
+          }
+          const skill = saveSkill(
+            home,
+            typeof body.cwd === 'string' ? body.cwd : null,
+            name,
+            body.content,
+            {
+              create: body.create === true,
+              scope: body.scope === 'project' ? 'project' : 'user',
+            },
+          )
+          broadcast({ type: 'skills-updated' })
+          json(res, 200, { skill })
+          return
+        }
+        if (method === 'DELETE') {
+          deleteSkill(home, skillCwd, name)
+          broadcast({ type: 'skills-updated' })
+          json(res, 200, { ok: true })
+          return
+        }
+      } catch (error) {
+        skillError(res, error)
+        return
+      }
+    }
+
+    // —— project memory ——
+    if (pathname === '/api/memories/projects' && method === 'GET') {
+      const projects = workspaceList(workspaces).map((workspace) => {
+        const root = memoryRoot(home, workspace.path)
+        const manifest = scanManifest(root)
+        return {
+          id: workspace.id,
+          title: workspace.title,
+          path: workspace.path,
+          updatedAt: manifest.updatedAt,
+          root: manifest.root,
+          index: manifest.index,
+          files: manifest.files,
+        }
+      })
+      json(res, 200, { projects })
+      return
+    }
+    const memoryIdMatch = /^\/api\/memories\/projects\/([^/]+)(\/.*)$/.exec(pathname)
+    if (memoryIdMatch) {
+      const id = safeDecode(memoryIdMatch[1]!)
+      const restPath = memoryIdMatch[2]!
+      const workspace = workspaces.workspaces[id]
+      if (!workspace) {
+        apiError(res, 404, 'memory/workspace-not-found', 'workspace not found')
+        return
+      }
+      const root = memoryRoot(home, workspace.path)
+      if (restPath === '/search' && method === 'GET') {
+        const query = url.searchParams.get('q') ?? ''
+        const kindRaw = url.searchParams.get('kind')
+        const kind =
+          kindRaw === 'experience' || kindRaw === 'fact' ? kindRaw : undefined
+        const limit = queryNumber(url, 'limit') ?? 20
+        const includeSuperseded = url.searchParams.get('include_superseded') === 'true'
+        json(res, 200, searchMemories(root, query, limit, kind, includeSuperseded))
+        return
+      }
+      if (restPath === '/index' && method === 'POST') {
+        try {
+          json(res, 200, { rebuilt: rebuildIndex(root) })
+        } catch (error) {
+          apiError(res, 400, 'memory/rebuild-failed', errorMessage(error))
+        }
+        return
+      }
+      if (restPath === '/health' && method === 'GET') {
+        json(res, 200, { health: memoryHealth(root) })
+        return
+      }
+      const file = safeDecode(restPath.replace(/^\/+/, ''))
+      try {
+        if (method === 'GET') {
+          json(res, 200, readMemoryFile(root, file))
+          return
+        }
+        if (method === 'DELETE') {
+          json(res, 200, { deleted: deleteMemoryFile(root, file) })
+          return
+        }
+      } catch (error) {
+        const status = isRecord(error) && typeof error.status === 'number' ? error.status : 400
+        apiError(
+          res,
+          status,
+          status === 404 ? 'memory/file-not-found' : status === 413 ? 'memory/file-too-large' : 'memory/bad-path',
+          errorMessage(error),
+        )
+        return
+      }
     }
     if (pathname === '/api/open-in-app/apps' && method === 'GET') {
       json(res, 200, { apps: [] })
@@ -1007,6 +1806,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       clearInterval(heartbeatTimer)
       for (const client of sseClients) client.end()
       sseClients.clear()
+      subagents.close()
+      await mcp.shutdownAll()
       for (const id of store.list().map((summary) => summary.id)) {
         store.flush(id)
       }
@@ -1366,19 +2167,43 @@ function workspaceFile(root: string, file: string): unknown {
   }
 }
 
-function emptySubagentCatalog() {
-  return {
-    scope: 'user' as const,
-    projectRoot: null,
-    projectDir: null,
-    userDir: '',
-    revision: 1,
-    effective: [],
-    shadowed: [],
-    diagnostics: [],
-    colors: [],
-    sources: [],
+function lastSelectionOf(events: Envelope[], config: AppConfig): ModelSelection {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.type === 'request-context') {
+      return { provider: event.provider, model: event.model }
+    }
+    if (event.type === 'request-header') {
+      return {
+        provider: event.header.config.provider,
+        model: event.header.config.model,
+        ...(event.header.config.reasoningEffort
+          ? { reasoningEffort: event.header.config.reasoningEffort }
+          : {}),
+      }
+    }
   }
+  return resolveDefault(config)
+}
+
+function previewFingerprint(qualifiedId: string, tools: string[], instructions: string): string {
+  let hash = 0xcbf29ce484222325n
+  const prime = 0x100000001b3n
+  const text = `${qualifiedId}\x01${tools.join(',')}\x01${instructions}`
+  for (const byte of Buffer.from(text, 'utf8')) {
+    hash ^= BigInt(byte)
+    hash = (hash * prime) & 0xffffffffffffffffn
+  }
+  return hash.toString(16).padStart(16, '0')
+}
+
+function subagentPolicyConcurrency(home: string): number {
+  const document = loadSettings(home)
+  const section = document?.['subagent-policy']
+  if (!isRecord(section)) return 8
+  const value = section.maxConcurrentRuns
+  if (typeof value !== 'number' || !Number.isInteger(value)) return 8
+  return Math.max(1, Math.min(64, value))
 }
 
 function emptyWeixinStatus() {

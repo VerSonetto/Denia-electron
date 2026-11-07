@@ -4,6 +4,8 @@
 // serde definitions). Field names and shapes are part of the HTTP contract:
 // the UI folds session events directly, so they must not drift.
 
+import type { SubagentDescriptor } from '../subagents/types.ts'
+
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
 
 export interface ToolCallRef {
@@ -135,6 +137,8 @@ export interface RequestHeaderSnapshot {
 
 /** Session events the TypeScript host emits (subset of the Rust union). */
 export type SessionEvent =
+  | { type: 'agent-inbox'; id: string; text: string; source: string }
+  | { type: 'agent-delivery'; id: string; text: string; source: string }
   | { type: 'turn-start'; turn: number }
   | { type: 'turn-end'; turn: number; reason: TurnEndReason }
   | { type: 'step-start'; turn: number; step: number }
@@ -201,6 +205,17 @@ export type SessionEvent =
       rationale: string
     }
   | { type: 'session-title'; title: string }
+  | {
+      type: 'compaction-summary'
+      turn: number
+      step: number
+      summary: string
+      replaces_from: number
+      replaces_to: number
+      keep_from: number
+      pre_tokens?: number
+      post_tokens?: number
+    }
   | { type: 'agent-preset'; preset: string }
   | { type: 'command-run'; name: string; text: string }
   | { type: 'request-context'; turn: number; step: number; provider: string; model: string; context_window?: number }
@@ -229,6 +244,7 @@ export interface SessionHeader {
   sandbox: boolean
   parent_session?: string
   agent_preset?: string
+  subagent?: SubagentDescriptor
 }
 
 export interface SessionSummary {

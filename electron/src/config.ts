@@ -329,6 +329,25 @@ export function findProvider(config: AppConfig, id: string): ProviderConfig | un
   return config.providers.find((provider) => provider.id === id)
 }
 
+function mcpSecretsOf(value: unknown): { path: string[]; set: boolean }[] {
+  if (!isRecord(value) || !Array.isArray(value.servers)) return []
+  const out: { path: string[]; set: boolean }[] = []
+  value.servers.forEach((entry, index) => {
+    if (!isRecord(entry)) return
+    if (isRecord(entry.env)) {
+      for (const [key, secret] of Object.entries(entry.env)) {
+        out.push({ path: ['servers', String(index), 'env', key], set: typeof secret === 'string' && secret !== '' })
+      }
+    }
+    if (isRecord(entry.headers)) {
+      for (const [key, secret] of Object.entries(entry.headers)) {
+        out.push({ path: ['servers', String(index), 'headers', key], set: typeof secret === 'string' && secret !== '' })
+      }
+    }
+  })
+  return out
+}
+
 /** Settings namespace shape the web UI renders (`SettingsDescribe`). */
 export function settingsDescribe(home: string, config: AppConfig) {
   const document = loadSettings(home)
@@ -347,7 +366,7 @@ export function settingsDescribe(home: string, config: AppConfig) {
         value: document[ns],
         revision: 1,
         applies: ns === 'llm-openai' ? 'restart' : 'live',
-        secrets: [],
+        secrets: ns === 'mcp' ? mcpSecretsOf(document[ns]) : [],
       })
     }
   }

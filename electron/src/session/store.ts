@@ -16,6 +16,7 @@ import type {
   SessionSummary,
   SessionTotals,
 } from '../core/wire.ts'
+import type { SubagentDescriptor } from '../subagents/types.ts'
 import { newSessionId } from '../core/util.ts'
 
 const SESSION_FORMAT_VERSION = 0
@@ -94,7 +95,14 @@ export class SessionStore {
     return path.join(this.sessionDir(id), 'session.jsonl')
   }
 
-  create(cwd: string, options: { sandbox?: boolean; parentSession?: string } = {}): SessionHeader {
+  create(
+    cwd: string,
+    options: {
+      sandbox?: boolean
+      parentSession?: string
+      subagent?: SubagentDescriptor
+    } = {},
+  ): SessionHeader {
     const id = newSessionId()
     const header: SessionHeader = {
       type: 'session',
@@ -104,6 +112,7 @@ export class SessionStore {
       cwd,
       sandbox: options.sandbox ?? false,
       ...(options.parentSession ? { parent_session: options.parentSession } : {}),
+      ...(options.subagent ? { subagent: options.subagent } : {}),
     }
     fs.mkdirSync(this.sessionDir(id), { recursive: true })
     fs.writeFileSync(this.logFile(id), JSON.stringify(header) + '\n', 'utf8')
@@ -131,6 +140,35 @@ export class SessionStore {
     }
   }
 
+  /** Rewrite the header line in place (fork projection, descriptors). */
+  updateHeader(id: string, patch: Partial<SessionHeader>): void {
+    const session = this.live.get(id) ?? this.load(id)
+    if (!session) return
+    session.header = { ...session.header, ...patch }
+    session.writer.flush()
+    const file = this.logFile(id)
+    const raw = fs.readFileSync(file, 'utf8')
+    const newline = raw.indexOf('\n')
+    const rest = newline >= 0 ? raw.slice(newline + 1) : ''
+    fs.writeFileSync(file, JSON.stringify(session.header) + '\n' + rest, 'utf8')
+  }
+
+  /** Write a large auxiliary file inside the session directory. */
+  writeAuxiliary(id: string, name: string, content: string): void {
+    const dir = this.sessionDir(id)
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, path.basename(name))
+    fs.writeFileSync(file, content, 'utf8')
+  }
+
+  readAuxiliary(id: string, name: string): string | null {
+    const file = path.join(this.sessionDir(id), path.basename(name))
+    try {
+      return fs.readFileSync(file, 'utf8')
+    } catch {
+      return null
+    }
+  }
   private load(id: string): LiveSession | null {
     const existing = this.live.get(id)
     if (existing) return existing

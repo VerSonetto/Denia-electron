@@ -5,6 +5,7 @@
 // tool calls, when the user cancels, or when an execution failure is terminal.
 
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 
 import type {
   AppConfig,
@@ -20,6 +21,7 @@ import type {
   ImageData,
   ModelSelection,
   SessionEvent,
+  SessionHeader,
   StreamChunk,
   ToolCallRef,
   ToolSchema,
@@ -33,6 +35,7 @@ import type { SessionStore } from '../session/store.ts'
 import type { ToolRegistry } from '../tools/index.ts'
 import type { ToolContext } from '../tools/types.ts'
 import { toolError } from '../tools/types.ts'
+import type { SubagentPromptContext } from './system-prompt.ts'
 import type {
   ApprovalAnswer,
   ApprovalBridge,
@@ -60,6 +63,37 @@ export interface StartTurnOptions {
   images?: ImageData[]
   /** Prompt origin, recorded for future trajectory tooling. */
   source?: string
+  /** Resume from the inbox: do not append an empty user message. */
+  continueOnly?: boolean
+}
+
+/**
+ * Per-deployment services the loop consults outside the static registry:
+ * subagent capability tools, MCP tools and the agent inbox.
+ */
+export interface SessionServices {
+  extraSchemas(sessionId: string, header: SessionHeader, state: PermissionState): ToolSchema[]
+  executeExtra(
+    name: string,
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+  ): Promise<ToolOutput | undefined>
+  /** Intercept a call before policy/approval (MCP lazy loading). */
+  intercept?(call: ToolCallRef, sessionId: string): ToolOutput | undefined
+  /** Turn queued agent-inbox events into model-visible deliveries. */
+  drainInbox?(sessionId: string): void
+  /** A turn closed; settle subagents and wake pending inboxes. */
+  onTurnEnd?(sessionId: string): void
+  /** Extra system prompt sections (catalog, MCP discipline, memory). */
+  promptSections?(sessionId: string, header: SessionHeader): string[]
+  /** User-message injections applied at step boundaries (idempotent by channel). */
+  injections?(sessionId: string, header: SessionHeader): { channel: string; text: string }[]
+  /** Memory directory of this session, used by the permission gate. */
+  memoryRoot?(sessionId: string, header: SessionHeader): string | null
+  /** Subagent role additions, when this session is a child. */
+  context?(sessionId: string): SubagentPromptContext | null
+  /** Frozen selection for resumed child sessions. */
+  selectionFor?(sessionId: string): ModelSelection | undefined
 }
 
 export interface DriverSettings {
@@ -101,6 +135,7 @@ export class SessionDriver {
   private readonly policy: ExecPolicy
   /** Session-scoped "allow for this window" cache, keyed by normalized action. */
   private readonly grants = new Map<string, Set<string>>()
+  private services?: SessionServices
   readonly settings: DriverSettings
 
   constructor(
@@ -122,6 +157,11 @@ export class SessionDriver {
       maxSteps: settings?.maxSteps ?? MAX_STEPS,
       maxParallel: Math.max(1, settings?.maxParallel ?? MAX_PARALLEL),
     }
+  }
+
+  /** Install host services after both runtimes exist (breaks the cycle). */
+  attachServices(services: SessionServices): void {
+    this.services = services
   }
 
   /** The session's permission state, projected from its event log. */
@@ -203,14 +243,23 @@ export class SessionDriver {
     this.onRunningChange(sessionId, true)
 
     const config = this.getConfig()
+    const frozen = options.selection ?? this.services?.selectionFor?.(sessionId)
     let selection: ModelSelection = resolveDefault(config)
     let provider: ProviderConfig | undefined
     try {
-      const resolved = this.resolveSelection(config, options.selection)
+      const resolved = this.resolveSelection(config, frozen)
       provider = resolved.provider
       selection = resolved.selection
     } catch {
       provider = undefined
+    }
+
+    let role: SubagentPromptContext | null = null
+    let roleError: string | null = null
+    try {
+      role = this.services?.context?.(sessionId) ?? null
+    } catch (error) {
+      roleError = errorMessage(error)
     }
 
     const turn = lastTurn(session.events) + 1
@@ -236,22 +285,34 @@ export class SessionDriver {
     let currentStep = 0
     append({ type: 'turn-start', turn })
     turnOpen = true
-    append({
-      type: 'user-message',
-      text: prompt,
-      injected: false,
-      ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
-    })
+    if (!options.continueOnly) {
+      append({
+        type: 'user-message',
+        text: prompt,
+        injected: false,
+        ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
+      })
+    }
 
     const signatures = new Map<string, number>()
 
     try {
+      if (roleError !== null) {
+        closeTurn({
+          kind: 'error',
+          failure: { code: 'subagent/snapshot-invalid', message: roleError },
+        })
+        return
+      }
       for (let step = 1; step <= this.settings.maxSteps; step += 1) {
         currentStep = step
         if (controller.signal.aborted) {
           closeTurn(abortedReason())
           return
         }
+        // Deliver queued agent messages at the step boundary, never mid-action.
+        this.services?.drainInbox?.(sessionId)
+        this.applyInjections(sessionId, session.header)
         append({ type: 'step-start', turn, step })
         stepOpen = true
 
@@ -266,12 +327,16 @@ export class SessionDriver {
         const events = this.store.read(sessionId)?.events ?? []
         const messages = deriveHistory(events)
         const permission = this.permissionStateOf(sessionId)
-        const schemas = this.schemasFor(permission)
+        const schemas = this.schemasFor(permission, sessionId, session.header)
         const system = buildSystemPrompt({
           cwd: session.header.cwd,
           sandbox: session.header.sandbox,
           tools: schemas,
           permission,
+          ...(role ? { subagent: role } : {}),
+          ...(this.services?.promptSections
+            ? { extraSections: this.services.promptSections(sessionId, session.header) }
+            : {}),
         })
         append({
           type: 'request-context',
@@ -351,6 +416,9 @@ export class SessionDriver {
           cwd: session.header.cwd,
           sandbox: session.header.sandbox,
           cancel: controller.signal,
+          selection,
+          permission,
+          memoryRoot: this.services?.memoryRoot?.(sessionId, session.header) ?? null,
           emit: (event) => {
             append(event)
           },
@@ -416,16 +484,69 @@ export class SessionDriver {
       this.running.delete(sessionId)
       this.onRunningChange(sessionId, false)
       this.store.flush(sessionId)
+      try {
+        this.services?.onTurnEnd?.(sessionId)
+      } catch {
+        /* settlement must never mask the turn result */
+      }
+    }
+  }
+
+  /** Append an injected user message only when its channel content changed. */
+  private applyInjections(sessionId: string, header: SessionHeader): void {
+    const injections = this.services?.injections?.(sessionId, header)
+    if (!injections || injections.length === 0) return
+    const events = this.store.read(sessionId)?.events ?? []
+    for (const injection of injections) {
+      let previous: string | null = null
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]!
+        if (event.type === 'user-message' && event.channel === injection.channel) {
+          previous = event.text
+          break
+        }
+      }
+      if (previous === injection.text) continue
+      this.store.append(sessionId, {
+        type: 'user-message',
+        text: injection.text,
+        injected: true,
+        channel: injection.channel,
+      })
     }
   }
 
   /** Tool schemas visible under the current permission state. */
-  private schemasFor(state: PermissionState): ToolSchema[] {
+  private schemasFor(
+    state: PermissionState,
+    sessionId?: string,
+    header?: SessionHeader,
+  ): ToolSchema[] {
     const all = this.registry.schemas()
-    if (state.sandbox !== 'read-only') return all
-    // Read-only sandbox: writes cannot happen, so do not advertise those tools.
-    const blocked = new Set(['write_file', 'edit'])
-    return all.filter((schema) => !blocked.has(schema.name))
+    const blocked = new Set<string>()
+    if (state.sandbox === 'read-only') {
+      blocked.add('write_file')
+      blocked.add('edit')
+      blocked.add('bash')
+    }
+    const role = header?.subagent
+    const allowed = role
+      ? new Set(role.effectiveTools ?? [])
+      : null
+    const filtered = all.filter((schema) => {
+      if (blocked.has(schema.name)) return false
+      if (allowed && !allowed.has(schema.name)) return false
+      return true
+    })
+    if (sessionId && header && this.services?.extraSchemas) {
+      const seen = new Set(filtered.map((schema) => schema.name))
+      for (const schema of this.services.extraSchemas(sessionId, header, state)) {
+        if (seen.has(schema.name)) continue
+        seen.add(schema.name)
+        filtered.push(schema)
+      }
+    }
+    return filtered
   }
 
   private async executeCalls(
@@ -438,13 +559,15 @@ export class SessionDriver {
     let next = 0
     let aborted = false
 
-    const confinedFor = (state: PermissionState): boolean => state.sandbox === 'read-only' && ctx.sandbox
+    const confinedFor = (state: PermissionState, call: ToolCallRef): boolean =>
+      state.sandbox === 'read-only' && ctx.sandbox && !memoryAnchored(call, ctx.memoryRoot, ctx.cwd)
 
     const launch = (index: number, state: PermissionState): void => {
       const call = calls[index]!
       const task = this.runOne(call, {
         ...ctx,
-        confined: confinedFor(state),
+        permission: state,
+        confined: confinedFor(state, call),
         callId: call.id,
       }).then((output) => {
         outputs[index] = output
@@ -458,7 +581,14 @@ export class SessionDriver {
       while (next < calls.length && inFlight.size < this.settings.maxParallel) {
         const state = this.permissionStateOf(ctx.sessionId)
         const call = calls[next]!
-        const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId))
+        const intercepted = this.services?.intercept?.(call, ctx.sessionId)
+        if (intercepted) {
+          outputs[next] = intercepted
+          next += 1
+          started = true
+          continue
+        }
+        const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot)
         if (gate.decision.kind === 'forbid') {
           outputs[next] = toolError(gate.decision.reason)
           next += 1
@@ -600,13 +730,14 @@ export class SessionDriver {
     if (call.name === 'exit_plan') {
       return this.applyPlanApproval(ctx.sessionId, answer, ctx.emit, onSelectionChange)
     }
-    const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId))
+    const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot)
     if (recheck.decision.kind === 'forbid') {
       return toolError(`批准后重新判权被拒绝:${recheck.decision.reason}`)
     }
     return this.runOne(call, {
       ...ctx,
-      confined: state.sandbox === 'read-only' && ctx.sandbox,
+      permission: state,
+      confined: state.sandbox === 'read-only' && ctx.sandbox && !memoryAnchored(call, ctx.memoryRoot, ctx.cwd),
       callId: call.id,
     })
   }
@@ -698,7 +829,7 @@ export class SessionDriver {
       return { content: '[工具错误] 命令被用户中断', isError: true, errorIdentity: { name: call.name, code: 'cancelled' } }
     }
     const tool = this.registry.get(call.name)
-    if (!tool) {
+    if (!tool && !this.services?.executeExtra) {
       const available = this.registry.names().join(', ')
       return {
         content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
@@ -721,7 +852,17 @@ export class SessionDriver {
       }
     }
     try {
-      const output = await tool.execute(args, ctx)
+      const output = tool
+        ? await tool.execute(args, ctx)
+        : await this.services!.executeExtra!(call.name, args, ctx)
+      if (!output) {
+        const available = this.registry.names().join(', ')
+        return {
+          content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'unknown-tool' },
+        }
+      }
       const [content, truncation] = budgetOf(output.content)
       return {
         ...output,
@@ -743,6 +884,20 @@ export class SessionDriver {
 
 export function isSessionBusy(events: Envelope[]): boolean {
   return hasOpenTurn(events)
+}
+
+/** A write_file/edit call whose target sits inside the project memory dir. */
+function memoryAnchored(
+  call: ToolCallRef,
+  memoryRoot: string | null | undefined,
+  cwd: string,
+): boolean {
+  if (!memoryRoot || (call.name !== 'write_file' && call.name !== 'edit')) return false
+  const raw = argumentText(call.arguments, 'path').trim()
+  if (raw === '') return false
+  const target = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(cwd, raw)
+  const relative = path.relative(memoryRoot, target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
 }
 
 export type { ToolContext }

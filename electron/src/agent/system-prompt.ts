@@ -1,9 +1,8 @@
-// The system prompt for the first TypeScript cut.
+// System prompt assembly: base identity + permission snapshot + role additions.
 //
-// This is deliberately smaller than the Rust prompt assembly (skills, memory,
-// presets, MCP and task discipline all come later), but it carries the rules
-// the agent loop relies on: act in the workspace, prefer real verification,
-// report honestly, and use tools one step at a time.
+// The base prompt stays byte-stable for ordinary sessions. Subagents get their
+// definition instructions appended (never replacing the parent persona), plus
+// hard constraints that keep delegation one level deep.
 
 import os from 'node:os'
 
@@ -11,11 +10,22 @@ import type { PermissionState } from '../core/permission.ts'
 import { modeOf } from '../core/permission.ts'
 import type { ToolSchema } from '../core/wire.ts'
 
+export interface SubagentPromptContext {
+  name: string
+  instructions: string
+  permissionCeiling: 'inherit' | 'read-only'
+  parentPersona?: string
+  legacy?: boolean
+}
+
 export interface SystemPromptOptions {
   cwd: string
   sandbox: boolean
   tools: ToolSchema[]
   permission: PermissionState
+  subagent?: SubagentPromptContext
+  /** Extra sections appended after the working rules (catalog, MCP, memory). */
+  extraSections?: string[]
 }
 
 /** One paragraph describing the active sandbox, approval policy and reviewer. */
@@ -48,14 +58,18 @@ function permissionSection(permission: PermissionState): string {
   return lines.join('\n')
 }
 
+function hasTool(tools: ToolSchema[], name: string): boolean {
+  return tools.some((tool) => tool.name === name)
+}
+
 export function buildSystemPrompt(options: SystemPromptOptions): string {
   const platform = `${process.platform} ${os.arch()}`
   const shellNote =
     process.platform === 'win32'
       ? '命令经 Git Bash(或 cmd.exe)执行;路径使用系统原生形式。'
       : '命令经 bash 执行。'
-  return [
-    'You are Denia, an AI coding agent working directly in the user\'s local workspace.',
+  const lines = [
+    "You are Denia, an AI coding agent working directly in the user's local workspace.",
     '',
     `Workspace: ${options.cwd}`,
     `Platform: ${platform}`,
@@ -68,12 +82,52 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     '',
     'Working rules:',
     '- Read before you edit. Prefer `read_file` / `grep` / `glob` to understand code, then make the smallest change that solves the task.',
-    '- Prefer `edit` for local changes and `write_file` only for new files or full rewrites.',
-    '- Use `bash` for builds, tests, git and other commands. Do not claim a command passed unless it actually ran and its exit code was 0.',
+  ]
+  if (hasTool(options.tools, 'edit')) {
+    lines.push('- Prefer `edit` for local changes and `write_file` only for new files or full rewrites.')
+  }
+  if (hasTool(options.tools, 'bash')) {
+    lines.push(
+      '- Use `bash` for builds, tests, git and other commands. Do not claim a command passed unless it actually ran and its exit code was 0.',
+    )
+  }
+  lines.push(
     '- Keep the user informed: short progress notes between tool batches are welcome; do not narrate every internal thought.',
     '- Do not invent files, APIs or results. If something is unknown, inspect it or say so.',
-    '- When the task is multi-step, use `todo_write` once at the start and update it as work completes.',
-    '',
-    'Reply in the user\'s language (Chinese by default). Be concise and concrete.',
-  ].join('\n')
+  )
+  if (hasTool(options.tools, 'todo_write')) {
+    lines.push('- When the task is multi-step, use `todo_write` once at the start and update it as work completes.')
+  }
+  lines.push('', "Reply in the user's language (Chinese by default). Be concise and concrete.")
+
+  if (options.subagent) {
+    const sub = options.subagent
+    lines.push(
+      '',
+      `# Subagent role: ${sub.name}`,
+      sub.instructions.trim() === ''
+        ? '(This role has no extra instructions; follow the base rules.)'
+        : sub.instructions.trim(),
+      '',
+      '# Subagent constraints',
+      '- You are a subagent. You cannot delegate to other agents, create or modify agent definitions, or change the session plan/goal.',
+      '- Work only on the task you were given. Report success, failure (with the reason), or a decision the parent must make.',
+      '- You only have the tools listed in this request. Do not pretend to call anything else.',
+      '- Your role instructions are added to the parent persona; they never replace it.',
+    )
+    if (sub.permissionCeiling === 'read-only') {
+      lines.push('- Your permission ceiling is read-only: writing files and running commands are refused; investigate and report only.')
+    }
+    if (sub.legacy) {
+      lines.push('- This subagent predates tool snapshots; its grant is the conservative historical read-only set.')
+    }
+    if (sub.parentPersona?.trim()) {
+      lines.push('', 'Parent persona (kept for continuity):', sub.parentPersona.trim())
+    }
+  }
+
+  for (const section of options.extraSections ?? []) {
+    if (section.trim() !== '') lines.push('', section.trim())
+  }
+  return lines.join('\n')
 }

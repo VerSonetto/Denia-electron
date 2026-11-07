@@ -28,10 +28,55 @@ function toolCallsOf(blocks: ContentBlock[]) {
 }
 
 export function deriveHistory(events: Envelope[]): ChatMessage[] {
+  type Compaction = {
+    from: number
+    to: number
+    keepFrom: number
+    summary: string
+  }
+  const compactions: Compaction[] = []
+  for (const event of events) {
+    if (event.type === 'compaction-summary') {
+      compactions.push({
+        from: event.replaces_from,
+        to: event.replaces_to,
+        keepFrom: event.keep_from,
+        summary: event.summary,
+      })
+    }
+  }
+  const skipped = (seq: number): boolean =>
+    compactions.some((item) => seq >= item.from && seq <= item.to)
+  const summaryBefore = (seq: number): string | null => {
+    for (const item of compactions) {
+      if (item.keepFrom === seq) return item.summary
+    }
+    return null
+  }
+  // Baseline channels keep only their latest text on the model surface; the
+  // log itself stays append-only. Old logs without a channel fall back to the
+  // reminder prefixes.
+  const lastBaseline = new Map<string, number>()
+  for (const event of events) {
+    if (event.type !== 'user-message' || skipped(event.seq)) continue
+    const channel = baselineChannelOf(event)
+    if (channel) lastBaseline.set(channel, event.seq)
+  }
   const messages: ChatMessage[] = []
   for (const event of events) {
+    const summary = summaryBefore(event.seq)
+    if (summary !== null) messages.push({ role: 'user', content: summary })
+    if (skipped(event.seq)) continue
     switch (event.type) {
+      case 'agent-delivery': {
+        // Delivery is the model-visible half of the agent inbox; the inbox
+        // event itself stays out of the model surface.
+        messages.push({ role: 'user', content: event.text })
+        break
+      }
       case 'user-message': {
+        const channel = baselineChannelOf(event)
+        if (channel && lastBaseline.get(channel) !== event.seq) break
         messages.push({
           role: 'user',
           content: event.text,
@@ -64,6 +109,37 @@ export function deriveHistory(events: Envelope[]): ChatMessage[] {
   }
   return messages
 }
+
+/** Baseline channels: only the newest occurrence is model-visible. */
+function baselineChannelOf(
+  event: Extract<Envelope, { type: 'user-message' }>,
+): string | null {
+  if (event.channel) {
+    return BASELINE_CHANNELS.has(event.channel) ? event.channel : null
+  }
+  if (!event.injected) return null
+  if (event.text.startsWith('<system-reminder>\n工作区指令:')) return 'workspace-instructions'
+  if (event.text.startsWith('<system-reminder>\n技能目录:')) return 'skill-catalog'
+  if (
+    event.text.startsWith('<system-reminder>\n') &&
+    event.text.includes('/MEMORY.md 的内容')
+  ) {
+    return 'project-memory'
+  }
+  return null
+}
+
+const BASELINE_CHANNELS = new Set([
+  'workspace-instructions',
+  'capability',
+  'skill-catalog',
+  'project-memory',
+  'goal',
+  'subagent-catalog',
+  'system-prompt-update',
+  'runtime-context',
+  'coding-workbench',
+])
 
 /** Last turn number in the log (0 when no turn has started). */
 export function lastTurn(events: Envelope[]): number {

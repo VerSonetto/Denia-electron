@@ -84,13 +84,21 @@ const FILE_WRITE_TOOLS = new Set(['write_file', 'edit'])
  * to the permissive class so the tool's own validation reports the problem
  * instead of disguising it as a permission failure.
  */
-export function classifyCall(cwd: string, call: ToolCallRef, sandboxRestricted: boolean): CallFacts {
+export function classifyCall(
+  cwd: string,
+  call: ToolCallRef,
+  sandboxRestricted: boolean,
+  memoryRoot?: string | null,
+): CallFacts {
   if (call.name === 'exit_plan') {
     return { action: 'plan-submit', insideWorkspace: true }
   }
   if (FILE_WRITE_TOOLS.has(call.name)) {
     const target = touchedPath(cwd, call)
     if (target === undefined) return { action: 'write', insideWorkspace: true }
+    if (memoryRoot && isInside(memoryRoot, target) && target.toLowerCase().endsWith('.md')) {
+      return { action: 'memory-write', insideWorkspace: false }
+    }
     return { action: 'write', insideWorkspace: isInside(cwd, target) }
   }
   if (call.name === 'bash' || call.name === 'job_start') {
@@ -125,7 +133,7 @@ export function approvalCacheKey(facts: CallFacts, call: ToolCallRef, cwd: strin
     )
     return `shell:${tokens.join(' | ')}`
   }
-  if (facts.action === 'write' || facts.action === 'delete') {
+  if (facts.action === 'write' || facts.action === 'delete' || facts.action === 'memory-write') {
     const target = touchedPath(cwd, call)
     return `${facts.action}:${target ?? call.name}`
   }
@@ -143,9 +151,10 @@ export function gateCall(
   call: ToolCallRef,
   policy: ExecPolicy,
   grants: ApprovalGrants,
+  memoryRoot?: string | null,
 ): GateResult {
   const restricted = state.sandbox !== 'danger-full-access'
-  const facts = classifyCall(cwd, call, restricted)
+  const facts = classifyCall(cwd, call, restricted, memoryRoot)
   const rule = facts.shell ? policy.evaluate(facts.shell.command) : undefined
   const decision = decideAction({
     state,

@@ -200,7 +200,7 @@ export function parsePermissionState(value: unknown): PermissionState | null {
 }
 
 /** Action class of one tool call, decided before the policy stage. */
-export type ActionClass = 'read' | 'write' | 'delete' | 'network' | 'plan-submit'
+export type ActionClass = 'read' | 'write' | 'delete' | 'network' | 'plan-submit' | 'memory-write'
 
 /** Four-valued decision: run, ask a reviewer, force a human, or refuse. */
 export type Decision =
@@ -301,6 +301,9 @@ export function decideAction(input: PolicyInput): Decision {
       ? { kind: 'prompt-user' }
       : forbid('当前不在计划模式,exit_plan 工具不可用;请按当前权限模式直接执行任务。')
   }
+
+  // Project-memory writes are harness behavior: allowed in every mode.
+  if (action === 'memory-write') return ALLOW
 
   // Plan collaboration mode forbids every write, regardless of sandbox.
   if (state.collaboration === 'plan' && action !== 'read') {

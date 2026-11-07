@@ -4,9 +4,9 @@ Rust 后端向 Electron + TypeScript 迁移的工作树。前端 `web/` 原样�
 HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服务，窗口直接加载
 `http://127.0.0.1:<port>`，相对 `/api` 路径与事件流都不需要改。
 
-## 当前范围（首期）
+## 当前范围
 
-已经跑通的最小闭环：
+已经跑通的主链路：
 
 - **agent loop**：turn/step、流式 chunk、工具调用、并行执行、取消、死循环检测
 - **LLM 适配器**：`openai-completions`、`openai-responses`、`anthropic-messages`，
@@ -17,20 +17,40 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **共享配置**：读取 `settings.yaml` 的 `llm-openai.providers`、从
   `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；工作区读写 `workspaces.json`
   的 map+order 结构；随附 preset（standard / creator / minimal）与 Rust 对齐
-- **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、`todo_write`、`exit_plan`
+- **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、
+  `todo_write`、`exit_plan`、`skill`
 - **权限（三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
   只读 / 工作区编辑 / 自动审批（Approve for me）/ 完全访问；四值决策
   （allow / prompt / prompt-user / forbid）；五值审批（accept、accept-for-session、
   accept-with-rule、decline、cancel）；execpolicy 命令前缀规则
   （`<home>/execpolicy.json`，批准时可持久化 allow 规则）；自动审批用模型
-  按严格 JSON 审查，超时/失败一律拒绝
+  按严格 JSON 审查，超时/失败一律拒绝；项目记忆写入是独立的 memory-write 类
 - **HTTP/SSE 宿主**：会话列表/创建/快照/分页/发消息/取消/引导、follow SSE、
   全局事件 SSE、模型目录、设置、工作区、文件树/文件读取、审批应答
+- **MCP**：stdio / Streamable HTTP / HTTP+SSE 三种传输；`mcp__<server>__<tool>`
+  命名与冲突过滤；`mcp_list` 目录 + 首次调用懒加载参数；按字符分页与
+  `result_id` 续读（续读不重新执行外部工具）；`/api/mcp` 管理端点（增删改、
+  启停、重连、逐工具开关）与 `settings.yaml` 的 `mcp` 命名空间持久化
+- **子代理**：内置 explore / develop / verify + 用户级/项目级定义（YAML
+  frontmatter + Markdown）；`spawn_agent` / `fork_agent` / `create_subagent` /
+  `send_message` / `list_agents` / `wait_agent` / `interrupt_agent` /
+  `session_trace`；冻结工具授权、只读权限上限、禁止再派遣、后台执行、
+  `agent-inbox` → `agent-delivery` 完成投递、fork 只复制已闭合历史；
+  `/api/subagent-profiles`、`/api/subagent-tools` 与 `/api/sessions/:id/agents`
+- **技能**：项目/用户/内置分层发现，`SKILL.md` + 资源读取，`skill` 工具，
+  `<available_skills>` 目录注入，`/api/skills` 管理端点与 `disabled-skills.json`
+- **项目记忆**：`<home>/memories/projects/<slug>-<sha16>/memory/` 桶；
+  `MEMORY.md` 索引注入（剔除历史区、行/字节预算）；memory-write 权限类；
+  `/api/memories/projects` 列表/读写/检索/重建/体检
+- **工作区指令**：`AGENTS.md` 分层发现（全局 + 项目祖先链 + 触达文件后代链），
+  子代理仅项目级；按正文变化幂等注入；`/api/global-rules` 读写
+- **标题 / 上下文**：首轮后后台生成 `session-title`；`/context-breakdown`
+  近似 token 拆分与压力；手动压缩按整轮摘要并落 `compaction-summary`
 - **Electron 壳**：主进程起宿主，窗口加载 UI
 
-尚未迁移：MCP、子代理、技能、项目记忆、goal、压缩、浏览器、渠道、
-远程连接、更新、终端。这些端点目前返回 501 或空壳，UI 打开对应面板时会提示，
-不影响对话主链路。
+尚未迁移：goal、后台任务（jobs）、浏览器、渠道、远程连接、更新、终端；
+真实 OS 沙箱仍未实现（只读档靠命令证明 + 工具层路径限制兵底）。这些端点
+目前返回 501 或空壳，不影响已迁移的能力。
 
 ## 权限模型
 
@@ -54,9 +74,24 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **规则引擎**：`<home>/execpolicy.json` 可放命令前缀规则（allow / prompt /
   prompt-user / forbidden），多条命中取最严；批准时选“以后同类都允许”
   会把 allow 前缀写回该文件。
+- **项目记忆写入**：`write_file` / `edit` 落在记忆目录内的 `.md` 归为
+  memory-write，四档权限均放行；这些调用不受 `confined` 限制，也不触发审批。
 
 旧的三档事件 `permission-mode`（read-only / auto-edit / plan / full）仍然写入，
 现有 Web UI 不改也能正常工作；`approve-for-me` 在旧 UI 中显示为“自动编辑”。
+
+## 上下文注入
+
+模型看到的自动上下文走 `user-message {injected:true, channel}`，每个 step
+开始时按通道刷新，内容未变则不重复发送：
+
+- `workspace-instructions`：`AGENTS.md` 全文（system-reminder 框架）
+- `skill-catalog`：`<available_skills>` 摘要列表
+- `project-memory`：`MEMORY.md` 索引（仅主代理；子代理不注入）
+- `agent-delivery`：子代理完成通知 / 父子消息
+
+`deriveHistory` 对上述基线通道只保留最新一条进入模型面；日志仍 append-only。
+子代理目录与 MCP 纪律段在系统提示里，不占注入通道。
 
 ## 运行
 
@@ -101,6 +136,19 @@ npm start
 }
 ```
 
+MCP 服务器配置写在 `settings.yaml` 的 `mcp.servers`（也可在设置页编辑）：
+
+```yaml
+mcp:
+  servers:
+    - id: fs
+      transport: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/work"]
+      enabled: true
+      disabledTools: []
+```
+
 ## 构建安装包
 
 ```bash
@@ -135,34 +183,41 @@ npm run dist
 src/
   main.ts                 Electron 主进程（起宿主 + 开窗口）
   host/server.ts          本地 HTTP/SSE 宿主与静态资源
+  host/services.ts        loop ↔ MCP / 子代理 / 技能 / 记忆 / 注入的接缝
   agent/loop.ts           turn/step 主循环
-  agent/history.ts        会话事件 → 模型消息
-  agent/system-prompt.ts  首期系统提示
+  agent/history.ts        会话事件 → 模型消息（基线通道折叠、压缩区间）
+  agent/system-prompt.ts  基础提示 + 子代理角色/约束 + 额外段
+  agent/session-title.ts  标题生成
+  agent/compact.ts        手动压缩摘要
+  mcp/                    协议、三种传输、客户端、进程池、设置
+  subagents/              定义仓库、派遣解析、后台运行时
+  skills/                 分层发现、解析、管理、内置技能
+  context/                项目记忆、工作区指令
   llm/                    三个协议适配器 + 共享 SSE/块组装
   session/store.ts        JSONL 会话日志
-  tools/                  bash / 文件 / 搜索 / todo
+  tools/                  bash / 文件 / 搜索 / todo / mcp / skill
   config.ts               提供商、home、设置描述
+builtin-skills/           随包内置技能（skill-creator / denia-guide）
 scripts/
   build.mjs               esbuild 打包
   dev.mjs                 打包后启动 Electron
   serve.ts                只跑宿主（浏览器联调用）
   mock-gateway.ts         UI 联调用的 OpenAI 兼容 mock
-test/
-  loop.test.ts            agent loop 端到端（mock 网关）
-  adapters.test.ts        responses / anthropic 适配器
 ```
 
 ## 验证现状
 
 - `npm run typecheck` 通过
-- `npm test`：4 个用例通过（agent loop 工具链、follow SSE、两种协议适配器）
-- 浏览器联调：真实 `web/dist` + mock 网关完成一轮 todo → bash → 文本的流式对话
-- `DENIA_SMOKE_SHOT=<png>`：Electron 启动后自动截图退出，用于验证真实窗口加载
+- `npm test`：36 个用例通过，覆盖 agent loop、协议适配器、权限/审批、MCP
+  三种传输、父子代理派遣/完成投递/fork、技能、项目记忆、工作区指令、
+  标题与手动压缩
+- 前端 `cd web && npx tsc -b && npx vite build` 通过
+- `DENIA_SMOKE_SHOT=<png>`：Electron 启动后自动截图退出，用于验证真实窗口
+  加载（本次迁移已用真实构建产物截图确认）
 
 ## 下一步建议
 
-1. 把审批策略（permission mode）与 `bash`/写文件的门控接进 loop
-2. 会话标题生成、context 压力统计与压缩
-3. 系统提示分包（persona / 工具纪律 / AGENTS.md）
-4. MCP、子代理、技能、项目记忆
-5. 桌面能力：原生目录选择器、自定义标题栏（Electron 的 `app-region`）、托盘
+1. goal（目标续跑）与后台任务（jobs）
+2. 浏览器工具与终端会话
+3. 渠道（微信 / QQ Bot）、远程连接与更新
+4. 真实 OS 沙箱

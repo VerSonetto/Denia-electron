@@ -2,7 +2,8 @@
 
 import path from 'node:path'
 
-import type { SessionEvent, ToolOutput, ToolSchema } from '../core/wire.ts'
+import type { ModelSelection, SessionEvent, ToolOutput, ToolSchema } from '../core/wire.ts'
+import type { PermissionState } from '../core/permission.ts'
 
 export interface ToolContext {
   sessionId: string
@@ -13,6 +14,12 @@ export interface ToolContext {
   /** Confine file access to `cwd` (mirrors the Rust `confined` flag). */
   confined: boolean
   cancel: AbortSignal
+  /** Model selection of the current turn (subagent dispatch inherits it). */
+  selection?: ModelSelection
+  /** Permission state the call was judged under. */
+  permission?: PermissionState
+  /** Project memory directory (writes here are harness behavior). */
+  memoryRoot?: string | null
   /** Log-only event sink (todo snapshots, live bash output). */
   emit(event: SessionEvent): void
 }
