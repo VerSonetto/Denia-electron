@@ -30,21 +30,6 @@ export function applyManualOrder<T extends { id: string }>(
   return fresh.length === 0 ? ordered : [...fresh, ...ordered]
 }
 
-/**
- * 置顶项稳定上浮:置顶项保留它们在传入顺序里的相对位置,其余项保持原序
- * 跟在后面。没有命中项时返回原数组引用,避免无谓重渲染。
- */
-export function applyPins<T extends { id: string }>(
-  items: T[],
-  pinned: readonly string[],
-): T[] {
-  if (pinned.length === 0) return items
-  const set = new Set(pinned)
-  const head = items.filter((item) => set.has(item.id))
-  if (head.length === 0) return items
-  return [...head, ...items.filter((item) => !set.has(item.id))]
-}
-
 /** 置顶开关:存在则移除,不存在则追加到末尾。 */
 export function toggleId(ids: readonly string[], id: string): string[] {
   return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]

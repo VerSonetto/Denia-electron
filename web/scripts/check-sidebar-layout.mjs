@@ -6,7 +6,7 @@
  *   必须等于 `.sidebar-region-head` 的 12px 文字基线;
  * - 820px 断点下导航行高切到 44px,底部留白与区域间距保持 12px/6px 节奏;
  * - 收起态 56px rail 由 10px + 36px + 10px 撑满,不被展开态规则影响;
- * - 手动「进行中」标记是 flex 项且不参与压缩,标题自己省略而不是被图标遮挡。
+ * - 置顶标记是 flex 项且不参与压缩,标题自己省略而不是被图标遮挡。
  *
  *   node scripts/check-sidebar-layout.mjs
  */
@@ -175,12 +175,14 @@ assert.equal(value(collapsedSidebar, 'padding-right', '收起态侧栏'), '10px'
 assert.equal(value(railButton, 'width', '.rail-btn'), '36px')
 assert.equal(10 + 36 + 10, 56, '收起态 56px 应恰好容纳 36px 控件与 10px 边距')
 
-/* ---------- 「进行中」标记不会挤掉标题/时间/动作 ---------- */
+/* ---------- 置顶标记不会挤掉标题/时间/动作 ---------- */
 
-const markDecls = declarations(rule(shellCss, '.in-progress-mark'))
-assert.equal(value(markDecls, 'flex', '.in-progress-mark'), 'none', '标记不能参与压缩')
-assert.equal(value(markDecls, 'color', '.in-progress-mark'), 'var(--warn-fg)')
-assert.equal(markDecls.get('position'), undefined, '标记不应脱离文档流覆盖标题')
+const pinDecls = declarations(rule(shellCss, '.pin-mark'))
+assert.equal(value(pinDecls, 'flex', '.pin-mark'), 'none', '置顶标记不能参与压缩')
+assert.equal(pinDecls.get('position'), undefined, '置顶标记不应脱离文档流覆盖标题')
+
+const sectionHead = declarations(rule(shellCss, '.sidebar-section-head'))
+assert.equal(value(sectionHead, 'min-height', '.sidebar-section-head'), '30px')
 
 const sessionRowDecls = declarations(rule(shellCss, '.session-row'))
 const excerptDecls = declarations(rule(shellCss, '.session-row .excerpt'))
@@ -193,17 +195,17 @@ assert.equal(value(excerptDecls, 'text-overflow', '.session-row .excerpt'), 'ell
 assert.equal(value(timeDecls, 'flex', '.session-time'), 'none')
 assert.equal(value(actionsDecls, 'flex', '.row-actions'), 'none')
 
-/* 标记位于标题之后、行尾时间之前:宽度不够时先省略标题。 */
+/* 置顶标记位于标题之后、行尾时间之前:宽度不够时先省略标题。 */
 const excerptIndex = sessionRowSource.indexOf('className="excerpt"')
-const markIndex = sessionRowSource.indexOf('className="in-progress-mark"')
+const pinIndex = sessionRowSource.indexOf('className="pin-mark"')
 const timeIndex = sessionRowSource.indexOf('className="session-time"')
-assert.ok(excerptIndex >= 0 && markIndex >= 0 && timeIndex >= 0)
-assert.ok(excerptIndex < markIndex, '标记应排在标题之后')
-assert.ok(markIndex < timeIndex, '标记应排在行尾时间之前')
-assert.ok(sessionRowSource.includes('marked &&'), '标记必须受 marked 控制')
+assert.ok(excerptIndex >= 0 && pinIndex >= 0 && timeIndex >= 0)
+assert.ok(excerptIndex < pinIndex, '置顶标记应排在标题之后')
+assert.ok(pinIndex < timeIndex, '置顶标记应排在行尾时间之前')
+assert.ok(sessionRowSource.includes('pinned &&'), '置顶标记必须受 pinned 控制')
 assert.ok(
-  sessionRowSource.includes('data-testid="in-progress-mark"'),
-  '标记缺少稳定的测试锚点',
+  sessionRowSource.includes('data-testid="pin-mark"'),
+  '置顶标记缺少稳定的测试锚点',
 )
 
 /* ---------- 深浅主题 ---------- */
@@ -216,4 +218,4 @@ for (const selector of [':root', ":root[data-theme='light']", ":root:not([data-t
   )
 }
 
-console.log('ok sidebar layout: 12px baseline, 44px/820px, rail geometry and mark flex')
+console.log('ok sidebar layout: 12px baseline, 44px/820px, rail geometry and pin mark flex')

@@ -9,7 +9,7 @@ const dir = mkdtempSync(join(tmpdir(), 'denia-sidebar-order-'))
 try {
   const output = join(dir, 'order.mjs')
   await build({ entryPoints: [join(root, 'src/sidebarOrder.ts')], outfile: output, bundle: true, format: 'esm', platform: 'node', logLevel: 'silent' })
-  const { applyManualOrder, moveId, applyPins, toggleId } = await import(pathToFileURL(output).href)
+  const { applyManualOrder, moveId, toggleId } = await import(pathToFileURL(output).href)
 
   const items = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
   assert.deepEqual(applyManualOrder(items, undefined), items, '没有手动顺序时保持服务端顺序')
@@ -18,10 +18,6 @@ try {
   assert.deepEqual(applyManualOrder(items, ['b']).map((item) => item.id), ['a', 'c', 'b'], '新出现的项排在顶部')
   assert.deepEqual(applyManualOrder(items, ['gone', 'c', 'c']).map((item) => item.id), ['a', 'b', 'c'], '失效与重复 id 忽略')
 
-  assert.equal(applyPins(items, []), items, '没有置顶时保持原数组')
-  assert.deepEqual(applyPins(items, ['c']).map((item) => item.id), ['c', 'a', 'b'], '置顶项稳定上浮')
-  assert.deepEqual(applyPins(items, ['c', 'a']).map((item) => item.id), ['a', 'c', 'b'], '多个置顶项保留原相对顺序')
-  assert.equal(applyPins(items, ['gone']), items, '失效置顶 id 不改变顺序')
   assert.deepEqual(toggleId(['a', 'b'], 'b'), ['a'], '再次置顶即取消')
   assert.deepEqual(toggleId(['a'], 'b'), ['a', 'b'], '新置顶追加到末尾')
   assert.deepEqual(toggleId([], 'x'), ['x'])

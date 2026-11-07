@@ -400,7 +400,7 @@
   border-radius: 7px;
 }
 
-/* 会话筛选标签:全部任务 / 进行中任务。 */
+/* 视图切换:按项目 / 最近更新。 */
 .sidebar-filter {
   display: flex;
   align-items: center;
@@ -435,19 +435,6 @@
 .sidebar-filter-tab.active {
   background: var(--active-fill);
   color: var(--label-primary);
-}
-
-.sidebar-filter-count {
-  min-width: 1.2em;
-  text-align: right;
-  font-size: 10.5px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-  color: var(--label-caption);
-}
-
-.sidebar-filter-tab.active .sidebar-filter-count {
-  color: var(--label-secondary);
 }
 
 /* 侧栏自定义右键菜单(portal 到 body,避开侧栏 overflow 裁剪)。 */
@@ -769,13 +756,67 @@
   color: var(--label-tertiary);
 }
 
-/* 手动「进行中」旗帜:与实时运行圆点区分,不脉动。 */
-.in-progress-mark {
-  flex: none;
-  display: inline-flex;
+/* 侧栏分区标题:已置顶 / 项目 / 任务。 */
+.sidebar-section-head {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  color: var(--warn-fg);
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 10px 2px;
+  color: var(--label-caption);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.sidebar-section-head .name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-section-head .count {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--label-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.15s var(--ease);
+}
+
+.sidebar-section-head:hover .sidebar-section-actions,
+.sidebar-section-head:focus-within .sidebar-section-actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .sidebar-section-actions {
+    opacity: 1;
+  }
+}
+
+.sidebar-pinned-shelf,
+.sidebar-pinned-projects {
+  margin-bottom: 6px;
+}
+
+.sidebar-pinned-shelf .session-row-wrap {
+  margin-left: 6px;
+  width: calc(100% - 6px);
+}
+
+.sidebar-project-section,
+.sidebar-task-section {
+  margin-top: 2px;
 }
 
 .ws-group-head-row {
@@ -957,30 +998,6 @@
   align-items: center;
   min-width: 0;
   border-radius: 8px;
-}
-
-.session-row-wrap.drop-before::after,
-.session-row-wrap.drop-after::after {
-  content: '';
-  position: absolute;
-  left: calc(8px + var(--depth, 0) * 14px);
-  right: 8px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--label-primary);
-  pointer-events: none;
-}
-
-.session-row-wrap.drop-before::after {
-  top: -1px;
-}
-
-.session-row-wrap.drop-after::after {
-  bottom: -1px;
-}
-
-.session-row-wrap.dragging {
-  opacity: 0.45;
 }
 
 /* 悬停/选中底色画在整行(含折叠钮与时间列),行内元素不各画各的。 */

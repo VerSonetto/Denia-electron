@@ -258,6 +258,8 @@ export interface SessionSummary {
   subagent?: SubagentDescriptor
   id: string
   created_at: number
+  /** 最近一次活动时间（会话日志 mtime）；侧栏按它排序与显示相对时间。 */
+  updated_at?: number
   excerpt: string | null
   /** AI 生成的会话标题(第一轮用户消息后后台产出);展示优先于 excerpt。 */
   title: string | null

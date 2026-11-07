@@ -633,6 +633,7 @@ export default function App() {
         const summary: SessionSummary = {
           id: session.id,
           created_at: session.created_at,
+          updated_at: session.updated_at ?? session.created_at,
           excerpt: null,
           title: null,
           cwd: session.cwd,
@@ -961,7 +962,6 @@ export default function App() {
                 activeId={extensionTab || versionOpen ? null : activeId}
                 secondaryId={extensionTab || versionOpen ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
-                sessionsLoaded={sessionsLoaded}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
                 expandAllTick={sidebarExpandAllTick}

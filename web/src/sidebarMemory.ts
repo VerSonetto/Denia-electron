@@ -1,20 +1,17 @@
 const CHILDREN_KEY = 'denia.sidebar-collapsed-children.v1'
 const ORDER_KEY = 'denia.sidebar-order.v1'
-const FILTER_KEY = 'denia.sidebar-filter.v1'
+const VIEW_KEY = 'denia.sidebar-view.v1'
 const PINS_KEY = 'denia.sidebar-pins.v1'
-const IN_PROGRESS_KEY = 'denia.sidebar-in-progress.v1'
-const IN_PROGRESS_WORKSPACES_KEY = 'denia.sidebar-in-progress-workspaces.v1'
 
-/** 侧栏手动排序账本:工作区顺序、未分组会话顺序、每个工作区的会话顺序。 */
+/** 侧栏手动排序账本:目前只保留项目顺序;任务顺序由活跃度/更新时间决定。 */
 export interface SidebarOrder {
   workspaces: string[]
-  ungrouped: string[]
-  sessions: Record<string, string[]>
 }
 
-export type SidebarFilter = 'all' | 'running'
+/** 侧栏主视图:按项目,或按最近更新平铺。 */
+export type SidebarView = 'projects' | 'timeline'
 
-/** 置顶账本:工作区与会话各一份 id 列表,顺序不影响显示(显示按当前手动顺序)。 */
+/** 置顶账本:项目与会话各一份 id 列表,顺序不影响显示(显示按当前排序)。 */
 export interface SidebarPins {
   workspaces: string[]
   sessions: string[]
@@ -45,28 +42,16 @@ function readIdList(value: unknown): string[] {
   return value.filter((id): id is string => typeof id === 'string' && id.length > 0)
 }
 
-/** 读取手动排序账本;损坏/类型不符的字段按空处理,不影响默认服务端顺序。 */
+/** 读取项目手动顺序;损坏/类型不符的字段按空处理,不影响默认服务端顺序。 */
 export function readSidebarOrder(): SidebarOrder {
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(ORDER_KEY) ?? 'null')
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return { workspaces: [], ungrouped: [], sessions: {} }
+      return { workspaces: [] }
     }
-    const doc = value as Record<string, unknown>
-    const sessions: Record<string, string[]> = {}
-    if (doc.sessions && typeof doc.sessions === 'object' && !Array.isArray(doc.sessions)) {
-      for (const [key, list] of Object.entries(doc.sessions as Record<string, unknown>)) {
-        const ids = readIdList(list)
-        if (ids.length > 0) sessions[key] = ids
-      }
-    }
-    return {
-      workspaces: readIdList(doc.workspaces),
-      ungrouped: readIdList(doc.ungrouped),
-      sessions,
-    }
+    return { workspaces: readIdList((value as Record<string, unknown>).workspaces) }
   } catch {
-    return { workspaces: [], ungrouped: [], sessions: {} }
+    return { workspaces: [] }
   }
 }
 
@@ -74,31 +59,27 @@ export function writeSidebarOrder(value: SidebarOrder): void {
   try {
     window.localStorage.setItem(ORDER_KEY, JSON.stringify({
       workspaces: value.workspaces,
-      ungrouped: value.ungrouped,
-      sessions: Object.fromEntries(
-        Object.entries(value.sessions).filter(([, ids]) => ids.length > 0),
-      ),
     }))
   } catch {
     // 写入失败只影响刷新后的顺序,本次页面内的拖动结果仍然生效。
   }
 }
 
-/** 筛选仅两种状态:全部任务 / 进行中任务;其余值一律回落到全部。 */
-export function readSidebarFilter(): SidebarFilter {
+/** 视图偏好:默认按项目;未知值一律回落到按项目。 */
+export function readSidebarView(): SidebarView {
   try {
-    return window.localStorage.getItem(FILTER_KEY) === 'running' ? 'running' : 'all'
+    return window.localStorage.getItem(VIEW_KEY) === 'timeline' ? 'timeline' : 'projects'
   } catch {
-    return 'all'
+    return 'projects'
   }
 }
 
-export function writeSidebarFilter(value: SidebarFilter): void {
+export function writeSidebarView(value: SidebarView): void {
   try {
-    if (value === 'all') window.localStorage.removeItem(FILTER_KEY)
-    else window.localStorage.setItem(FILTER_KEY, value)
+    if (value === 'projects') window.localStorage.removeItem(VIEW_KEY)
+    else window.localStorage.setItem(VIEW_KEY, value)
   } catch {
-    // 存储不可用只影响刷新后的筛选状态。
+    // 存储不可用只影响刷新后的视图。
   }
 }
 
@@ -127,57 +108,6 @@ export function writeSidebarPins(value: SidebarPins): void {
     }))
   } catch {
     // 写入失败只影响刷新后的置顶状态。
-  }
-}
-
-/**
- * 手动标记为「进行中」的会话账本。
- *
- * 与 `runningIds`(服务端权威的正在跑)是**两个事实**:
- * - running 是模型此刻是否在产出,轮次结束就消失;
- * - 标记是用户显式的工作清单,只有「移除标记」或会话被删除才会消失。
- *
- * 「进行中任务」筛选展示两者的并集:标记项跨轮次、跨重启保留,running 项
- * 仍按原行为即时进出。账本只存 id,列表渲染时按会话表过滤 —— 会话删掉后
- * 下次读取自然不再出现,不留下永远点不到的孤儿。
- */
-export function readInProgressMarks(): string[] {
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(IN_PROGRESS_KEY) ?? '[]')
-    // 写入已去重;读取也兜住手工编辑/旧版本留下的重复 id。
-    return [...new Set(readIdList(value))]
-  } catch {
-    return []
-  }
-}
-
-export function writeInProgressMarks(ids: readonly string[]): void {
-  try {
-    const unique = [...new Set(ids.filter((id) => id.length > 0))]
-    if (unique.length === 0) window.localStorage.removeItem(IN_PROGRESS_KEY)
-    else window.localStorage.setItem(IN_PROGRESS_KEY, JSON.stringify(unique))
-  } catch {
-    // 写入失败只影响刷新后的标记,本次页面内的勾选仍然生效。
-  }
-}
-
-/** 手动标记为「进行中」的工作区;标记覆盖工作区当前及以后创建的会话。 */
-export function readInProgressWorkspaces(): string[] {
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(IN_PROGRESS_WORKSPACES_KEY) ?? '[]')
-    return [...new Set(readIdList(value))]
-  } catch {
-    return []
-  }
-}
-
-export function writeInProgressWorkspaces(ids: readonly string[]): void {
-  try {
-    const unique = [...new Set(ids.filter((id) => id.length > 0))]
-    if (unique.length === 0) window.localStorage.removeItem(IN_PROGRESS_WORKSPACES_KEY)
-    else window.localStorage.setItem(IN_PROGRESS_WORKSPACES_KEY, JSON.stringify(unique))
-  } catch {
-    // 写入失败只影响刷新后的标记,本次页面内的勾选仍然生效。
   }
 }
 

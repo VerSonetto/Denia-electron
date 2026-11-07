@@ -397,6 +397,7 @@ export async function ensureSession(ws: WorkspaceRecord | null, activate = true)
   const summary: SessionSummary = {
     id: session.id,
     created_at: session.created_at,
+    updated_at: session.updated_at ?? session.created_at,
     excerpt: null,
     title: null,
     cwd: session.cwd,
