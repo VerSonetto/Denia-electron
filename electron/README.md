@@ -47,6 +47,9 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **标题 / 上下文**：首轮后后台生成 `session-title`；`/context-breakdown`
   近似 token 拆分与压力；手动压缩按整轮摘要并落 `compaction-summary`
 - **Electron 壳**：主进程起宿主，窗口加载 UI
+- **窗口**：无边框自绘标题栏，与 Tauri 版共用 `DesktopTitleBar` 的 DOM/CSS；
+  `preload.cjs` 只暴露最小化 / 最大化 / 关闭与最大化状态，拖动走
+  `-webkit-app-region`，最大化状态由主进程窗口事件回推
 
 尚未迁移：goal、浏览器、渠道、更新、终端；
 真实 OS 沙箱仍未实现（只读档靠命令证明 + 工具层路径限制兵底）。这些端点

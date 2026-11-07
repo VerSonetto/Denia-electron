@@ -36,6 +36,16 @@
     cursor: default;
   }
 
+  /* Electron 的无边框窗口用 Chromium 的 app-region 拖动;Tauri 侧走
+     `data-tauri-drag-region`,两条规则各管一个壳。 */
+  .desktop-titlebar[data-shell='electron'] .desktop-titlebar-drag {
+    -webkit-app-region: drag;
+  }
+
+  .desktop-titlebar[data-shell='electron'] .desktop-titlebar-actions {
+    -webkit-app-region: no-drag;
+  }
+
   .desktop-titlebar-actions {
     display: flex;
     flex: none;

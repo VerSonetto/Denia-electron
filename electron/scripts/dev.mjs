@@ -19,6 +19,17 @@ await build({
   },
 })
 
+await build({
+  entryPoints: ['src/preload.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  outfile: 'dist/preload.cjs',
+  external: ['electron'],
+  logLevel: 'info',
+})
+
 const electron = process.platform === 'win32' ? 'node_modules/.bin/electron.cmd' : 'node_modules/.bin/electron'
 const child = spawn(electron, ['.'], {
   stdio: 'inherit',

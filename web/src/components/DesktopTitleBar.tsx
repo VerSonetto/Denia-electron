@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import { isTauri } from '@tauri-apps/api/core'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getDesktopShell } from '../desktopWindow'
 import { t } from '../i18n'
 import {
   IconClose,
@@ -10,7 +9,7 @@ import {
 } from './icons'
 
 /**
- * Tauri 桌面壳的窗口条。
+ * 桌面壳(Tauri / Electron)的窗口条。
  *
  * ## 为什么它不是"通栏标题栏"
  *
@@ -26,18 +25,16 @@ import {
  * 浏览器形态不渲染它,避免把桌面窗口语义带过去。
  */
 export function DesktopTitleBar() {
-  const [desktop] = useState(() => isTauri())
+  const [shell] = useState(() => getDesktopShell())
   const [maximized, setMaximized] = useState(false)
 
   useEffect(() => {
-    if (!desktop) return
+    if (!shell) return
 
-    const window = getCurrentWindow()
     let disposed = false
-    let unlisten: (() => void) | undefined
-
-    const syncMaximized = () => {
-      void window
+    const { controls } = shell
+    const sync = () => {
+      void controls
         .isMaximized()
         .then((value) => {
           if (!disposed) setMaximized(value)
@@ -45,37 +42,34 @@ export function DesktopTitleBar() {
         .catch(() => {})
     }
 
-    syncMaximized()
-    void window
-      .onResized(syncMaximized)
-      .then((stop) => {
-        if (disposed) stop()
-        else unlisten = stop
-      })
-      .catch(() => {})
+    sync()
+    const unsubscribe = controls.onMaximizedChange((value) => {
+      if (!disposed) setMaximized(value)
+    })
 
     return () => {
       disposed = true
-      unlisten?.()
+      unsubscribe()
     }
-  }, [desktop])
+  }, [shell])
 
-  if (!desktop) return null
+  if (!shell) return null
 
-  const window = getCurrentWindow()
+  const { controls } = shell
   const toggleMaximize = () => {
-    void window.toggleMaximize().catch(() => {})
+    void controls.toggleMaximize().catch(() => {})
   }
 
   return (
-    <header className="desktop-titlebar" aria-label={t('titleBarLabel')}>
-      {/* 拖动区:主列顶部整条。`data-tauri-drag-region="deep"` 而不是裸属性 ——
-          Tauri 2.11 的 drag.js 对裸属性只认「直接点在自己身上」
-          (`el === composedPath[0]`),点在子元素上不拖。`deep` 让整棵子树可拖。
+    <header className="desktop-titlebar" data-shell={shell.kind} aria-label={t('titleBarLabel')}>
+      {/* 拖动区:主列顶部整条。Tauri 用 `data-tauri-drag-region="deep"` ——
+          裸属性只认「直接点在自己身上」(`el === composedPath[0]`),点在子元素
+          上不拖,`deep` 让整棵子树可拖。Electron 侧由 `[data-shell='electron']`
+          的 `-webkit-app-region: drag` 接管。
 
-          双击最大化**不在这里挂 onDoubleClick**:drag.js 自己会以
-          `internal_toggle_maximize` 响应 detail===2 的 mousedown,两边都挂就会
-          双击一次切换两次、净效果为零(看起来就是双击没反应)。 */}
+          双击最大化**不在这里挂 onDoubleClick**:两个壳都由系统/壳层自己响应
+          拖动区的双击,再挂一次就会双击一下切换两次、净效果为零(看起来就是
+          双击没反应)。 */}
       <div className="desktop-titlebar-drag" data-tauri-drag-region="deep" />
       <div className="desktop-titlebar-actions">
         <button
@@ -83,7 +77,7 @@ export function DesktopTitleBar() {
           className="desktop-window-btn"
           aria-label={t('titleBarMinimize')}
           title={t('titleBarMinimize')}
-          onClick={() => void window.minimize().catch(() => {})}
+          onClick={() => void controls.minimize().catch(() => {})}
         >
           <IconWindowMinimize size={15} />
         </button>
@@ -101,7 +95,7 @@ export function DesktopTitleBar() {
           className="desktop-window-btn close"
           aria-label={t('titleBarClose')}
           title={t('titleBarClose')}
-          onClick={() => void window.close().catch(() => {})}
+          onClick={() => void controls.close().catch(() => {})}
         >
           <IconClose size={16} />
         </button>

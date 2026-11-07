@@ -18,3 +18,16 @@ await build({
     js: "import { createRequire as __deniaCreateRequire } from 'node:module'; const require = __deniaCreateRequire(import.meta.url);",
   },
 })
+
+// The frameless window's preload must be CommonJS: sandboxed preloads do not
+// support ESM, and package.json sets "type": "module", hence the .cjs suffix.
+await build({
+  entryPoints: ['src/preload.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node22',
+  outfile: 'dist/preload.cjs',
+  external: ['electron'],
+  logLevel: 'info',
+})
