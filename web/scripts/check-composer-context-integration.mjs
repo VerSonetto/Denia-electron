@@ -110,7 +110,7 @@ const stubs = new Map([
     }
     export async function pickerCapability() {
       b.record('pickerCapability', []);
-      return { kind: 'native', remote: false };
+      return { kind: 'native' };
     }
     ${unexpectedApi.map(name => `export function ${name}(...args) { b.record('${name}', args); throw new Error('Unexpected API: ${name}'); }`).join('\n')}
   `],

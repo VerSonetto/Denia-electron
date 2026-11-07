@@ -703,8 +703,6 @@ export function rebuildMemoryIndex(
 
 export function pickerCapability(): Promise<{
   kind: 'native' | 'browse'
-  /** 是否远程来客(手机/隧道)。主机控制台为 false。 */
-  remote?: boolean
 }> {
   return http('/api/fs/capability')
 }
@@ -1025,7 +1023,7 @@ export function cancelAsk(id: string, requestId: string): Promise<{ ok: boolean 
 }
 
 /** 选择宿主机上的文件，只返回绝对路径，不读取也不上传内容。
- *  用户可能停留任意久，不设超时；远程连接时后端直接拒绝。 */
+ *  用户可能停留任意久，不设超时。 */
 export function pickFiles(): Promise<{ paths: string[] }> {
   return http('/api/fs/pick-files', { method: 'POST' }, 0)
 }

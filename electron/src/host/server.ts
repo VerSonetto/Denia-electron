@@ -1055,7 +1055,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
 
     // —— filesystem ——
     if (pathname === '/api/fs/capability' && method === 'GET') {
-      json(res, 200, { kind: 'browse', remote: false })
+      json(res, 200, { kind: 'browse' })
       return
     }
     if (pathname === '/api/fs/dirs' && method === 'GET') {

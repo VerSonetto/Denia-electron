@@ -45,8 +45,8 @@ export function UpdateSummary({ state }: { state: UpdateState }) {
     title = text.noInstallerTitle
     detail = text.noInstallerDetail
   } else if (!check.canInstall) {
-    title = text.remoteTitle
-    detail = text.remoteDetail
+    title = text.manualInstallTitle
+    detail = text.manualInstallDetail
   } else {
     title = text.availableTitle
     detail = text.availableDetail

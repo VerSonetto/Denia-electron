@@ -34,10 +34,6 @@ export function IconSettingsMemory(props: IconProps) {
   return <Icon {...props}><path d="M5 3h10a1 1 0 0 1 1 1v13H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 0v14M8 7h5M8 10h4" /></Icon>
 }
 
-export function IconSettingsRemote(props: IconProps) {
-  return <Icon {...props}><rect x="2.5" y="3" width="15" height="10.5" rx="1.5" /><path d="M7 17h6m-3-3.5V17M7 8.5h6m-2-2 2 2-2 2" /></Icon>
-}
-
 export function IconSettingsChannels(props: IconProps) {
   return <Icon {...props}><path d="M2.5 8.2c0-2.6 2.9-4.7 6.5-4.7s6.5 2.1 6.5 4.7-2.9 4.7-6.5 4.7c-.6 0-1.2 0-1.8-.1L4 14.6l.8-2.3C3.5 11.4 2.5 9.9 2.5 8.2Z" /><path d="M11.5 12.6c.6 1.7 2.5 2.9 4.7 2.9.5 0 1-.1 1.5-.2l2 1.1-.6-1.8c.7-.5 1.1-1.3 1.1-2.1 0-1.8-1.8-3.3-4-3.3-.4 0-.9 0-1.3.1" /></Icon>
 }

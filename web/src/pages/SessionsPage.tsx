@@ -489,9 +489,6 @@ export default function SessionsPage({
     preview: string
   }[]>([])
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
-  // 远程来客没有可用的本机文件选择器(路径在客户端不存在),入口直接隐藏；
-  // 后端同样拒绝,这里是界面层的提前告知。
-  const [canPickLocalFiles, setCanPickLocalFiles] = useState(true)
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
   const composerScope = activeId ? `session:${activeId}` : activeWs?.path ? `workspace:${activeWs.path}` : null
@@ -752,15 +749,6 @@ export default function SessionsPage({
       // 重名只影响显示;发送用的是完整路径,不会互相覆盖。
       ...paths.map((path) => ({ name: path.split(/[/\\]/).pop() || path, path })),
     ])
-  }, [])
-
-  // 本机控制台才有原生文件选择器；远程访问时隐藏入口(后端也会拒绝)。
-  useEffect(() => {
-    let cancelled = false
-    void api.pickerCapability()
-      .then(({ remote }) => { if (!cancelled) setCanPickLocalFiles(!remote) })
-      .catch(() => { /* 拿不到能力就保持可用,发送时后端仍是权威校验 */ })
-    return () => { cancelled = true }
   }, [])
 
   // 回合启动推一把:首块内容到达前先落到底,后续由 onNodesChange 接管。
@@ -1752,7 +1740,6 @@ export default function SessionsPage({
             disabled={inert || optimizing || sending}
             workspacePath={contextWorkspacePath}
             filesAvailable={activeSession?.cwd_alive !== false}
-            canPickLocalFiles={canPickLocalFiles}
             activeId={activeId}
             sessions={sessions}
             commands={!showAttachRow ? [

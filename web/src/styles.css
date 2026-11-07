@@ -1,6 +1,5 @@
 /* Ordered feature styles. Keep imports in cascade order. */
 @import './styles/foundation.css';
-@import './styles/remote.css';
 @import './styles/shell.css';
 @import './styles/conversation.css';
 @import './styles/composer.css';

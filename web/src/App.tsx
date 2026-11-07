@@ -78,8 +78,6 @@ import {
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
-import { RemoteGate, shouldShowGate } from './components/RemoteGate'
-import { RemoteBanner } from './components/RemoteBanner'
 import { SidebarWorkspaces } from './components/sidebar/SidebarWorkspaces'
 import { DesktopTitleBar } from './components/DesktopTitleBar'
 
@@ -370,22 +368,10 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [, setPicking] = useState(false)
   const capabilityRef = useRef<'native' | 'browse'>('native')
-  // 扫码落地页判定必须**只求值一次**并锁存。
-  //
-  // 不能在渲染时现算:`RemoteGate` 兑换成功后会 `history.replaceState` 抹掉
-  // URL 里的票据(票据是一次性凭据,不该留在地址栏),那会触发 App 重渲染,
-  // 现算就会把 gate 判成 false —— 结果是 PIN 输入框还没显示就被卸载,页面
-  // 直接切到控制台,而会话 cookie 尚未下发,所有接口 401,用户看到的是
-  // "与服务器的连接断开"。锁存后 gate 生命周期由 RemoteGate 自己掌握。
-  const [gateActive] = useState(() => shouldShowGate())
-  // 本页是不是"主机自己的控制台"。远程来客(手机)在横幅上不该看到关闭
-  // 隧道这类主机侧动作;判定走 capability 的同一份来源(服务端按请求
-  // 来源给),不靠前端猜。
-  const [localClient, setLocalClient] = useState(true)
 
   useEffect(() => {
-    if (!gateActive) ensureStartupUpdateCheck()
-  }, [gateActive])
+    ensureStartupUpdateCheck()
+  }, [])
 
   const applyConsoleSettings = useCallback(() => {
     api
@@ -407,9 +393,6 @@ export default function App() {
       .pickerCapability()
       .then((cap) => {
         capabilityRef.current = cap.kind === 'browse' ? 'browse' : 'native'
-        // 远程连接状态下 browse 也用于远程来客;真正的来源判定读
-        // 远程状态的 `local` 字段(见 RemoteBanner 的订阅)。
-        setLocalClient(cap.kind !== 'browse' || !cap.remote)
       })
       .catch(() => {})
   }, [])
@@ -874,11 +857,6 @@ export default function App() {
     )
   }
 
-  // 扫码落地页:URL 带票据时整页交给远程门,先兑换会话再进控制台。
-  if (gateActive) {
-    return <RemoteGate />
-  }
-
   return (
     <div className="app-frame">
       <div
@@ -1091,7 +1069,6 @@ export default function App() {
             <span className="mobile-bar-title">Denia</span>
           </div>
         )}
-        <RemoteBanner local={localClient} />
         <div className="main-row" data-split={splitActive || undefined}>
           <div
             className="page-pane"

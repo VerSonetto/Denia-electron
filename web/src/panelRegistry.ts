@@ -18,7 +18,7 @@ export interface PanelContext {
   workspacePath: string | null
   /** 该面板类型是否已经开着(单例判定用)。 */
   isOpen(type: SidePaneTabType): boolean
-  /** 内嵌浏览器是否可用(远程/缺浏览器时不可用)。 */
+  /** 内嵌浏览器是否可用(缺浏览器时不可用)。 */
   supportsBrowser: boolean
 }
 

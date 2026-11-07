@@ -42,7 +42,7 @@ const stubs = new Map([
     export function subscribeEvents() { return () => {}; }
     export async function listSkills() { return { skills: [] }; }
     export async function getGoal() { return { goal: null, tokensUsed: 0, maxRounds: 10 }; }
-    export async function pickerCapability() { return { kind: 'native', remote: false }; }
+    export async function pickerCapability() { return { kind: 'native' }; }
     export async function searchMentions() { return { items: [] }; }
     export async function getSessionPage(id) { b.calls.push(id); return { events: id === ${JSON.stringify(session.id)} ? ${JSON.stringify(history)} : [], hasMoreBefore: false }; }
     ${unexpectedApi.map(name => `export function ${name}() { throw new Error('Unexpected API: ${name}'); }`).join('\n')}

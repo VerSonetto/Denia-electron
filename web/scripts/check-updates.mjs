@@ -195,8 +195,8 @@ try {
     })
     await mod.checkForUpdates()
     await mod.installUpdate()
-    assert.equal(installRequests, 0, 'remote listener can never start install')
-    console.log('ok   remote installation is blocked before any POST')
+    assert.equal(installRequests, 0, 'builds without installer capability never start an install')
+    console.log('ok   installation is blocked when the build cannot install')
   }
   console.log('updates store checks passed')
 } finally {
@@ -328,7 +328,7 @@ try {
   uiCheck = { ...current, canInstall: false }
   await act(async () => { await mod.checkForUpdates(true); mod.openUpdateDialog(); await settle() })
   dialog = doc.querySelector('[role="dialog"]')
-  assert.match(dialog.textContent, /请在主机上安装更新/)
+  assert.match(dialog.textContent, /此版本需要手动安装更新/)
   assert.equal([...dialog.querySelectorAll('button')].some((button) => button.textContent === '下载并安装'), false)
   await act(async () => { mod.closeUpdateDialog(); await settle() })
   uiCheck = { ...current, latest: { ...current.latest, installer: null } }
@@ -337,7 +337,7 @@ try {
   assert.match(dialog.textContent, /安装包尚未就绪/)
   assert.equal(dialog.querySelector('.update-install-notice'), null)
   await act(async () => { mod.closeUpdateDialog(); await settle() })
-  console.log('ok   remote and missing-installer states never offer automatic installation')
+  console.log('ok   manual-install and missing-installer states never offer automatic installation')
 
   uiCheck = current
   uiStatus = downloading

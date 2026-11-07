@@ -10,8 +10,8 @@
  *
  * ## 两种传输,自动择路
  *
- * 经 cloudflared 隧道时 SSE 的帧**完全透不过来**(实测:响应头 200、之后 0 帧;
- * 首帧垫 2KB / 16KB、心跳提到 1 秒都无效),而同一条隧道上挂 45 秒的普通响应
+ * 经带缓冲的中间转发链路时 SSE 的帧**完全透不过来**(实测:响应头 200、之后 0 帧;
+ * 首帧垫 2KB / 16KB、心跳提到 1 秒都无效),而同一条链路上挂 45 秒的普通响应
  * 完好穿透。所以这里有两种实现:SSE 优先,判死则整条链路切长轮询。判据与"为什
  * 么轮询通不能算 SSE 通"见 `pushChannel.ts`。
  *
@@ -80,7 +80,7 @@ function openSse() {
   const es = new EventSource('/api/events')
   source = es
   markPushAttempt()
-  // 帧间静默是唯一可用的死信:半死链路不报错,只是不发数据。隧道上正是这种
+  // 帧间静默是唯一可用的死信:半死链路不报错,只是不发数据。转发链路上正是这种
   // 形态(握手 200、之后一帧不来),所以不能等 onerror —— 它根本不会触发。
   const stallTimer = window.setInterval(() => {
     if (isPushStalled()) setPushDead(true)
@@ -192,7 +192,7 @@ function startPoll() {
     }
     if (result.kind === 'aborted') return
     emitStatus(false)
-    // 远程会话过期(401/403):再轮询也是同样结果,停在这里等用户重新扫码,
+    // 凭据失效(401/403):再轮询也是同样结果,停在这里等用户恢复会话,
     // 别把请求打满。
     if (result.kind === 'status' && (result.status === 401 || result.status === 403)) {
       stopPoll()
@@ -256,7 +256,7 @@ export function hasServerEventsOpened(): boolean {
   return everOpened
 }
 
-// 回到前台:手机锁屏 / 切后台再回来,链路状态可能已经变了。
+// 回到前台:锁屏 / 切后台再回来,链路状态可能已经变了。
 // 立刻补一轮(不挂起)拿回落下的增量,而不是等下一个间隔;是否顺带重探 SSE
 // 交给 reprobePush 的冷却 —— 刚判死就重探,只会让用户在"探测 → 白等一整个
 // 判定周期"里来回挨卡。
@@ -265,7 +265,7 @@ document.addEventListener('visibilitychange', () => {
   const transport = poll
   if (!transport) return
   // 先补一轮(wait=0,服务端立即返回):锁屏期间落下的增量立刻对齐,不必等
-  // 下一个排定间隔 —— 手机上"回来看不到最新内容"就是这么攒出来的。
+  // 下一个排定间隔 —— "回来看不到最新内容"就是这么攒出来的。
   if (transport.timer !== null) {
     window.clearTimeout(transport.timer)
     transport.timer = null

@@ -51,12 +51,12 @@ export type PollResult<T> =
 /**
  * 服务端单次挂起上限(与 `api::events::POLL_WAIT_MAX` 一致)。
  *
- * 实测隧道能穿透挂 45 秒的普通响应,取 30 秒留一倍余量;客户端再砍 5 秒,
+ * 实测转发链路能穿透挂 45 秒的普通响应,取 30 秒留一倍余量;客户端再砍 5 秒,
  * 避免卡在边缘超时边界上拿到半截响应。
  */
 export const POLL_HOLD_SEC = 25
 
-/** 本地超时 = 服务端挂起时长 + 公网往返余量。 */
+/** 本地超时 = 服务端挂起时长 + 往返余量。 */
 const holdTimeoutMs = (holdSec: number) => (holdSec + 15) * 1000
 
 async function pollOnce<T>(

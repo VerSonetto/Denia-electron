@@ -216,7 +216,6 @@
  * 16px 可以阻止这个缩放(桌面端不受影响,规则只作用于窄屏)。 */
 @media (max-width: 820px) {
   .prompt-editor,
-  .rgate-pin,
   input[type='text'],
   input[type='search'],
   textarea,
