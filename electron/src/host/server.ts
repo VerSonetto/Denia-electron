@@ -831,7 +831,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   server.requestTimeout = 0
 
   const host = options.host ?? '127.0.0.1'
-  const port = options.port ?? Number(process.env.DENIA_PORT ?? 43654)
+  const port = options.port ?? Number(process.env.DENIA_PORT ?? 43655)
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {

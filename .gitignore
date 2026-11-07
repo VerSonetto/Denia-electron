@@ -74,3 +74,7 @@
 /.tmp-*
 /denia-system-prompt-*.txt
 /check-prompt-v2.py
+# Electron 工作树:依赖、构建产物与安装包不入库
+/electron/node_modules/
+/electron/dist/
+/electron/release/

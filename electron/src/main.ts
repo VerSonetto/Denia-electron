@@ -10,16 +10,19 @@ import { app, BrowserWindow, dialog, shell } from 'electron'
 
 import { startHost } from './host/server.ts'
 
-const WINDOW_TITLE = 'Denia'
+const WINDOW_TITLE = 'Denia Electron'
 const WINDOW_SIZE = { width: 1280, height: 860 }
 const MIN_SIZE = { width: 720, height: 480 }
+/** The Electron build listens on its own port; the Rust instance owns 43654. */
+const DEFAULT_PORT = 43655
 
 let mainWindow: BrowserWindow | null = null
 let closing = false
 
-function repoWebDist(): string {
+function webDist(): string {
+  if (app.isPackaged) return path.join(process.resourcesPath, 'web')
   // dist/main.js → electron/dist → repo root → web/dist
-  return path.resolve(import.meta.dirname, '..', '..', 'web', 'dist')
+  return process.env.DENIA_WEB_DIR ?? path.resolve(import.meta.dirname, '..', '..', 'web', 'dist')
 }
 
 async function createWindow(url: string): Promise<BrowserWindow> {
@@ -49,9 +52,9 @@ async function createWindow(url: string): Promise<BrowserWindow> {
 async function main(): Promise<void> {
   const host = await startHost({
     ...(process.env.DENIA_HOME ? { home: process.env.DENIA_HOME } : {}),
-    webDir: process.env.DENIA_WEB_DIR ?? repoWebDist(),
+    webDir: webDist(),
     ...(process.env.DENIA_HOST ? { host: process.env.DENIA_HOST } : {}),
-    port: Number(process.env.DENIA_PORT ?? 43654),
+    port: Number(process.env.DENIA_PORT ?? DEFAULT_PORT),
   })
   console.log(`[denia] host listening at ${host.baseUrl} (home: ${host.home})`)
 
@@ -85,6 +88,7 @@ async function main(): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  app.setAppUserModelId('dev.denia.electron')
   main().catch((error: unknown) => {
     const message = error instanceof Error ? error.stack ?? error.message : String(error)
     console.error('[denia] startup failed:', message)

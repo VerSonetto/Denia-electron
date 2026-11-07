@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Denia Electron host: TypeScript backend (agent loop, tools, HTTP/SSE) + existing web UI",
+  "author": "Denia",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
@@ -10,15 +11,55 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/loop.test.ts test/adapters.test.ts",
     "start": "node scripts/build.mjs && electron .",
-    "dev": "node scripts/dev.mjs"
+    "dev": "node scripts/dev.mjs",
+    "dist": "node scripts/build.mjs && electron-builder --win nsis --publish never"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0"
   },
   "allowScripts": {
     "esbuild@0.24.2": true
+  },
+  "build": {
+    "appId": "dev.denia.electron",
+    "productName": "Denia Electron",
+    "copyright": "Denia",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Denia Electron",
+      "runAfterFinish": false,
+      "artifactName": "Denia-Electron-${version}-setup.${ext}"
+    }
   }
 }

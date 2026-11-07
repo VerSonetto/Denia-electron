@@ -33,7 +33,8 @@ npm run build
 npm start
 ```
 
-宿主默认监听 `127.0.0.1:43654`，home 为 `~/.denia-electron`。可用环境变量覆盖：
+宿主默认监听 `127.0.0.1:43655`（Rust 版占用 43654，两个版本可同时运行），home 为
+`~/.denia-electron`。可用环境变量覆盖：
 
 - `DENIA_HOME`：会话、配置、工作区记录的根目录
 - `DENIA_PORT`：监听端口（`0` 表示随机）
@@ -59,6 +60,34 @@ npm start
   "default": { "provider": "mock", "model": "mock-1" }
 }
 ```
+
+## 构建安装包
+
+```bash
+# 1) 构建前端产物（在 web/ 下）
+cd web
+pnpm install
+pnpm typecheck
+pnpm exec vite build
+node scripts/precompress.mjs
+
+# 2) 打包 Windows NSIS 安装器
+cd ../electron
+ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
+npm run dist
+```
+
+产物：`electron/release/Denia-Electron-<version>-setup.exe`。
+
+说明：
+
+- 应用身份是 `Denia Electron` / `dev.denia.electron`，与 Rust 版 `Denia` /
+  `dev.denia.desktop` 相互独立，不会覆盖旧安装。
+- `pnpm build` 会先跑前端 QA 套件；本机 `check-follow` 在无联调环境时会失败，
+  它不参与产物，直接跑上面三条构建命令即可。
+- 打包使用 `build/icon.ico`（由 `128x128@2x.png` 生成的 256×256 图标）。
+- 静默安装：`Denia-Electron-0.1.0-setup.exe /S`（默认按用户安装，无需管理员）。
 
 ## 目录
 

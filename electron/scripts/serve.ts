@@ -11,7 +11,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const host = await startHost({
   ...(process.env.DENIA_HOME ? { home: process.env.DENIA_HOME } : {}),
   webDir: process.env.DENIA_WEB_DIR ?? path.resolve(here, '..', '..', 'web', 'dist'),
-  port: Number(process.env.DENIA_PORT ?? 43654),
+  port: Number(process.env.DENIA_PORT ?? 43655),
 })
 console.log(`[serve] ${host.baseUrl} (home: ${host.home})`)
 
