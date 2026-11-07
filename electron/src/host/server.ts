@@ -16,13 +16,19 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import { SessionDriver } from '../agent/loop.ts'
+import type { ApprovalBridge } from '../agent/gate.ts'
+import type { ApprovalAnswer } from '../agent/gate.ts'
+import { createModelReviewer } from '../agent/reviewer.ts'
+import type { Reviewer } from '../agent/reviewer.ts'
 import { buildSystemPrompt } from '../agent/system-prompt.ts'
 import type { AppConfig } from '../config.ts'
 import {
   credentialInfo,
+  findProvider,
   loadConfig,
   loadCredentialRefs,
   loadSettings,
+  resolveDefault,
   resolveHome,
   saveSettingsNamespace,
   setCredential,
@@ -30,10 +36,14 @@ import {
   unsetCredential,
   workspacesPath,
 } from '../config.ts'
+import { ExecPolicy } from '../core/exec-policy.ts'
+import { legacyModeOf, presetState, stateFromLegacy } from '../core/permission.ts'
+import { streamFor } from '../llm/index.ts'
 import type { Envelope, ImageData, ModelSelection, SessionEvent } from '../core/wire.ts'
 import { errorMessage, isRecord } from '../core/util.ts'
 import { SessionStore } from '../session/store.ts'
 import { ToolRegistry } from '../tools/index.ts'
+import { ServerApprovalBridge } from './approval-bridge.ts'
 
 const HEARTBEAT_MS = 15_000
 const POLL_MAX_SEC = 30
@@ -45,6 +55,12 @@ export interface HostOptions {
   webDir?: string
   host?: string
   port?: number
+  /** Test seam: substitute the approval channel. */
+  bridge?: ApprovalBridge
+  /** Test seam: substitute the automatic reviewer. */
+  reviewer?: Reviewer
+  /** Test seam: substitute the command rule engine. */
+  policy?: ExecPolicy
 }
 
 export interface Host {
@@ -190,6 +206,34 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const registry = ToolRegistry.builtin()
   const workspaces = loadWorkspaces(home)
   const defaultPermissionMode = consolePermissionMode(home)
+  const policy = options.policy ?? ExecPolicy.load(path.join(home, 'execpolicy.json'))
+  const bridge = options.bridge ?? new ServerApprovalBridge()
+  // Only the built-in channel knows how to settle requests from HTTP.
+  const approvalChannel = bridge instanceof ServerApprovalBridge ? bridge : undefined
+
+  // The automatic reviewer answers one non-streaming completion per prompt.
+  const completeForReview = async (
+    system: string,
+    user: string,
+    signal: AbortSignal,
+  ): Promise<string> => {
+    const selection = resolveDefault(config)
+    const provider = findProvider(config, selection.provider) ?? config.providers[0]
+    if (!provider) throw new Error('没有可用的模型提供商')
+    const parts: string[] = []
+    for await (const chunk of streamFor({
+      provider,
+      model: selection.model,
+      system,
+      messages: [{ role: 'user', content: user }],
+      tools: [],
+      signal,
+    })) {
+      if (chunk.type === 'text-delta') parts.push(chunk.text)
+    }
+    return parts.join('')
+  }
+  const reviewer = options.reviewer ?? createModelReviewer(completeForReview)
 
   // —— global push ring + SSE clients ——
   const sseClients = new Set<ServerResponse>()
@@ -216,6 +260,11 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       broadcast({ type: 'running-snapshot', ids: runningSessionIds() })
       void sessionId
       void running
+    },
+    {
+      bridge,
+      reviewer,
+      policy,
     },
   )
 
@@ -278,7 +327,15 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           ? body.agentPreset.trim()
           : 'standard'
         const header = store.create(cwd, { sandbox: true })
+        const initial = stateFromLegacy(defaultPermissionMode)
         store.append(header.id, { type: 'permission-mode', mode: defaultPermissionMode })
+        store.append(header.id, {
+          type: 'permission-selection',
+          sandbox: initial.sandbox,
+          approval: initial.approval,
+          reviewer: initial.reviewer,
+          collaboration: initial.collaboration,
+        })
         store.append(header.id, { type: 'agent-preset', preset })
         if (workspaceId) {
           const workspace = workspaces.workspaces[workspaceId]
@@ -396,12 +453,35 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       if (rest === '/permission' && method === 'PUT') {
         const body = await readJson(req)
         const mode = body.mode
-        if (mode !== 'read-only' && mode !== 'auto-edit' && mode !== 'plan' && mode !== 'full') {
-          apiError(res, 400, 'permission/bad-mode', '未知权限档位')
+        if (mode === 'read-only' || mode === 'auto-edit' || mode === 'plan' || mode === 'full') {
+          const next = stateFromLegacy(mode, driver.permissionStateOf(sessionId))
+          store.append(sessionId, { type: 'permission-mode', mode })
+          store.append(sessionId, {
+            type: 'permission-selection',
+            sandbox: next.sandbox,
+            approval: next.approval,
+            reviewer: next.reviewer,
+            collaboration: next.collaboration,
+          })
+          json(res, 200, { mode, selection: next })
           return
         }
-        store.append(sessionId, { type: 'permission-mode', mode })
-        json(res, 200, { mode })
+        // Preset-level write (the Codex agent-mode selector).
+        const agentMode = body.agentMode
+        if (agentMode === 'read-only' || agentMode === 'workspace-write' || agentMode === 'approve-for-me' || agentMode === 'full-access') {
+          const next = presetState(agentMode)
+          store.append(sessionId, { type: 'permission-mode', mode: legacyModeOf(next) })
+          store.append(sessionId, {
+            type: 'permission-selection',
+            sandbox: next.sandbox,
+            approval: next.approval,
+            reviewer: next.reviewer,
+            collaboration: next.collaboration,
+          })
+          json(res, 200, { agentMode, selection: next })
+          return
+        }
+        apiError(res, 400, 'permission/bad-mode', '未知权限档位')
         return
       }
       if (rest === '/agent-preset' && method === 'PUT') {
@@ -412,7 +492,18 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest.startsWith('/approvals/') && method === 'POST') {
-        json(res, 200, { outcome: 'unavailable' })
+        const requestId = rest.slice('/approvals/'.length)
+        const body = await readJson(req)
+        const answer = approvalAnswerOf(body)
+        if (!answer) {
+          apiError(res, 400, 'approval/bad-decision', "decision must be 'allow-once', 'allow-session', 'reject' or 'cancel'")
+          return
+        }
+        if (!approvalChannel || !approvalChannel.answer(requestId, answer)) {
+          apiError(res, 404, 'approval/not-found', '该审批请求不存在或已结算')
+          return
+        }
+        json(res, 200, { ok: true })
         return
       }
       if (rest.startsWith('/asks/') && method === 'POST') {
@@ -737,7 +828,12 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     // —— system prompt / rules ——
     if (pathname === '/api/system-prompt' && method === 'GET') {
       json(res, 200, {
-        text: buildSystemPrompt({ cwd: process.cwd(), sandbox: true, tools: registry.schemas() }),
+        text: buildSystemPrompt({
+          cwd: process.cwd(),
+          sandbox: true,
+          tools: registry.schemas(),
+          permission: stateFromLegacy(defaultPermissionMode),
+        }),
         source: 'default',
         path: '',
       })
@@ -991,6 +1087,61 @@ function parseImages(value: unknown): ImageData[] {
     .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null)
     .filter((entry) => typeof entry.mime === 'string' && typeof entry.data === 'string')
     .map((entry) => ({ mime: entry.mime as string, data: entry.data as string }))
+}
+
+function approvalAnswerOf(body: Record<string, unknown>): ApprovalAnswer | null {
+  const decision = body.decision
+  let choice: ApprovalAnswer['choice']
+  switch (decision) {
+    // Legacy web UI values and the Codex-style values are both accepted.
+    case 'allow-once':
+    case 'accept':
+      choice = 'accept'
+      break
+    case 'allow-session':
+    case 'accept-for-session':
+      choice = 'accept-for-session'
+      break
+    case 'accept-with-rule':
+      choice = 'accept-with-rule'
+      break
+    case 'reject':
+    case 'decline':
+      choice = 'decline'
+      break
+    case 'cancel':
+      choice = 'cancel'
+      break
+    default:
+      return null
+  }
+  const hasPlan =
+    body.executeMode !== undefined || body.selection !== undefined || body.feedback !== undefined
+  if (!hasPlan) return { choice }
+  const selection =
+    isRecord(body.selection) &&
+    typeof body.selection.provider === 'string' &&
+    typeof body.selection.model === 'string'
+      ? {
+          provider: body.selection.provider,
+          model: body.selection.model,
+          ...(typeof body.selection.reasoningEffort === 'string'
+            ? { reasoningEffort: body.selection.reasoningEffort }
+            : {}),
+        }
+      : undefined
+  return {
+    choice,
+    plan: {
+      outcome:
+        choice === 'decline' ? 'rejected' : choice === 'cancel' ? 'cancelled' : 'allowed-once',
+      ...(body.executeMode === 'full' || body.executeMode === 'auto-edit'
+        ? { executeMode: body.executeMode }
+        : {}),
+      ...(selection ? { selection } : {}),
+      ...(typeof body.feedback === 'string' ? { feedback: body.feedback } : {}),
+    },
+  }
 }
 
 function consolePermissionMode(home: string): 'read-only' | 'auto-edit' | 'full' {

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/loop.test.ts test/adapters.test.ts test/shared-home.test.ts",
+    "test": "node --test test/loop.test.ts test/adapters.test.ts test/shared-home.test.ts test/permission.test.ts test/approval.test.ts",
     "start": "node scripts/build.mjs && electron .",
     "dev": "node scripts/dev.mjs",
     "dist": "node scripts/build.mjs && electron-builder --win nsis --publish never"

@@ -82,6 +82,27 @@ export type AbortCause =
 
 export type PermissionMode = 'read-only' | 'auto-edit' | 'plan' | 'full'
 
+/** How a pending approval was settled (mirrors the Rust `ApprovalOutcome`). */
+export type ApprovalOutcome =
+  | 'allowed-once'
+  | 'allowed-session'
+  | 'rejected'
+  | 'cancelled'
+  | 'unavailable'
+
+/**
+ * The bridge's answer to one approval request. Ordinary approvals only carry
+ * `outcome`; a plan approval (`exit_plan`) may also switch the execute mode,
+ * the model, and hand back user feedback.
+ */
+export interface PlanReviewDecision {
+  outcome: ApprovalOutcome
+  /** Execute mode chosen on approval (only `auto-edit` / `full`). */
+  executeMode?: 'auto-edit' | 'full'
+  selection?: ModelSelection
+  feedback?: string
+}
+
 export interface TodoItem {
   content: string
   status: 'pending' | 'in_progress' | 'completed'
@@ -153,6 +174,32 @@ export type SessionEvent =
   | { type: 'tool-output-chunk'; call_id: string; stream: string; text: string }
   | { type: 'todo-write'; todos: TodoItem[] }
   | { type: 'permission-mode'; mode: PermissionMode }
+  | {
+      type: 'permission-selection'
+      sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
+      approval: 'untrusted' | 'on-request' | 'never' | { granular: unknown }
+      reviewer: 'user' | 'auto-review'
+      collaboration: 'default' | 'plan'
+    }
+  | {
+      type: 'approval-asked'
+      request_id: string
+      call_id: string
+      tool: string
+      args_preview: string
+      reason?: string
+    }
+  | { type: 'approval-decided'; request_id: string; outcome: ApprovalOutcome }
+  | {
+      type: 'auto-review'
+      request_id: string
+      call_id: string
+      tool: string
+      outcome: 'allow' | 'deny'
+      risk_level: string
+      user_authorization: string
+      rationale: string
+    }
   | { type: 'session-title'; title: string }
   | { type: 'agent-preset'; preset: string }
   | { type: 'command-run'; name: string; text: string }

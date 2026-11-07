@@ -3,6 +3,7 @@
 import type { ToolSchema } from '../core/wire.ts'
 import { BashTool } from './bash.ts'
 import { fileTools } from './files.ts'
+import { ExitPlanTool } from './plan.ts'
 import { searchTools } from './search.ts'
 import { TodoWriteTool } from './todo.ts'
 import type { Tool } from './types.ts'
@@ -31,6 +32,6 @@ export class ToolRegistry {
   }
 
   static builtin(): ToolRegistry {
-    return new ToolRegistry([BashTool, ...fileTools, ...searchTools, TodoWriteTool])
+    return new ToolRegistry([BashTool, ...fileTools, ...searchTools, TodoWriteTool, ExitPlanTool])
   }
 }

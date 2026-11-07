@@ -7,12 +7,45 @@
 
 import os from 'node:os'
 
+import type { PermissionState } from '../core/permission.ts'
+import { modeOf } from '../core/permission.ts'
 import type { ToolSchema } from '../core/wire.ts'
 
 export interface SystemPromptOptions {
   cwd: string
   sandbox: boolean
   tools: ToolSchema[]
+  permission: PermissionState
+}
+
+/** One paragraph describing the active sandbox, approval policy and reviewer. */
+function permissionSection(permission: PermissionState): string {
+  const preset = modeOf(permission)
+  const reviewer =
+    permission.reviewer === 'auto-review'
+      ? 'an automatic reviewer decides first; it only escalates uncertain or high-risk actions to the user'
+      : 'the user is asked directly'
+  const sandbox = {
+    'read-only':
+      'read-only: every write and every network access is rejected; shell commands must be statically provable read-only (ls, cat, git status, rg, …)',
+    'workspace-write':
+      'workspace-write: writes inside the workspace run directly; writes outside it, deletions, shell commands with write side effects and network access require approval',
+    'danger-full-access': 'danger-full-access: no sandbox restrictions and no approval prompts',
+  }[permission.sandbox]
+  const lines = [
+    `Permission mode: ${preset} (sandbox: ${permission.sandbox}, reviewer: ${permission.reviewer})`,
+    `- ${sandbox}`,
+    `- Approval routing: ${reviewer}.`,
+  ]
+  if (permission.collaboration === 'plan') {
+    lines.push(
+      '- Collaboration mode: plan — research only. Every write and side-effecting command is rejected; submit the plan with `exit_plan` and wait for the user.',
+    )
+  }
+  lines.push(
+    '- When a call is rejected by policy, read the reason, adapt (smaller scope, workspace path, read-only command), and continue; do not retry the same call.',
+  )
+  return lines.join('\n')
 }
 
 export function buildSystemPrompt(options: SystemPromptOptions): string {
@@ -30,6 +63,8 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     options.sandbox
       ? 'File tools are confined to the workspace; absolute paths outside it are rejected.'
       : 'File tools may access paths outside the workspace.',
+    '',
+    permissionSection(options.permission),
     '',
     'Working rules:',
     '- Read before you edit. Prefer `read_file` / `grep` / `glob` to understand code, then make the smallest change that solves the task.',

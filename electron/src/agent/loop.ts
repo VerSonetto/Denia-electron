@@ -4,18 +4,25 @@
 // same envelopes to followers. A turn closes when the assistant message has no
 // tool calls, when the user cancels, or when an execution failure is terminal.
 
+import { randomUUID } from 'node:crypto'
+
 import type {
   AppConfig,
   ProviderConfig,
 } from '../config.ts'
 import { findProvider, resolveDefault } from '../config.ts'
+import type { ApprovalGrants, PermissionState } from '../core/permission.ts'
+import { ExecPolicy } from '../core/exec-policy.ts'
+import { legacyModeOf, parsePermissionState, presetState, stateFromLegacy } from '../core/permission.ts'
 import type {
   ContentBlock,
   Envelope,
   ImageData,
   ModelSelection,
+  SessionEvent,
   StreamChunk,
   ToolCallRef,
+  ToolSchema,
   TokenUsage,
   ToolOutput,
   TurnEndReason,
@@ -25,6 +32,20 @@ import { streamFor } from '../llm/index.ts'
 import type { SessionStore } from '../session/store.ts'
 import type { ToolRegistry } from '../tools/index.ts'
 import type { ToolContext } from '../tools/types.ts'
+import { toolError } from '../tools/types.ts'
+import type {
+  ApprovalAnswer,
+  ApprovalBridge,
+  ApprovalRequest,
+  GateResult,
+} from './gate.ts'
+import {
+  DECLINED_ANSWER,
+  argumentText,
+  availableChoices,
+  gateCall,
+} from './gate.ts'
+import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.ts'
 import { deriveHistory, hasOpenTurn, lastTurn } from './history.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
 
@@ -46,6 +67,16 @@ export interface DriverSettings {
   maxParallel: number
 }
 
+/** Optional permission plumbing; the loop still runs without any of it. */
+export interface DriverPermissions {
+  /** Human approval channel (the HTTP host plugs one in). */
+  bridge?: ApprovalBridge
+  /** Automatic reviewer used by the `approve-for-me` preset. */
+  reviewer?: Reviewer
+  /** Command rules (`execpolicy.json`). */
+  policy: ExecPolicy
+}
+
 function budgetOf(content: string): [string, { total_chars: number; shown_chars: number } | null] {
   const total = Array.from(content).length
   if (total <= OUTPUT_BUDGET_CHARS) return [content, null]
@@ -65,6 +96,11 @@ export class SessionDriver {
   private readonly getConfig: () => AppConfig
   private readonly onRunningChange: (sessionId: string, running: boolean) => void
   private readonly running = new Map<string, AbortController>()
+  private readonly bridge?: ApprovalBridge
+  private readonly reviewer?: Reviewer
+  private readonly policy: ExecPolicy
+  /** Session-scoped "allow for this window" cache, keyed by normalized action. */
+  private readonly grants = new Map<string, Set<string>>()
   readonly settings: DriverSettings
 
   constructor(
@@ -73,15 +109,43 @@ export class SessionDriver {
     getConfig: () => AppConfig,
     settings?: Partial<DriverSettings>,
     onRunningChange?: (sessionId: string, running: boolean) => void,
+    permissions?: DriverPermissions,
   ) {
     this.store = store
     this.registry = registry
     this.getConfig = getConfig
     this.onRunningChange = onRunningChange ?? (() => {})
+    this.bridge = permissions?.bridge
+    this.reviewer = permissions?.reviewer
+    this.policy = permissions?.policy ?? new ExecPolicy()
     this.settings = {
       maxSteps: settings?.maxSteps ?? MAX_STEPS,
       maxParallel: Math.max(1, settings?.maxParallel ?? MAX_PARALLEL),
     }
+  }
+
+  /** The session's permission state, projected from its event log. */
+  permissionStateOf(sessionId: string): PermissionState {
+    let state = stateFromLegacy('auto-edit')
+    for (const event of this.store.read(sessionId)?.events ?? []) {
+      if (event.type === 'permission-selection') {
+        const parsed = parsePermissionState(event)
+        if (parsed) state = parsed
+      } else if (event.type === 'permission-mode') {
+        state = stateFromLegacy(event.mode, state)
+      }
+    }
+    return state
+  }
+
+  /** Session-level grants for approval-free reruns of the same action. */
+  private grantsOf(sessionId: string): Set<string> {
+    let grants = this.grants.get(sessionId)
+    if (!grants) {
+      grants = new Set()
+      this.grants.set(sessionId, grants)
+    }
+    return grants
   }
 
   isRunning(sessionId: string): boolean {
@@ -201,10 +265,13 @@ export class SessionDriver {
 
         const events = this.store.read(sessionId)?.events ?? []
         const messages = deriveHistory(events)
+        const permission = this.permissionStateOf(sessionId)
+        const schemas = this.schemasFor(permission)
         const system = buildSystemPrompt({
           cwd: session.header.cwd,
           sandbox: session.header.sandbox,
-          tools: this.registry.schemas(),
+          tools: schemas,
+          permission,
         })
         append({
           type: 'request-context',
@@ -226,7 +293,7 @@ export class SessionDriver {
           model: selection.model,
           messages,
           system,
-          tools: this.registry.schemas(),
+          tools: schemas,
           ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
           signal: controller.signal,
         })
@@ -279,16 +346,19 @@ export class SessionDriver {
           })
         }
 
-        const outputs = await this.executeCalls(calls, {
+        const batch = await this.executeCalls(calls, {
           sessionId,
           cwd: session.header.cwd,
-          confined: session.header.sandbox,
+          sandbox: session.header.sandbox,
           cancel: controller.signal,
           emit: (event) => {
             append(event)
           },
+        }, (next) => {
+          selection = next
         })
 
+        const outputs = batch.outputs
         for (let index = 0; index < calls.length; index += 1) {
           const call = calls[index]!
           const output = outputs[index] ?? {
@@ -306,6 +376,12 @@ export class SessionDriver {
             ...(output.meta !== undefined ? { meta: output.meta } : {}),
             ...(output.truncation ? { truncation: output.truncation } : {}),
           })
+        }
+
+        // A user who cancels an approval interrupts the whole turn.
+        if (batch.aborted) {
+          closeTurn(abortedReason())
+          return
         }
 
         append({ type: 'step-end', turn, step })
@@ -343,38 +419,278 @@ export class SessionDriver {
     }
   }
 
-  private async executeCalls(calls: ToolCallRef[], ctx: Omit<ToolContext, 'callId'>): Promise<ToolOutput[]> {
-    const outputs: ToolOutput[] = new Array(calls.length)
-    const inFlight = new Set<Promise<void>>()
-    let next = 0
+  /** Tool schemas visible under the current permission state. */
+  private schemasFor(state: PermissionState): ToolSchema[] {
+    const all = this.registry.schemas()
+    if (state.sandbox !== 'read-only') return all
+    // Read-only sandbox: writes cannot happen, so do not advertise those tools.
+    const blocked = new Set(['write_file', 'edit'])
+    return all.filter((schema) => !blocked.has(schema.name))
+  }
 
-    const launch = (index: number): void => {
+  private async executeCalls(
+    calls: ToolCallRef[],
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+    onSelectionChange: (next: ModelSelection) => void,
+  ): Promise<{ outputs: ToolOutput[]; aborted: boolean }> {
+    const outputs: ToolOutput[] = new Array(calls.length)
+    const inFlight = new Map<number, Promise<void>>()
+    let next = 0
+    let aborted = false
+
+    const confinedFor = (state: PermissionState): boolean => state.sandbox === 'read-only' && ctx.sandbox
+
+    const launch = (index: number, state: PermissionState): void => {
       const call = calls[index]!
-      const promise = (async () => {
-        outputs[index] = await this.runOne(call, { ...ctx, callId: call.id })
-      })()
-      inFlight.add(promise)
-      promise.finally(() => {
-        inFlight.delete(promise)
+      const task = this.runOne(call, {
+        ...ctx,
+        confined: confinedFor(state),
+        callId: call.id,
+      }).then((output) => {
+        outputs[index] = output
       })
-      next += 1
+      inFlight.set(index, task)
+      void task.finally(() => inFlight.delete(index))
     }
 
     while (next < calls.length || inFlight.size > 0) {
+      let started = false
       while (next < calls.length && inFlight.size < this.settings.maxParallel) {
+        const state = this.permissionStateOf(ctx.sessionId)
         const call = calls[next]!
-        // Unproven shell commands run alone: interleaving them with reads or
-        // writes would make side effects order-dependent.
+        const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId))
+        if (gate.decision.kind === 'forbid') {
+          outputs[next] = toolError(gate.decision.reason)
+          next += 1
+          started = true
+          continue
+        }
+        if (gate.decision.kind === 'prompt' || gate.decision.kind === 'prompt-user') {
+          // Interactive reviews are serial: drain the pool first.
+          if (inFlight.size > 0) break
+          const outcome = await this.dispatchReviewed(call, gate, state, ctx, onSelectionChange)
+          outputs[next] = outcome.output
+          if (outcome.abort) aborted = true
+          next += 1
+          started = true
+          continue
+        }
+        // Allow: an uncertified shell command must not overlap with the pool.
         if (call.name === 'bash' && inFlight.size > 0) break
-        launch(next)
+        launch(next, state)
+        next += 1
+        started = true
       }
-      if (inFlight.size === 0 && next < calls.length) {
-        launch(next)
+      if (inFlight.size > 0) {
+        await Promise.race(inFlight.values())
         continue
       }
-      await Promise.race(inFlight)
+      if (next >= calls.length) break
+      if (!started) break
     }
-    return outputs
+    return { outputs, aborted }
+  }
+
+  /** Record the approval, resolve it (user or automatic reviewer), then act. */
+  private async dispatchReviewed(
+    call: ToolCallRef,
+    gate: GateResult,
+    state: PermissionState,
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+    onSelectionChange: (next: ModelSelection) => void,
+  ): Promise<{ output: ToolOutput; abort: boolean }> {
+    const append = ctx.emit
+    const requestId = randomUUID()
+    const reason = 'reason' in gate.decision ? gate.decision.reason : undefined
+    const isPlan = call.name === 'exit_plan'
+    const request: ApprovalRequest = {
+      sessionId: ctx.sessionId,
+      requestId,
+      callId: call.id,
+      tool: call.name,
+      argsPreview: call.arguments,
+      ...(reason ? { reason } : {}),
+      availableDecisions: availableChoices(gate.decision, gate.proposedRule),
+      ...(gate.proposedRule ? { proposedRule: gate.proposedRule } : {}),
+    }
+    // Automatic review is not a user prompt: it must not open the approval card.
+    const isAutoReview =
+      gate.decision.kind === 'prompt' && state.reviewer === 'auto-review' && this.reviewer !== undefined
+    if (!isAutoReview) {
+      append({
+        type: 'approval-asked',
+        request_id: requestId,
+        call_id: call.id,
+        tool: call.name,
+        args_preview: call.arguments,
+        ...(reason ? { reason } : {}),
+      })
+    }
+
+    let answer: ApprovalAnswer
+    if (gate.decision.kind === 'prompt-user') {
+      // A mandatory human checkpoint is never satisfied by the auto reviewer.
+      answer = this.bridge ? await this.bridge.request(request, ctx.cancel) : DECLINED_ANSWER
+    } else if (isAutoReview) {
+      const reviewed = await this.reviewAutomatically(call, gate, ctx)
+      append({
+        type: 'auto-review',
+        request_id: requestId,
+        call_id: call.id,
+        tool: call.name,
+        outcome: reviewed.verdict.outcome,
+        risk_level: reviewed.verdict.riskLevel,
+        user_authorization: reviewed.verdict.userAuthorization,
+        rationale: reviewed.verdict.rationale,
+      })
+      answer = reviewed.answer
+    } else {
+      answer = this.bridge ? await this.bridge.request(request, ctx.cancel) : DECLINED_ANSWER
+    }
+
+    const outcome =
+      answer.choice === 'accept'
+        ? 'allowed-once'
+        : answer.choice === 'accept-for-session' || answer.choice === 'accept-with-rule'
+          ? 'allowed-session'
+          : answer.choice === 'cancel'
+            ? 'cancelled'
+            : 'rejected'
+    if (!isAutoReview) append({ type: 'approval-decided', request_id: requestId, outcome })
+
+    if (ctx.cancel.aborted) {
+      return { output: toolError('审批已被取消(轮次被中断)。'), abort: true }
+    }
+    switch (answer.choice) {
+      case 'accept':
+        return { output: await this.runAllowed(call, gate, ctx, answer, onSelectionChange), abort: false }
+      case 'accept-for-session':
+        if (gate.cacheKey) this.grantsOf(ctx.sessionId).add(gate.cacheKey)
+        return { output: await this.runAllowed(call, gate, ctx, answer, onSelectionChange), abort: false }
+      case 'accept-with-rule':
+        if (gate.proposedRule) await this.policy.appendAllow(gate.proposedRule)
+        if (gate.cacheKey) this.grantsOf(ctx.sessionId).add(gate.cacheKey)
+        return { output: await this.runAllowed(call, gate, ctx, answer, onSelectionChange), abort: false }
+      case 'decline':
+        if (isPlan) {
+          const feedback = answer.plan?.feedback?.trim()
+          const text = feedback
+            ? `用户拒绝了该计划。请按以下补充建议修订计划后重新提交:\n${feedback}`
+            : '用户拒绝了该计划。请修订计划后重新提交;不确定用户的顾虑时,先用 ask 工具询问。'
+          return { output: { content: text, isError: false }, abort: false }
+        }
+        return { output: toolError('用户拒绝了该操作;请改用工作区内的方案,或先询问用户。'), abort: false }
+      case 'cancel':
+        return { output: toolError('审批已被取消(用户中断了本轮)。'), abort: true }
+    }
+  }
+
+  /**
+   * Run an approved call. Permissions are re-checked first: a mode tightened
+   * while the approval was pending must not be bypassed by the old approval.
+   */
+  private async runAllowed(
+    call: ToolCallRef,
+    gate: GateResult,
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+    answer: ApprovalAnswer,
+    onSelectionChange: (next: ModelSelection) => void,
+  ): Promise<ToolOutput> {
+    const state = this.permissionStateOf(ctx.sessionId)
+    if (call.name === 'exit_plan') {
+      return this.applyPlanApproval(ctx.sessionId, answer, ctx.emit, onSelectionChange)
+    }
+    const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId))
+    if (recheck.decision.kind === 'forbid') {
+      return toolError(`批准后重新判权被拒绝:${recheck.decision.reason}`)
+    }
+    return this.runOne(call, {
+      ...ctx,
+      confined: state.sandbox === 'read-only' && ctx.sandbox,
+      callId: call.id,
+    })
+  }
+
+  /** Plan approval: leave plan mode, switch the execute preset, maybe the model. */
+  private applyPlanApproval(
+    sessionId: string,
+    answer: ApprovalAnswer,
+    append: (event: SessionEvent) => void,
+    onSelectionChange: (next: ModelSelection) => void,
+  ): ToolOutput {
+    const executeMode = answer.plan?.executeMode === 'full' ? 'full-access' : 'workspace-write'
+    const next = presetState(executeMode, 'default')
+    append({
+      type: 'permission-selection',
+      sandbox: next.sandbox,
+      approval: next.approval,
+      reviewer: next.reviewer,
+      collaboration: next.collaboration,
+    })
+    append({ type: 'permission-mode', mode: legacyModeOf(next) })
+    if (answer.plan?.selection) onSelectionChange(answer.plan.selection)
+    const feedback = answer.plan?.feedback?.trim()
+    const suffix = feedback ? `\n用户补充建议:${feedback}` : ''
+    return {
+      content: `计划已批准,会话已切换至 ${executeMode} 模式,请开始执行。${suffix}`,
+      isError: false,
+    }
+  }
+
+  /** Route an ordinary prompt through the automatic reviewer. */
+  private async reviewAutomatically(
+    call: ToolCallRef,
+    gate: GateResult,
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+  ): Promise<{ answer: ApprovalAnswer; verdict: ReviewVerdict }> {
+    if (!this.reviewer) {
+      return {
+        answer: DECLINED_ANSWER,
+        verdict: {
+          outcome: 'deny',
+          riskLevel: 'high',
+          userAuthorization: 'unknown',
+          rationale: 'automatic approval review is unavailable',
+        },
+      }
+    }
+    const summary = gate.facts.shell
+      ? gate.facts.shell.command
+      : argumentText(call.arguments, 'path') || call.arguments.slice(0, 2000)
+    const verdict = await this.reviewer.review(
+      {
+        tool: call.name,
+        action: gate.facts.action,
+        summary,
+        cwd: ctx.cwd,
+        ...(gate.decision.kind === 'prompt' && gate.decision.reason ? { reason: gate.decision.reason } : {}),
+        transcript: this.transcriptOf(ctx.sessionId),
+      },
+      ctx.cancel,
+    )
+    return {
+      answer: verdict.outcome === 'allow' ? { choice: 'accept' } : DECLINED_ANSWER,
+      verdict,
+    }
+  }
+
+  /** Recent conversation, trimmed for the reviewer prompt. */
+  private transcriptOf(sessionId: string): ReviewTranscriptEntry[] {
+    const entries: ReviewTranscriptEntry[] = []
+    for (const event of this.store.read(sessionId)?.events ?? []) {
+      if (event.type === 'user-message' && !event.injected) {
+        entries.push({ role: 'user', text: truncateChars(event.text, 2000, '…')[0] })
+      } else if (event.type === 'assistant-message') {
+        const text = event.blocks
+          .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n')
+        if (text.trim() !== '') {
+          entries.push({ role: 'assistant', text: truncateChars(text, 2000, '…')[0] })
+        }
+      }
+    }
+    return entries.slice(-12)
   }
 
   private async runOne(call: ToolCallRef, ctx: ToolContext): Promise<ToolOutput> {

@@ -17,14 +17,46 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **共享配置**：读取 `settings.yaml` 的 `llm-openai.providers`、从
   `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；工作区读写 `workspaces.json`
   的 map+order 结构；随附 preset（standard / creator / minimal）与 Rust 对齐
-- **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、`todo_write`
+- **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、`todo_write`、`exit_plan`
+- **权限（Codex 式三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
+  只读 / 工作区编辑 / 自动审批（Approve for me）/ 完全访问；四值决策
+  （allow / prompt / prompt-user / forbid）；五值审批（accept、accept-for-session、
+  accept-with-rule、decline、cancel）；execpolicy 命令前缀规则
+  （`<home>/execpolicy.json`，批准时可持久化 allow 规则）；自动审批用模型
+  按严格 JSON 审查，超时/失败一律拒绝
 - **HTTP/SSE 宿主**：会话列表/创建/快照/分页/发消息/取消/引导、follow SSE、
-  全局事件 SSE、模型目录、设置、工作区、文件树/文件读取
+  全局事件 SSE、模型目录、设置、工作区、文件树/文件读取、审批应答
 - **Electron 壳**：主进程起宿主，窗口加载 UI
 
-尚未迁移：MCP、子代理、技能、项目记忆、goal、压缩、审批策略、浏览器、渠道、
+尚未迁移：MCP、子代理、技能、项目记忆、goal、压缩、浏览器、渠道、
 远程连接、更新、终端。这些端点目前返回 501 或空壳，UI 打开对应面板时会提示，
 不影响对话主链路。
+
+## 权限模型
+
+每个会话存一份权限状态（`permission-selection` 事件），它是三个正交字段：
+
+| 预设 | 沙箱档案 | 审批策略 | 审批人 |
+| --- | --- | --- | --- |
+| `read-only` | `read-only` | `on-request` | 用户 |
+| `workspace-write` | `workspace-write` | `on-request` | 用户 |
+| `approve-for-me` | `workspace-write` | `on-request` | 自动审查 |
+| `full-access` | `danger-full-access` | `never` | 用户 |
+
+- **沙箱档案决定“能做到什么”**：只读档拒绝一切写与网络，命令必须能被静态证明只读；
+  工作区档区内写直接执行，区外写、删除、有写副作用的命令与网络访问走审批；
+  完全访问无限制。没有真实 OS 沙箱，只读档由命令证明 + 工具层路径限制兵底。
+- **审批策略决定“问了怎么办”**：`never` 不再询问，需审批的动作直接拒绝；
+  计划模式（collaboration = plan）禁止一切写，`exit_plan` 必须人审。
+- **审批人决定“谁答”**：`user` 走审批卡；`auto-review` 先给审查子代理，
+  只把高风险/不确定的升级给用户。自动审批的审查请求不落 `approval-asked`
+  （不弹审批卡），而是落 `auto-review` 事件（含风险等级、授权评分、理由）。
+- **规则引擎**：`<home>/execpolicy.json` 可放命令前缀规则（allow / prompt /
+  prompt-user / forbidden），多条命中取最严；批准时选“以后同类都允许”
+  会把 allow 前缀写回该文件。
+
+旧的三档事件 `permission-mode`（read-only / auto-edit / plan / full）仍然写入，
+现有 Web UI 不改也能正常工作；`approve-for-me` 在旧 UI 中显示为“自动编辑”。
 
 ## 运行
 
