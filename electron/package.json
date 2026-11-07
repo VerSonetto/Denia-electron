@@ -1,7 +1,7 @@
 {
   "name": "@denia/electron",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Denia Electron host: TypeScript backend (agent loop, tools, HTTP/SSE) + existing web UI",
   "author": "Denia",
   "type": "module",
