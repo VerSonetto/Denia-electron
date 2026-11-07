@@ -9,10 +9,11 @@ import http from 'node:http'
 import test from 'node:test'
 
 import type { StreamChunk } from '../src/core/wire.ts'
-import { streamFor } from '../src/llm/index.ts'
+import { streamFor, LlmRequestError } from '../src/llm/index.ts'
 import type { ProviderConfig } from '../src/config.ts'
 
-const sse = (payload: unknown) => `data: ${JSON.stringify(payload)}\n\n`
+const sse = (payload: unknown, event?: string) =>
+  `${event ? `event: ${event}\n` : ''}data: ${JSON.stringify(payload)}\n\n`
 
 interface Captured {
   path: string
@@ -45,13 +46,18 @@ async function startMock(handler: (path: string, body: Record<string, unknown>) 
   }
 }
 
-function provider(protocol: ProviderConfig['protocol'], baseURL: string): ProviderConfig {
+function provider(
+  protocol: ProviderConfig['protocol'],
+  baseURL: string,
+  options: Partial<ProviderConfig> = {},
+): ProviderConfig {
   return {
     id: 'mock',
     name: 'Mock',
     baseURL,
     protocol,
     models: [{ id: 'mock-1' }],
+    ...options,
   }
 }
 
@@ -115,8 +121,9 @@ test('openai-responses maps event stream to shared chunks', async () => {
       arguments: '{"command":"echo ok"}',
     })
     const usage = chunks.find((chunk) => chunk.type === 'usage')
+    // Rust contract: input_tokens is the uncached prompt (12 - 3 cached).
     assert.deepEqual(usage?.usage, {
-      inputTokens: 12,
+      inputTokens: 9,
       outputTokens: 7,
       cacheReadTokens: 3,
       reasoningTokens: 2,
@@ -133,20 +140,234 @@ test('openai-responses maps event stream to shared chunks', async () => {
   }
 })
 
+test('openai-completions maps text, reasoning, tool calls and cached usage', async () => {
+  const captured: Captured = { path: '', body: {} }
+  const mock = await startMock((path) => {
+    assert.match(path, /\/v1\/chat\/completions$/)
+    return [
+      sse({ choices: [{ index: 0, delta: { reasoning_content: '先想' } }] }),
+      sse({ choices: [{ index: 0, delta: { content: '你好' } }] }),
+      sse({
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [{ index: 0, id: 'call_1', function: { name: 'bash', arguments: '{"command":' } }],
+            },
+          },
+        ],
+      }),
+      sse({
+        choices: [
+          { index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"ls"}' } }] } },
+        ],
+      }),
+      sse({
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage: {
+          prompt_tokens: 12,
+          completion_tokens: 7,
+          prompt_tokens_details: { cached_tokens: 3 },
+          completion_tokens_details: { reasoning_tokens: 2 },
+        },
+      }),
+      'data: [DONE]\n\n',
+    ].join('')
+  }, captured)
+
+  try {
+    const chunks = await collect(
+      streamFor({
+        provider: provider('openai-completions', mock.baseURL),
+        model: 'mock-1',
+        system: 'SYS',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{ name: 'bash', description: 'run', parameters: { type: 'object' } }],
+        reasoningEffort: 'high',
+      }),
+    )
+    const blocks = chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block)
+    assert.deepEqual(blocks[0], { type: 'reasoning', text: '先想' })
+    assert.deepEqual(blocks[1], { type: 'text', text: '你好' })
+    assert.deepEqual(blocks[2], {
+      type: 'tool-call',
+      id: 'call_1',
+      name: 'bash',
+      arguments: '{"command":"ls"}',
+    })
+    const usage = chunks.find((chunk) => chunk.type === 'usage')
+    assert.deepEqual(usage?.usage, {
+      inputTokens: 9,
+      outputTokens: 7,
+      cacheReadTokens: 3,
+      reasoningTokens: 2,
+    })
+    assert.deepEqual(chunks.find((chunk) => chunk.type === 'finish')?.reason, {
+      kind: 'tool-calls',
+    })
+
+    assert.equal(captured.body.reasoning_effort, 'high')
+    assert.deepEqual(captured.body.stream_options, { include_usage: true })
+  } finally {
+    await mock.close()
+  }
+})
+
+test('openai-completions handles CRLF frames, content parts and thinking fields', async () => {
+  const crlf = (payload: unknown) => `data: ${JSON.stringify(payload)}\r\n\r\n`
+  const mock = await startMock(() =>
+    [
+      crlf({ choices: [{ index: 0, delta: { thinking: '推理' } }] }),
+      crlf({ choices: [{ index: 0, delta: { content: [{ type: 'text', text: '数组正文' }] } }] }),
+      crlf({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      'data: [DONE]\r\n\r\n',
+    ].join(''),
+  { path: '', body: {} })
+
+  try {
+    const chunks = await collect(
+      streamFor({
+        provider: provider('openai-completions', mock.baseURL),
+        model: 'mock-1',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const blocks = chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block)
+    assert.deepEqual(blocks[0], { type: 'reasoning', text: '推理' })
+    assert.deepEqual(blocks[1], { type: 'text', text: '数组正文' })
+  } finally {
+    await mock.close()
+  }
+})
+
+test('openai-completions surfaces mid-stream provider errors', async () => {
+  const mock = await startMock(() =>
+    [sse({ error: { message: 'boom', code: 'bad' } }), 'data: [DONE]\n\n'].join(''),
+  { path: '', body: {} })
+
+  try {
+    await assert.rejects(
+      collect(
+        streamFor({
+          provider: provider('openai-completions', mock.baseURL),
+          model: 'mock-1',
+          messages: [{ role: 'user', content: 'hi' }],
+          tools: [],
+        }),
+      ),
+      (error: unknown) => error instanceof LlmRequestError && error.code === 'bad',
+    )
+  } finally {
+    await mock.close()
+  }
+})
+
+test('openai-completions rejects an empty completion', async () => {
+  const mock = await startMock(() =>
+    [
+      sse({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 0 } }),
+      'data: [DONE]\n\n',
+    ].join(''),
+  { path: '', body: {} })
+
+  try {
+    await assert.rejects(
+      collect(
+        streamFor({
+          provider: provider('openai-completions', mock.baseURL),
+          model: 'mock-1',
+          messages: [{ role: 'user', content: 'hi' }],
+          tools: [],
+        }),
+      ),
+      (error: unknown) => error instanceof LlmRequestError && error.code === 'EMPTY_RESPONSE',
+    )
+  } finally {
+    await mock.close()
+  }
+})
+
+test('openai-completions splits inline think tags', async () => {
+  const mock = await startMock(() =>
+    [
+      sse({ choices: [{ index: 0, delta: { content: '思考中' } }] }),
+      sse({ choices: [{ index: 0, delta: { content: '\u003c/think\u003e答案' } }] }),
+      sse({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      'data: [DONE]\n\n',
+    ].join(''),
+  { path: '', body: {} })
+
+  try {
+    const chunks = await collect(
+      streamFor({
+        provider: provider('openai-completions', mock.baseURL, { inlineThinkTags: true }),
+        model: 'mock-1',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const blocks = chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block)
+    assert.deepEqual(blocks[0], { type: 'reasoning', text: '思考中' })
+    assert.deepEqual(blocks[1], { type: 'text', text: '答案' })
+  } finally {
+    await mock.close()
+  }
+})
+
+test('openai-completions keeps quoted think-tag references in reasoning', async () => {
+  const mock = await startMock(() =>
+    [
+      sse({ choices: [{ index: 0, delta: { content: '思考中 `' } }] }),
+      sse({ choices: [{ index: 0, delta: { content: '\u003c/think\u003e` 直接拼在思考内容后' } }] }),
+      sse({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      'data: [DONE]\n\n',
+    ].join(''),
+  { path: '', body: {} })
+
+  try {
+    const chunks = await collect(
+      streamFor({
+        provider: provider('openai-completions', mock.baseURL, { inlineThinkTags: true }),
+        model: 'mock-1',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [],
+      }),
+    )
+    const blocks = chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block)
+    assert.equal(blocks.length, 1)
+    assert.equal(blocks[0]?.type, 'reasoning')
+    assert.ok(blocks[0]?.text.startsWith('思考中'))
+    assert.ok(blocks[0]?.text.endsWith('直接拼在思考内容后'))
+    assert.ok(blocks[0]?.text.includes('think'))
+  } finally {
+    await mock.close()
+  }
+})
+
 test('anthropic-messages maps content blocks and usage', async () => {
   const captured: Captured = { path: '', body: {} }
   const mock = await startMock((path) => {
     assert.match(path, /\/v1\/messages$/)
     return [
-      sse({ type: 'message_start', message: { usage: { input_tokens: 20, cache_read_input_tokens: 5 } } }),
-      sse({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
-      sse({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '看一下' } }),
-      sse({ type: 'content_block_stop', index: 0 }),
-      sse({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tu_1', name: 'read_file' } }),
-      sse({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } }),
-      sse({ type: 'content_block_stop', index: 1 }),
-      sse({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } }),
-      sse({ type: 'message_stop' }),
+      sse({ type: 'message_start', message: { usage: { input_tokens: 20, cache_read_input_tokens: 5 } } }, 'message_start'),
+      sse({ type: 'content_block_start', index: 0, content_block: { type: 'text' } }, 'content_block_start'),
+      sse({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '看一下' } }, 'content_block_delta'),
+      sse({ type: 'content_block_stop', index: 0 }, 'content_block_stop'),
+      sse(
+        { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tu_1', name: 'read_file' } },
+        'content_block_start',
+      ),
+      sse(
+        { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } },
+        'content_block_delta',
+      ),
+      sse({ type: 'content_block_stop', index: 1 }, 'content_block_stop'),
+      sse(
+        { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } },
+        'message_delta',
+      ),
+      sse({ type: 'message_stop' }, 'message_stop'),
     ].join('')
   }, captured)
 

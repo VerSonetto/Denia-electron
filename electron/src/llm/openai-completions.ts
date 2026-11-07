@@ -1,41 +1,47 @@
 // OpenAI-compatible chat completions adapter (`/v1/chat/completions`).
 //
-// One attempt streams `StreamChunk`s in the same shape the web UI folds from
-// the Rust backend: block-start → deltas → block-end, then usage and finish.
-// Mid-stream failures throw; the agent loop turns them into a turn-end event.
+// The official SDK owns HTTP and SSE framing. This adapter only maps provider
+// dialetries (content shapes, reasoning field names, cache accounting) onto
+// the shared chunk vocabulary the web UI already folds.
+
+import type OpenAI from 'openai'
 
 import type { ChatMessage, FinishReason, StreamChunk, TokenUsage, ToolSchema } from '../core/wire.ts'
-import { resolveApiKey } from '../config.ts'
-import { ssePayloads, readErrorBody } from './sse.ts'
+import { openAiClient, isAbortError, toRequestError } from './client.ts'
+import { InlineThinkSplitter, chatFinishReason, contentText, mapChatUsage, reasoningText } from './normalize.ts'
 import { StreamAssembler } from './stream-assembler.ts'
 import { LlmRequestError, type GenerateRequest } from './types.ts'
 
-interface OpenAiDelta {
-  role?: string
-  content?: string | null
-  reasoning_content?: string | null
-  reasoning?: string | null
-  tool_calls?: {
-    index?: number
-    id?: string
-    type?: string
-    function?: { name?: string; arguments?: string }
-  }[]
+interface RawDelta {
+  content?: unknown
+  reasoning_content?: unknown
+  refusal?: unknown
+  tool_calls?: RawToolCall[]
+  function_call?: { name?: string; arguments?: string }
+  [key: string]: unknown
 }
 
-interface OpenAiChunk {
-  choices?: {
+interface RawToolCall {
+  index?: number
+  id?: string
+  function?: { name?: string; arguments?: string }
+}
+
+interface RawChunk {
+  choices?: Array<{
     index?: number
-    delta?: OpenAiDelta
+    delta?: RawDelta
     finish_reason?: string | null
-  }[]
+  }>
   usage?: {
     prompt_tokens?: number
     completion_tokens?: number
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
     prompt_tokens_details?: { cached_tokens?: number }
     completion_tokens_details?: { reasoning_tokens?: number }
   }
-  error?: { message?: string; code?: string }
+  error?: { message?: string; code?: string; type?: string }
 }
 
 function toOpenAiMessages(system: string | undefined, messages: ChatMessage[]): unknown[] {
@@ -89,107 +95,153 @@ function toOpenAiTools(tools: ToolSchema[]): unknown[] | undefined {
   }))
 }
 
-function usageOf(chunk: OpenAiChunk): TokenUsage | null {
-  if (!chunk.usage) return null
-  const usage: TokenUsage = {
-    inputTokens: chunk.usage.prompt_tokens ?? 0,
-    outputTokens: chunk.usage.completion_tokens ?? 0,
-  }
-  const cached = chunk.usage.prompt_tokens_details?.cached_tokens
-  if (typeof cached === 'number') usage.cacheReadTokens = cached
-  const reasoning = chunk.usage.completion_tokens_details?.reasoning_tokens
-  if (typeof reasoning === 'number') usage.reasoningTokens = reasoning
-  return usage
-}
-
 export async function* streamOpenAi(request: GenerateRequest): AsyncGenerator<StreamChunk> {
   const { provider, signal } = request
-  const apiKey = resolveApiKey(provider)
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    accept: 'text/event-stream',
-    ...(provider.headers ?? {}),
-  }
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`
-
+  const client = openAiClient(provider)
+  const tools = toOpenAiTools(request.tools)
   const body: Record<string, unknown> = {
     model: request.model,
     stream: true,
     stream_options: { include_usage: true },
     messages: toOpenAiMessages(request.system, request.messages),
   }
-  const tools = toOpenAiTools(request.tools)
   if (tools) body.tools = tools
   if (request.temperature !== undefined) body.temperature = request.temperature
   if (request.maxTokens !== undefined) body.max_tokens = request.maxTokens
   if (request.stop && request.stop.length > 0) body.stop = request.stop
-  if (request.reasoningEffort) body.reasoning_effort = request.reasoningEffort
-
-  const url = `${provider.baseURL.replace(/\/+$/, '')}/chat/completions`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  })
-  if (!response.ok || !response.body) {
-    const error = await readErrorBody(response)
-    throw new LlmRequestError(error.message, error.code ?? `http-${response.status}`, response.status)
+  if (request.reasoningEffort && request.reasoningEffort !== 'off') {
+    body.reasoning_effort = request.reasoningEffort
   }
 
   const assembler = new StreamAssembler()
-  let finishReason: FinishReason = { kind: 'stop' }
-  let lastUsage: TokenUsage | null = null
+  const splitter = new InlineThinkSplitter(provider.inlineThinkTags === true)
+  let finish: FinishReason | null = null
+  let usage: TokenUsage | null = null
+  let sawBlock = false
+  let nextToolIndex = 0
+  let lastToolIndex = 0
 
-  for await (const payload of ssePayloads(response.body)) {
-    if (payload === '[DONE]') break
-    let chunk: OpenAiChunk
-    try {
-      chunk = JSON.parse(payload) as OpenAiChunk
-    } catch {
-      continue
-    }
-    if (chunk.error) {
-      throw new LlmRequestError(chunk.error.message ?? '模型流返回错误', chunk.error.code ?? 'llm-error')
-    }
-    const usage = usageOf(chunk)
-    if (usage) lastUsage = usage
+  const emitText = (text: string): StreamChunk[] => {
+    sawBlock = true
+    return assembler.textDelta(text)
+  }
+  const emitReasoning = (text: string): StreamChunk[] => {
+    sawBlock = true
+    return assembler.reasoningDelta(text)
+  }
+  const flushLeadAsText = (): StreamChunk[] => {
+    const pending = splitter.flushAsText()
+    return pending === null ? [] : emitText(pending)
+  }
+  const flushLeadAtEnd = (): StreamChunk[] => {
+    const pending = splitter.flushAtEnd()
+    if (pending === null) return []
+    const out: StreamChunk[] = []
+    if (pending.reasoning) out.push(...emitReasoning(pending.reasoning))
+    if (pending.text) out.push(...emitText(pending.text))
+    return out
+  }
 
-    const choice = chunk.choices?.[0]
-    if (choice?.delta) {
+  try {
+    const stream = await client.chat.completions.create(
+      body as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
+      { signal },
+    )
+    for await (const raw of stream) {
+      const chunk = raw as unknown as RawChunk
+      if (chunk.error) {
+        throw new LlmRequestError(
+          chunk.error.message ?? 'the provider reported an error mid-stream',
+          chunk.error.code ?? chunk.error.type ?? 'PROVIDER_ERROR',
+        )
+      }
+      if (chunk.usage) usage = mapChatUsage(chunk.usage)
+
+      const choices = chunk.choices ?? []
+      const choice = choices.find((entry) => (entry.index ?? 0) === 0) ?? choices[0]
+      if (!choice?.delta) continue
       const delta = choice.delta
-      const reasoning = delta.reasoning_content ?? delta.reasoning
+
+      const reasoning = reasoningText(delta)
       if (reasoning) {
-        for (const item of assembler.reasoningDelta(reasoning)) yield item
+        yield* flushLeadAsText()
+        yield* emitReasoning(reasoning)
       }
-      if (delta.content) {
-        for (const item of assembler.textDelta(delta.content)) yield item
+
+      const text = contentText(delta.content)
+      if (text) {
+        if (splitter.active) {
+          const split = splitter.push(text)
+          if (split && split.reasoning) yield* emitReasoning(split.reasoning)
+          if (split && split.text) yield* emitText(split.text)
+        } else {
+          yield* emitText(text)
+        }
       }
+
+      if (typeof delta.refusal === 'string' && delta.refusal.length > 0) {
+        yield* flushLeadAsText()
+        yield* emitText(delta.refusal)
+      }
+
       if (delta.tool_calls) {
-        for (const raw of delta.tool_calls) {
-          const key = `openai:${raw.index ?? 0}`
+        yield* flushLeadAsText()
+        for (const call of delta.tool_calls) {
+          let key: string
+          if (call.index !== undefined) {
+            key = `openai:${call.index}`
+            lastToolIndex = call.index
+            if (call.index >= nextToolIndex) nextToolIndex = call.index + 1
+          } else if (call.id || call.function?.name) {
+            key = `openai:${nextToolIndex}`
+            lastToolIndex = nextToolIndex
+            nextToolIndex += 1
+          } else {
+            key = `openai:${lastToolIndex}`
+          }
+          sawBlock = true
           for (const item of assembler.toolCallDelta(key, {
-            ...(raw.id === undefined ? {} : { id: raw.id }),
-            ...(raw.function?.name === undefined ? {} : { name: raw.function.name }),
-            ...(raw.function?.arguments === undefined ? {} : { arguments: raw.function.arguments }),
+            ...(call.id === undefined ? {} : { id: call.id }),
+            ...(call.function?.name === undefined ? {} : { name: call.function.name }),
+            ...(call.function?.arguments === undefined ? {} : { arguments: call.function.arguments }),
           })) {
             yield item
           }
         }
       }
-    }
-    if (choice?.finish_reason) {
-      if (choice.finish_reason === 'tool_calls' || assembler.hasToolCalls()) {
-        finishReason = { kind: 'tool-calls' }
-      } else if (choice.finish_reason === 'length') {
-        finishReason = { kind: 'max-tokens' }
-      } else {
-        finishReason = { kind: 'stop' }
+
+      if (delta.function_call) {
+        yield* flushLeadAsText()
+        const key = `openai:${nextToolIndex}`
+        nextToolIndex += 1
+        lastToolIndex = nextToolIndex - 1
+        sawBlock = true
+        for (const item of assembler.toolCallDelta(key, {
+          ...(delta.function_call.name === undefined ? {} : { name: delta.function_call.name }),
+          ...(delta.function_call.arguments === undefined
+            ? {}
+            : { arguments: delta.function_call.arguments }),
+        })) {
+          yield item
+        }
       }
+
+      const mapped = chatFinishReason(choice.finish_reason)
+      if (mapped) finish = mapped
     }
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error
+    throw toRequestError(error)
   }
 
+  yield* flushLeadAtEnd()
+  if (!sawBlock) {
+    throw new LlmRequestError('the model produced no output blocks', 'EMPTY_RESPONSE')
+  }
   for (const item of assembler.finishChunks()) yield item
-  if (lastUsage) yield { type: 'usage', usage: lastUsage }
-  yield { type: 'finish', reason: finishReason }
+  if (usage) yield { type: 'usage', usage }
+  yield {
+    type: 'finish',
+    reason: finish ?? (assembler.hasToolCalls() ? { kind: 'tool-calls' } : { kind: 'stop' }),
+  }
 }

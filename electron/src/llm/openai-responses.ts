@@ -1,28 +1,24 @@
 // OpenAI Responses API adapter (`/v1/responses`).
 //
-// The wire is event-oriented: output items are created first and their text /
-// arguments arrive as `*.delta` events. The assembler keeps the emitted chunk
-// vocabulary identical to the chat-completions adapter.
+// The official SDK owns HTTP and SSE framing. This adapter maps Responses
+// events (text/reasoning deltas, function calls, terminal response) onto the
+// shared chunk vocabulary the web UI already folds.
+
+import type OpenAI from 'openai'
 
 import type { ChatMessage, FinishReason, StreamChunk, TokenUsage, ToolSchema } from '../core/wire.ts'
-import { resolveApiKey } from '../config.ts'
-import { ssePayloads, readErrorBody } from './sse.ts'
+import { openAiClient, isAbortError, toRequestError } from './client.ts'
+import { isRecord, mapResponsesUsage } from './normalize.ts'
 import { StreamAssembler } from './stream-assembler.ts'
 import { LlmRequestError, type GenerateRequest } from './types.ts'
 
 interface ResponsesEvent {
   type?: string
-  item?: {
-    id?: string
-    type?: string
-    role?: string
-    name?: string
-    call_id?: string
-    arguments?: string
-  }
+  item?: Record<string, unknown>
   item_id?: string
   output_index?: number
   delta?: string
+  arguments?: string
   response?: {
     status?: string
     incomplete_details?: { reason?: string } | null
@@ -51,6 +47,17 @@ function toInput(messages: ChatMessage[]): unknown[] {
       continue
     }
     if (message.role === 'assistant') {
+      for (const replay of message.reasoningReplay ?? []) {
+        if (
+          replay.protocol === 'openai-responses' &&
+          isRecord(replay.payload) &&
+          replay.payload.type === 'reasoning' &&
+          typeof replay.payload.encrypted_content === 'string' &&
+          replay.payload.encrypted_content.length > 0
+        ) {
+          input.push(replay.payload)
+        }
+      }
       if (message.content) {
         input.push({ role: 'assistant', content: [{ type: 'output_text', text: message.content }] })
       }
@@ -89,157 +96,151 @@ function toolKey(event: ResponsesEvent): string {
   return `resp:${event.item_id ?? event.item?.id ?? event.output_index ?? 0}`
 }
 
-function usageOf(event: ResponsesEvent): TokenUsage | null {
-  const usage = event.response?.usage
-  if (!usage) return null
-  const result: TokenUsage = {
-    inputTokens: usage.input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
-  }
-  const cached = usage.input_tokens_details?.cached_tokens
-  if (typeof cached === 'number') result.cacheReadTokens = cached
-  const reasoning = usage.output_tokens_details?.reasoning_tokens
-  if (typeof reasoning === 'number') result.reasoningTokens = reasoning
-  return result
-}
-
 export async function* streamOpenAiResponses(request: GenerateRequest): AsyncGenerator<StreamChunk> {
   const { provider, signal } = request
-  const apiKey = resolveApiKey(provider)
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    accept: 'text/event-stream',
-    ...(provider.headers ?? {}),
-  }
-  if (apiKey) headers.authorization = `Bearer ${apiKey}`
-
+  const client = openAiClient(provider)
   const body: Record<string, unknown> = {
     model: request.model,
     input: toInput(request.messages),
     stream: true,
+    // Self-hosted and gateway endpoints have no conversation store; without
+    // this flag some of them reject the request outright.
+    store: false,
+    // Needed for reasoning items to come back replayable on the next turn.
+    include: ['reasoning.encrypted_content'],
   }
   if (request.system) body.instructions = request.system
   const tools = toTools(request.tools)
   if (tools) body.tools = tools
   if (request.temperature !== undefined) body.temperature = request.temperature
   if (request.maxTokens !== undefined) body.max_output_tokens = request.maxTokens
-  if (request.reasoningEffort) body.reasoning = { effort: request.reasoningEffort }
-
-  const url = `${provider.baseURL.replace(/\/+$/, '')}/responses`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  })
-  if (!response.ok || !response.body) {
-    const error = await readErrorBody(response)
-    throw new LlmRequestError(error.message, error.code ?? `http-${response.status}`, response.status)
+  if (request.reasoningEffort && request.reasoningEffort !== 'off') {
+    body.reasoning = { effort: request.reasoningEffort }
   }
 
   const assembler = new StreamAssembler()
-  let lastUsage: TokenUsage | null = null
-  let finishReason: FinishReason = { kind: 'stop' }
-  let incompleteReason: string | null = null
+  let usage: TokenUsage | null = null
+  let incomplete = false
+  let hadToolCall = false
+  let sawBlock = false
   const streamedArguments = new Set<string>()
 
-  for await (const payload of ssePayloads(response.body)) {
-    if (payload === '[DONE]') break
-    let event: ResponsesEvent
-    try {
-      event = JSON.parse(payload) as ResponsesEvent
-    } catch {
-      continue
-    }
-    switch (event.type) {
-      case 'response.output_item.added': {
-        const item = event.item
-        if (item?.type === 'function_call') {
-          const key = toolKey(event)
-          for (const chunk of assembler.toolCallDelta(key, {
-            ...(item.call_id ?? item.id ? { id: item.call_id ?? item.id } : {}),
-            ...(item.name === undefined ? {} : { name: item.name }),
-            ...(item.arguments ? { arguments: item.arguments } : {}),
-          })) {
-            yield chunk
+  try {
+    const stream = await client.responses.create(
+      body as unknown as OpenAI.Responses.ResponseCreateParamsStreaming,
+      { signal },
+    )
+    for await (const raw of stream) {
+      const event = raw as unknown as ResponsesEvent
+      switch (event.type) {
+        case 'response.output_item.added': {
+          const item = event.item
+          if (item?.type === 'function_call') {
+            const key = toolKey(event)
+            sawBlock = true
+            hadToolCall = true
+            yield* assembler.toolCallDelta(key, {
+              ...(typeof item.call_id === 'string' ? { id: item.call_id } : {}),
+              ...(typeof item.name === 'string' ? { name: item.name } : {}),
+            })
           }
+          break
         }
-        break
-      }
-      case 'response.output_text.delta':
-      case 'response.text.delta': {
-        if (typeof event.delta === 'string' && event.delta.length > 0) {
-          for (const chunk of assembler.textDelta(event.delta)) yield chunk
-        }
-        break
-      }
-      case 'response.reasoning_summary_text.delta':
-      case 'response.reasoning_text.delta': {
-        if (typeof event.delta === 'string' && event.delta.length > 0) {
-          for (const chunk of assembler.reasoningDelta(event.delta)) yield chunk
-        }
-        break
-      }
-      case 'response.function_call_arguments.delta': {
-        const key = toolKey(event)
-        streamedArguments.add(key)
-        if (typeof event.delta === 'string' && event.delta.length > 0) {
-          for (const chunk of assembler.toolCallDelta(key, { arguments: event.delta })) yield chunk
-        }
-        break
-      }
-      case 'response.function_call_arguments.done': {
-        const key = toolKey(event)
-        if (typeof event.delta === 'string' && !streamedArguments.has(key)) {
-          assembler.setToolArguments(key, event.delta)
-        }
-        break
-      }
-      case 'response.output_item.done': {
-        const item = event.item
-        if (item?.type === 'function_call') {
-          const key = toolKey(event)
-          if (item.arguments && !streamedArguments.has(key)) {
-            assembler.setToolArguments(key, item.arguments)
+        case 'response.output_text.delta':
+        case 'response.text.delta': {
+          if (typeof event.delta === 'string' && event.delta.length > 0) {
+            sawBlock = true
+            yield* assembler.textDelta(event.delta)
           }
-          if (item.call_id || item.id || item.name !== undefined) {
-            for (const chunk of assembler.toolCallDelta(key, {
-              ...(item.call_id ?? item.id ? { id: item.call_id ?? item.id } : {}),
-              ...(item.name === undefined ? {} : { name: item.name }),
-            })) {
-              yield chunk
+          break
+        }
+        case 'response.reasoning_summary_text.delta':
+        case 'response.reasoning_text.delta':
+        case 'response.reasoning.delta': {
+          if (typeof event.delta === 'string' && event.delta.length > 0) {
+            sawBlock = true
+            yield* assembler.reasoningDelta(event.delta)
+          }
+          break
+        }
+        case 'response.function_call_arguments.delta': {
+          const key = toolKey(event)
+          streamedArguments.add(key)
+          if (typeof event.delta === 'string' && event.delta.length > 0) {
+            sawBlock = true
+            yield* assembler.toolCallDelta(key, { arguments: event.delta })
+          }
+          break
+        }
+        case 'response.function_call_arguments.done': {
+          const key = toolKey(event)
+          if (typeof event.arguments === 'string' && !streamedArguments.has(key)) {
+            assembler.setToolArguments(key, event.arguments)
+          }
+          break
+        }
+        case 'response.output_item.done': {
+          const item = event.item
+          if (item?.type === 'function_call') {
+            const key = toolKey(event)
+            if (typeof item.arguments === 'string' && !streamedArguments.has(key)) {
+              assembler.setToolArguments(key, item.arguments)
             }
+            if (item.status === 'incomplete') assembler.setToolIncomplete(key)
+            if (typeof item.call_id === 'string' || typeof item.name === 'string') {
+              yield* assembler.toolCallDelta(key, {
+                ...(typeof item.call_id === 'string' ? { id: item.call_id } : {}),
+                ...(typeof item.name === 'string' ? { name: item.name } : {}),
+              })
+            }
+          } else if (item?.type === 'reasoning') {
+            assembler.setReasoningReplay('openai-responses', item)
           }
+          break
         }
-        break
+        case 'response.completed': {
+          const next = event.response?.usage
+          if (next) usage = mapResponsesUsage(next)
+          break
+        }
+        case 'response.incomplete': {
+          incomplete = true
+          const next = event.response?.usage
+          if (next) usage = mapResponsesUsage(next)
+          break
+        }
+        case 'response.failed': {
+          const failure = event.response?.error
+          throw new LlmRequestError(
+            failure?.message ?? event.message ?? 'Responses API 返回失败',
+            failure?.code ?? 'response-failed',
+          )
+        }
+        case 'error': {
+          throw new LlmRequestError(
+            event.error?.message ?? '模型流返回错误',
+            event.error?.code ?? 'llm-error',
+          )
+        }
+        default:
+          break
       }
-      case 'response.completed': {
-        lastUsage = usageOf(event) ?? lastUsage
-        break
-      }
-      case 'response.incomplete': {
-        incompleteReason = event.response?.incomplete_details?.reason ?? null
-        lastUsage = usageOf(event) ?? lastUsage
-        break
-      }
-      case 'response.failed': {
-        const failure = event.response?.error
-        throw new LlmRequestError(
-          failure?.message ?? event.message ?? 'Responses API 返回失败',
-          failure?.code ?? 'response-failed',
-        )
-      }
-      case 'error': {
-        throw new LlmRequestError(event.error?.message ?? '模型流返回错误', event.error?.code ?? 'llm-error')
-      }
-      default:
-        break
     }
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error
+    throw toRequestError(error)
   }
 
-  for (const chunk of assembler.finishChunks()) yield chunk
-  if (assembler.hasToolCalls()) finishReason = { kind: 'tool-calls' }
-  else if (incompleteReason === 'max_output_tokens') finishReason = { kind: 'max-tokens' }
-  if (lastUsage) yield { type: 'usage', usage: lastUsage }
-  yield { type: 'finish', reason: finishReason }
+  if (!sawBlock) {
+    throw new LlmRequestError('the model produced no output blocks', 'EMPTY_RESPONSE')
+  }
+  // Gateways that only append `[DONE]` never send `response.completed`; the
+  // SDK hides that sentinel, so a non-empty stream without a terminal event is
+  // accepted rather than reporting every such turn as truncated.
+  for (const item of assembler.finishChunks()) yield item
+  if (usage) yield { type: 'usage', usage }
+  yield {
+    type: 'finish',
+    reason: hadToolCall ? { kind: 'tool-calls' } : incomplete ? { kind: 'max-tokens' } : { kind: 'stop' },
+  }
 }

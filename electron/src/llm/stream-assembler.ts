@@ -14,6 +14,8 @@ interface BlockState {
   id?: string
   name?: string
   arguments: string
+  replay?: { protocol: string; payload: unknown }
+  incomplete?: boolean
 }
 
 export interface ToolDelta {
@@ -41,28 +43,41 @@ export class StreamAssembler {
     return [state, { type: 'block-start', index: state.index, block_type: kind }]
   }
 
+  openText(): StreamChunk[] {
+    if (this.textBlock) return []
+    const [state, start] = this.open('text')
+    this.textBlock = state
+    return [start]
+  }
+
+  openReasoning(): StreamChunk[] {
+    if (this.reasoningBlock) return []
+    const [state, start] = this.open('reasoning')
+    this.reasoningBlock = state
+    return [start]
+  }
+
   textDelta(delta: string): StreamChunk[] {
-    const out: StreamChunk[] = []
-    if (!this.textBlock) {
-      const [state, start] = this.open('text')
-      this.textBlock = state
-      out.push(start)
+    const out = this.openText()
+    this.textBlock!.text += delta
+    if (delta.length > 0) {
+      out.push({ type: 'text-delta', index: this.textBlock!.index, text: delta })
     }
-    this.textBlock.text += delta
-    out.push({ type: 'text-delta', index: this.textBlock.index, text: delta })
     return out
   }
 
   reasoningDelta(delta: string): StreamChunk[] {
-    const out: StreamChunk[] = []
-    if (!this.reasoningBlock) {
-      const [state, start] = this.open('reasoning')
-      this.reasoningBlock = state
-      out.push(start)
+    const out = this.openReasoning()
+    this.reasoningBlock!.text += delta
+    if (delta.length > 0) {
+      out.push({ type: 'reasoning-delta', index: this.reasoningBlock!.index, text: delta })
     }
-    this.reasoningBlock.text += delta
-    out.push({ type: 'reasoning-delta', index: this.reasoningBlock.index, text: delta })
     return out
+  }
+
+  /** Attach the provider-native block (signature / encrypted content) to the open reasoning block. */
+  setReasoningReplay(protocol: string, payload: unknown): void {
+    if (this.reasoningBlock) this.reasoningBlock.replay = { protocol, payload }
   }
 
   toolCallDelta(key: string, delta: ToolDelta): StreamChunk[] {
@@ -96,6 +111,16 @@ export class StreamAssembler {
     state.arguments = argumentsText
   }
 
+  /** Mark a tool call whose arguments never completed (stream ended mid-call). */
+  setToolIncomplete(key: string): void {
+    const state = this.toolBlocks.get(key)
+    if (state) state.incomplete = true
+  }
+
+  toolKeys(): string[] {
+    return [...this.toolBlocks.keys()]
+  }
+
   hasToolCalls(): boolean {
     return this.toolBlocks.size > 0
   }
@@ -103,12 +128,19 @@ export class StreamAssembler {
   blocks(): ContentBlock[] {
     return this.states.map((state): ContentBlock => {
       if (state.kind === 'text') return { type: 'text', text: state.text }
-      if (state.kind === 'reasoning') return { type: 'reasoning', text: state.text }
+      if (state.kind === 'reasoning') {
+        return {
+          type: 'reasoning',
+          text: state.text,
+          ...(state.replay ? { replay: state.replay } : {}),
+        }
+      }
       return {
         type: 'tool-call',
         id: state.id ?? `call_${state.index}`,
         name: state.name ?? '',
         arguments: state.arguments,
+        ...(state.incomplete ? { incomplete: true } : {}),
       }
     })
   }

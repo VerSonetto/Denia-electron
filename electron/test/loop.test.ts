@@ -214,7 +214,8 @@ test('agent loop runs a tool-calling turn and streams UI-visible events', async 
     assert.equal(final.blocks[0]?.type, 'text')
     assert.equal(final.blocks[0]?.text, '全部完成。')
     assert.deepEqual(final.usage, {
-      inputTokens: 30,
+      // Rust contract: inputTokens is the uncached prompt (30 - 4 cached).
+      inputTokens: 26,
       outputTokens: 8,
       cacheReadTokens: 4,
       reasoningTokens: 2,

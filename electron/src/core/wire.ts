@@ -25,6 +25,7 @@ export interface ChatMessage {
   content: string
   images?: ImageData[]
   reasoningContent?: string
+  reasoningReplay?: Array<{ protocol: string; payload: unknown }>
   toolCalls?: ToolCallRef[]
   toolCallId?: string
 }

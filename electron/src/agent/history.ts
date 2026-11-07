@@ -21,6 +21,14 @@ function reasoningOf(blocks: ContentBlock[]): string | undefined {
   return text.length > 0 ? text : undefined
 }
 
+/** Provider-native reasoning blocks (signature / encrypted item) for replay. */
+function reasoningReplayOf(blocks: ContentBlock[]): Array<{ protocol: string; payload: unknown }> {
+  return blocks
+    .filter((block): block is Extract<ContentBlock, { type: 'reasoning' }> => block.type === 'reasoning')
+    .map((block) => block.replay)
+    .filter((replay): replay is { protocol: string; payload: unknown } => replay !== undefined)
+}
+
 function toolCallsOf(blocks: ContentBlock[]) {
   return blocks
     .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
@@ -96,10 +104,12 @@ export function deriveHistory(events: Envelope[]): ChatMessage[] {
       case 'assistant-message': {
         const calls = toolCallsOf(event.blocks)
         const reasoning = reasoningOf(event.blocks)
+        const replay = reasoningReplayOf(event.blocks)
         messages.push({
           role: 'assistant',
           content: textOf(event.blocks),
           ...(reasoning ? { reasoningContent: reasoning } : {}),
+          ...(replay.length > 0 ? { reasoningReplay: replay } : {}),
           ...(calls.length > 0 ? { toolCalls: calls } : {}),
         })
         break
