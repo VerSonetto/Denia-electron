@@ -106,9 +106,7 @@ export class HostServices implements SessionServices {
       if (!this.allowed(header, schema.name)) continue
       out.push(schema)
     }
-    if (state.sandbox === 'read-only') {
-      // MCP tools are read-class; subagent tools obey the hard ceiling.
-    }
+    void state
     return out
   }
 

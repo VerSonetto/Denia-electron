@@ -47,8 +47,17 @@ export function deriveHistory(events: Envelope[]): ChatMessage[] {
   }
   const skipped = (seq: number): boolean =>
     compactions.some((item) => seq >= item.from && seq <= item.to)
+  // A newer compaction may cover an older summary; only the surviving ones
+  // may be inserted, otherwise the model sees two contradictory summaries.
+  const activeCompactions = compactions.filter(
+    (item) =>
+      !compactions.some(
+        (other) => other !== item && item.keepFrom >= other.from && item.keepFrom <= other.to,
+      ),
+  )
   const summaryBefore = (seq: number): string | null => {
-    for (const item of compactions) {
+    for (let index = activeCompactions.length - 1; index >= 0; index -= 1) {
+      const item = activeCompactions[index]!
       if (item.keepFrom === seq) return item.summary
     }
     return null
