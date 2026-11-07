@@ -1,0 +1,24 @@
+{
+  "name": "@denia/electron",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Denia Electron host: TypeScript backend (agent loop, tools, HTTP/SSE) + existing web UI",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/loop.test.ts test/adapters.test.ts",
+    "start": "node scripts/build.mjs && electron .",
+    "dev": "node scripts/dev.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^45.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true
+  }
+}
