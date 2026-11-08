@@ -28,6 +28,7 @@
     "appId": "dev.denia.app",
     "productName": "Denia",
     "npmRebuild": false,
+    "electronDist": "node_modules/electron/dist",
     "copyright": "Denia",
     "directories": {
       "output": "release",
@@ -51,6 +52,7 @@
     "win": {
       "icon": "build/icon.ico",
       "executableName": "Denia",
+      "signExecutable": false,
       "target": [
         {
           "target": "nsis",
