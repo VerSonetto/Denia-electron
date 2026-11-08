@@ -25,6 +25,7 @@ import { allPresetFeatures, presetForSession, presetRows, presetSettings } from 
 import type { AgentPresetRow } from '../agent/presets.ts'
 import { scheduleSessionTitle } from '../agent/session-title.ts'
 import { Updater } from './update.ts'
+import { availableApps, iconFor, launchApp } from './open-in-app.ts'
 import { compactSession, estimateTokens } from '../agent/compact.ts'
 import type { AppConfig } from '../config.ts'
 import {
@@ -252,6 +253,8 @@ function mimeOf(file: string): string {
 
 export async function startHost(options: HostOptions = {}): Promise<Host> {
   const home = options.home ?? resolveHome()
+  // Launching GUI apps only makes sense for the machine the host runs on.
+  const localOnly = isLoopbackHost(options.host ?? '127.0.0.1')
   fs.mkdirSync(home, { recursive: true })
   const webDir = options.webDir ?? path.resolve(import.meta.dirname, '..', '..', '..', 'web', 'dist')
   const updater = new Updater({
@@ -1966,8 +1969,56 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
     }
+    const openInAppIcon = /^\/api\/open-in-app\/icon\/([A-Za-z0-9_-]+)$/.exec(pathname)
+    if (openInAppIcon !== null && method === 'GET') {
+      const png = localOnly ? await iconFor(openInAppIcon[1]!) : null
+      if (png === null) {
+        apiError(res, 404, 'open-in-app/no-icon', `no icon for app '${openInAppIcon[1]}'`)
+        return
+      }
+      res.writeHead(200, {
+        'content-type': 'image/png',
+        'cache-control': 'public, max-age=3600',
+      })
+      res.end(png)
+      return
+    }
+    if (pathname === '/api/open-in-app/open' && method === 'POST') {
+      if (!localOnly) {
+        apiError(res, 403, 'open-in-app/remote-disabled', '远程访问时不能启动宿主机应用')
+        return
+      }
+      const body = await readJson(req)
+      const app = typeof body.app === 'string' ? body.app : ''
+      const dir = typeof body.path === 'string' ? body.path : ''
+      if (dir === '' || !path.isAbsolute(dir)) {
+        apiError(res, 400, 'open-in-app/bad-path', 'path 必须是绝对路径')
+        return
+      }
+      let stat: fs.Stats | null = null
+      try {
+        stat = fs.statSync(dir)
+      } catch {
+        stat = null
+      }
+      if (!stat?.isDirectory()) {
+        apiError(res, 404, 'open-in-app/dir-not-found', `目录不存在:${dir}`)
+        return
+      }
+      const outcome = await launchApp(app, dir)
+      if (outcome === 'unknown') {
+        apiError(res, 400, 'open-in-app/unknown-app', `未知或不可用的应用:${app}`)
+        return
+      }
+      if (outcome === 'failed') {
+        apiError(res, 502, 'open-in-app/launch-failed', `启动失败:${app}`)
+        return
+      }
+      json(res, 200, { ok: true })
+      return
+    }
     if (pathname === '/api/open-in-app/apps' && method === 'GET') {
-      json(res, 200, { apps: [] })
+      json(res, 200, { apps: localOnly ? availableApps() : [] })
       return
     }
     if (pathname === '/api/browser/state' && method === 'GET') {
@@ -2125,6 +2176,10 @@ function safeDecode(value: string): string {
   } catch {
     return value
   }
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]'
 }
 
 function isDirectory(dir: string): boolean {
