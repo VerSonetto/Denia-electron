@@ -1118,6 +1118,50 @@
 /* 文件类工具(edit/write_file)的路径可点:点开在「文件读取」标签页。
    靠虚下划线把“可点”说出来，颜色仍与普通摘要一致 —— 它是路径，
    不是另一个动作按钮。 */
+.disc-head.think-live {
+  overflow: hidden;
+}
+
+.disc-head.think-live .think-live-title {
+  background: linear-gradient(
+    100deg,
+    var(--label-secondary) 25%,
+    var(--label-primary) 50%,
+    var(--label-secondary) 75%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: think-live-glare 2.4s steps(30, end) infinite;
+}
+
+.disc-head .think-live-summary {
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  text-overflow: clip;
+  font-family: inherit;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 16px, #000 calc(100% - 16px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 16px, #000 calc(100% - 16px), transparent);
+}
+
+/* 思考耗时/首行预览是状态说明,不是工具参数,沿用普通界面字体。 */
+.disc-head .think-duration,
+.disc-head .think-preview {
+  font-family: inherit;
+}
+
+@keyframes think-live-glare {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-head.think-live .think-live-title {
+    animation: none;
+  }
+}
+
 .disc-head .tool-file-path {
   cursor: pointer;
   border-bottom: 1px dashed transparent;
@@ -1332,6 +1376,74 @@
   flex-direction: column;
   gap: 8px;
   padding-left: 4px;
+}
+
+/* 标准模式的工作步骤组：标题是当前动作或完成摘要，展开后才是逐项过程。 */
+.work-process-head {
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+  color: var(--label-tertiary);
+}
+
+.work-process-head .work-process-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  color: var(--label-tertiary);
+}
+
+.work-process-head .title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--label-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-process-head .work-process-sep {
+  width: 3px;
+  height: 3px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--label-caption);
+}
+
+.work-process-head .work-process-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-process-head .work-process-live {
+  background: linear-gradient(
+    100deg,
+    var(--label-secondary) 25%,
+    var(--label-primary) 50%,
+    var(--label-secondary) 75%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: think-live-glare 2.4s steps(30, end) infinite;
+}
+
+.work-process-body {
+  max-height: min(400px, 50vh);
+  overflow-y: auto;
+  padding-left: 20px;
+  overscroll-behavior-y: auto;
+  scrollbar-gutter: stable;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-process-head .work-process-live {
+    animation: none;
+  }
 }
 
 /* 收尾行(状态 + 变更卡片):与对话消息同宽,左右边缘与助手回复对齐 ——

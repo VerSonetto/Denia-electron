@@ -3,6 +3,7 @@
 
 import type { ModelSelection } from '../core/wire.ts'
 import type { PermissionState } from '../core/permission.ts'
+import { excludedPresetTools } from '../agent/presets.ts'
 import type { ResolvedProfile } from './profiles.ts'
 import { ProfileError } from './profiles.ts'
 import type {
@@ -61,13 +62,23 @@ export interface ParentContext {
   mode: PermissionMode
   selection: ModelSelection
   presetTools?: string[]
+  presetFeatures?: import('../agent/presets.ts').PresetFeatures
 }
 
 const READ_ONLY_EXCLUDED = new Set(['bash', 'write_file', 'edit', 'job_start'])
 
 /** Tools the parent session may hand down (before child hard denials). */
-export function parentGrant(registered: string[], presetTools?: string[], mode?: PermissionMode): string[] {
+export function parentGrant(
+  registered: string[],
+  presetTools?: string[],
+  mode?: PermissionMode,
+  features?: import('../agent/presets.ts').PresetFeatures,
+): string[] {
   let names = registered
+  if (features) {
+    const excluded = new Set(excludedPresetTools(features))
+    names = names.filter((name) => !excluded.has(name))
+  }
   if (presetTools) {
     const allowed = new Set(presetTools)
     names = names.filter((name) => allowed.has(name))
@@ -295,7 +306,7 @@ export function resolveDispatch(input: {
   const tools = computeToolGrant(
     requestedTools,
     parent.registered,
-    parentGrant(parent.registered, parent.presetTools, parent.mode),
+    parentGrant(parent.registered, parent.presetTools, parent.mode, parent.presetFeatures),
     // Shipped profiles are templates: a deployment missing an optional tool
     // (skills, fetch, output stores) still runs the rest instead of failing
     // every dispatch. User/inline allowlists stay strict.

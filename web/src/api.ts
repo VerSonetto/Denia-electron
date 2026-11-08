@@ -211,6 +211,14 @@ export function setCredential(reference: string, value: string): Promise<unknown
   })
 }
 
+/** 读取已存凭据的明文本机回显;未配置返回空串。 */
+export async function getCredentialValue(reference: string): Promise<string> {
+  const data = await http<{ value: string }>(
+    `/api/credentials/${encodeURIComponent(reference)}/value`,
+  )
+  return data.value
+}
+
 export function unsetCredential(reference: string): Promise<unknown> {
   return http(`/api/credentials/${encodeURIComponent(reference)}`, { method: 'DELETE' })
 }
@@ -1230,23 +1238,33 @@ export function subscribeEvents(onEvent: (type: string) => void): () => void {
   return subscribeServerEvents((type) => onEvent(type))
 }
 
-/** 会话目标(goal 模式)投影;服务端权威口径(减法记账的用量含在内)。 */
+/** One completion-verifier verdict recorded by the host. */
+export interface GoalVerificationState {
+  iteration: number
+  outcome: 'pass' | 'not-satisfied' | 'failed'
+  at: number
+  reason?: string
+  nextAction?: string
+}
+
+/** 会话目标(goal 模式)投影;服务端权威口径。 */
 export interface GoalState {
+  targetId: string
   objective: string
-  status: 'active' | 'paused' | 'blocked' | 'budget-limited' | 'complete'
-  tokenBudget?: number
-  blockedReason?: string
-  baseTokens: number
-  roundsStarted: number
-  createdAt: number
-  updatedAt: number
+  summaryTitle: string | null
+  status: 'active' | 'paused' | 'budget-limited' | 'complete'
+  tokenBudget: number | null
+  tokensUsed: number
+  timeUsedSeconds: number
+  activeRunStartedAtMs: number | null
+  iteration: number
+  verifications: GoalVerificationState[]
+  time: { created: number; updated: number }
 }
 
 export interface GoalView {
   goal: GoalState | null
   tokensUsed: number
-  maxRounds: number
-  maxGoalTokenBudget: number
 }
 
 export type GoalAction = 'set' | 'edit' | 'pause' | 'resume' | 'clear'

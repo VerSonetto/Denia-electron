@@ -17,6 +17,10 @@ export interface GatewayMessage {
 export interface GatewayRequest {
   messages: GatewayMessage[]
   tools?: { function: { name: string } }[]
+  /** Affinity hint the OpenAI adapters add for provider-side prefix caching. */
+  prompt_cache_key?: string
+  /** Long-cache tier requested for this route. */
+  prompt_cache_retention?: string
 }
 
 export interface GatewayPlan {

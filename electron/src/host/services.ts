@@ -10,13 +10,19 @@ import type {
   Envelope,
   ModelSelection,
   SessionHeader,
+  TokenUsage,
   ToolCallRef,
   ToolOutput,
   ToolSchema,
+  TurnEndReason,
 } from '../core/wire.ts'
+import fs from 'node:fs'
+import path from 'node:path'
+
 import type { McpManager } from '../mcp/manager.ts'
-import { buildRuntimeContext } from '../agent/system-prompt.ts'
-import type { SubagentPromptContext } from '../agent/system-prompt.ts'
+import { buildRuntimeContext, DEFAULT_PERSONA } from '../agent/system-prompt.ts'
+import { presetForSession } from '../agent/presets.ts'
+import type { PromptExtraSection, SubagentPromptContext } from '../agent/system-prompt.ts'
 import type { SessionServices } from '../agent/loop.ts'
 import type { ToolContext } from '../tools/types.ts'
 import type { Tool } from '../tools/types.ts'
@@ -24,6 +30,9 @@ import type { FileHistoryBackend } from '../tools/types.ts'
 import { textOutput } from '../tools/types.ts'
 import { McpListTool, McpTool } from '../tools/mcp.ts'
 import { createJobTools } from '../tools/jobs.ts'
+import { GoalReadTool } from '../tools/goal.ts'
+import type { GoalRuntime } from '../goal/runtime.ts'
+import { formatGoalStateForModel } from '../goal/prompts.ts'
 import type { JobManager } from '../jobs/manager.ts'
 import { legacyChildTools } from '../subagents/types.ts'
 import type { SubagentRuntime } from '../subagents/runtime.ts'
@@ -52,11 +61,18 @@ export interface HostServicesOptions {
   fileHistory: FileHistoryStore
   /** Current permission state for runtime-context snapshots. */
   permissionStateOf: (sessionId: string) => PermissionState
+  /** Session goal runtime; absent in bare deployments and unit tests. */
+  goal?: GoalRuntime
   memoryEnabled?: boolean
   memoryIndexMaxBytes?: number
   workspaceInstructionsMaxBytes?: number
   skillCatalogDescriptionMaxChars?: number
+  /** This instance's HTTP base URL; resolved lazily once the server listens. */
+  apiBase?: () => string
 }
+
+/** On-disk override for the deployment persona (same file as the Rust host). */
+const SYSTEM_PROMPT_FILE = 'SYSTEM.md'
 
 export class HostServices implements SessionServices {
   private readonly mcp: McpManager
@@ -71,9 +87,14 @@ export class HostServices implements SessionServices {
   private readonly memoryIndexMaxBytes: number
   private readonly workspaceInstructionsMaxBytes: number
   private readonly skillCatalogDescriptionMaxChars: number
+  private readonly apiBase: (() => string) | undefined
+  /** Cached SYSTEM.md text; undefined = not read yet, null = factory persona. */
+  private systemPrompt: string | null | undefined
   private readonly loaded = new Map<string, Set<string>>()
   private readonly mcpTools = new Map<string, McpTool>()
   private readonly listTool: McpListTool
+  private readonly goalRuntime: GoalRuntime | undefined
+  private readonly goalReadTool: GoalReadTool | undefined
 
   constructor(options: HostServicesOptions) {
     this.mcp = options.mcp
@@ -88,7 +109,11 @@ export class HostServices implements SessionServices {
     this.memoryIndexMaxBytes = options.memoryIndexMaxBytes ?? 25_600
     this.workspaceInstructionsMaxBytes = options.workspaceInstructionsMaxBytes ?? 65_536
     this.skillCatalogDescriptionMaxChars = options.skillCatalogDescriptionMaxChars ?? 500
+    this.apiBase = options.apiBase
+    this.systemPrompt = undefined
     this.listTool = new McpListTool(this.mcp, (sessionId) => this.subagents.grantOf(sessionId))
+    this.goalRuntime = options.goal
+    this.goalReadTool = options.goal ? new GoalReadTool(options.goal) : undefined
   }
 
   private loadedOf(sessionId: string): Set<string> {
@@ -130,6 +155,9 @@ export class HostServices implements SessionServices {
       if (!this.allowed(header, tool.schema.name)) continue
       out.push(tool.schema)
     }
+    if (!header.subagent && this.goalReadTool && this.allowed(header, this.goalReadTool.schema.name)) {
+      out.push(this.goalReadTool.schema)
+    }
     void state
     return out
   }
@@ -159,6 +187,9 @@ export class HostServices implements SessionServices {
   ): Promise<ToolOutput | undefined> {
     if (name === 'mcp_list') {
       return this.listTool.execute(args, ctx)
+    }
+    if (name === 'goal_read' && this.goalReadTool) {
+      return this.goalReadTool.execute(args, ctx)
     }
     if (name.startsWith('mcp__')) {
       const snapshot = this.mcp.snapshot()
@@ -194,20 +225,72 @@ export class HostServices implements SessionServices {
 
   onTurnStart(sessionId: string): void {
     this.subagents.onTurnStart(sessionId)
+    this.goalRuntime?.onTurnStart(sessionId)
   }
 
-  onTurnEnd(sessionId: string): void {
+  onTurnEnd(sessionId: string, reason: TurnEndReason, usage?: TokenUsage): void {
     this.subagents.onTurnEnd(sessionId)
+    this.goalRuntime?.onTurnEnd(sessionId, reason, usage)
   }
 
-  promptSections(sessionId: string, header: SessionHeader): string[] {
-    const sections: string[] = []
+  /**
+   * Runtime-owned system-prompt sections, placed at their fixed slots:
+   * memory before the communication group, MCP inside the tool group.
+   * The goal discipline is static (it only depends on `goal_read` being on
+   * the tool surface); the live objective travels on the `goal` channel.
+   */
+  promptSections(_sessionId: string, header: SessionHeader): PromptExtraSection[] {
+    const sections: PromptExtraSection[] = []
     if (!header.subagent && this.memoryEnabled) {
-      sections.push(renderMemorySection(memoryRoot(this.home, header.cwd)))
+      sections.push({
+        name: 'memory',
+        text: renderMemorySection(memoryRoot(this.home, header.cwd)),
+      })
     }
     const mcp = this.mcpDiscipline()
-    if (mcp) sections.push(mcp)
+    if (mcp) sections.push({ name: 'mcp', text: mcp })
     return sections
+  }
+
+  /** Deployment persona: SYSTEM.md when present, factory persona otherwise. */
+  persona(): string {
+    return this.systemPromptText() ?? DEFAULT_PERSONA
+  }
+
+  systemPromptView(): { text: string; source: 'default' | 'file'; path: string } {
+    const text = this.systemPromptText()
+    return {
+      text: text ?? DEFAULT_PERSONA,
+      source: text === null ? 'default' : 'file',
+      path: path.join(this.home, SYSTEM_PROMPT_FILE),
+    }
+  }
+
+  saveSystemPrompt(text: string): void {
+    const file = path.join(this.home, SYSTEM_PROMPT_FILE)
+    if (text.trim() === '') {
+      fs.rmSync(file, { force: true })
+      this.systemPrompt = null
+      return
+    }
+    fs.writeFileSync(file, text, 'utf8')
+    this.systemPrompt = text
+  }
+
+  resetSystemPrompt(): void {
+    fs.rmSync(path.join(this.home, SYSTEM_PROMPT_FILE), { force: true })
+    this.systemPrompt = null
+  }
+
+  private systemPromptText(): string | null {
+    if (this.systemPrompt !== undefined) return this.systemPrompt
+    try {
+      const text = fs.readFileSync(path.join(this.home, SYSTEM_PROMPT_FILE), 'utf8')
+      this.systemPrompt = text.trim() === '' ? null : text
+    } catch {
+      this.systemPrompt = null
+    }
+    return this.systemPrompt
   }
 
   injections(sessionId: string, header: SessionHeader): { channel: string; text: string }[] {
@@ -259,12 +342,20 @@ export class HostServices implements SessionServices {
     const catalog = this.subagents.catalogText(sessionId)
     if (catalog) out.push({ channel: 'subagent-catalog', text: catalog })
 
+    if (!header.subagent && this.goalRuntime) {
+      const goal = this.goalRuntime.read(sessionId)
+      if (goal && goal.status !== 'complete') {
+        out.push({ channel: 'goal', text: formatGoalStateForModel(goal) })
+      }
+    }
+
     out.push({
       channel: 'runtime-context',
       text: buildRuntimeContext({
         cwd: header.cwd,
         sandbox: header.sandbox,
         permission: this.permissionStateOf(sessionId),
+        ...(this.apiBase ? { apiBase: this.apiBase() } : {}),
       }),
     })
     return out
@@ -301,6 +392,18 @@ export class HostServices implements SessionServices {
     return this.subagents.selectionOf(sessionId)
   }
 
+  historyFor(sessionId: string, events: Envelope[]): Envelope[] {
+    return this.subagents.historyFor(sessionId, events)
+  }
+
+  notifyParent(sessionId: string, message: string): void {
+    this.subagents.notifyParent(sessionId, message)
+  }
+
+  presetFor(sessionId: string, header: SessionHeader) {
+    return presetForSession(this.home, header, this.store.read(sessionId)?.events ?? [])
+  }
+
   private mcpDiscipline(): string | null {
     const snapshot = this.mcp.snapshot()
     if (!snapshot.hasConnected()) return null
@@ -308,12 +411,10 @@ export class HostServices implements SessionServices {
       .filter((server) => server.enabled && server.status === 'connected')
       .map((server) => server.id)
     return [
-      '[denia MCP 能力]',
-      `已连接的 MCP 服务器：${servers.join('、')}。`,
-      '外部工具以 mcp__<服务器>__<工具> 命名；先用 mcp_list 查看清单（可按 server 过滤），再按名称直接调用。',
-      '首次调用只返回 JSON Schema、不执行；按定义尽快重新调用即可执行。不要把 MCP 当成内置能力，也不要向用户解释“用 MCP”。',
-      '长结果按字符分页：带尾部给出的 result_id 与更大的 offset 再调用同一工具可续读同一次结果（不会重新执行）；优先收窄查询，不要靠翻页从头读到尾。',
-      '调用失败先读错误里的可执行建议（通常需要到设置 → MCP 检查服务器状态或重连），不要反复重试同一调用。',
+      `当前已接入的 MCP 服务器：${servers.join('、')}。`,
+      '- mcp__<服务器>__<工具> 是用户接入的第三方能力，不是内置功能，也不向用户解释“用 MCP”。同名能力内置优先，内置做不到才用外部。先用 mcp_list（可按 server 筛选）发现，再按清单名称调用；首次调用只返回 JSON Schema、不执行，按定义尽快重新调用执行，不猜参数、不反复装载同一工具。',
+      '- 长结果按字符分页：带尾部给出的 result_id 与更大的 offset 再调用同一工具可续读同一次结果（不会重新执行）；优先收窄查询，不靠翻页从头读到尾。',
+      '- 失败先读错误里的可执行建议（常需在设置 → MCP 检查或重连），不反复重试同一调用，换内置工具或请用户处理。',
     ].join('\n')
   }
 

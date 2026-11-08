@@ -42,6 +42,12 @@ export interface ProviderConfig {
   defaultMaxTokens?: number
   headers?: Record<string, string>
   inlineThinkTags?: boolean
+  /** Request the provider's long cache tier: Anthropic `ttl: "1h"` (with the
+   * extended-cache-ttl beta) and OpenAI `prompt_cache_retention: "24h"`. */
+  longCache?: boolean
+  /** Whether the route accepts OpenAI's `prompt_cache_key` body field. Strict
+   * gateways that reject unknown fields can turn it off. Defaults to true. */
+  supportsPromptCacheKey?: boolean
 }
 
 export interface DefaultSelection {
@@ -226,6 +232,8 @@ function providerFromRaw(
     ...(typeof raw.defaultMaxTokens === 'number' ? { defaultMaxTokens: raw.defaultMaxTokens } : {}),
     ...(headersFromRaw(raw.headers) ? { headers: headersFromRaw(raw.headers) } : {}),
     ...(typeof raw.inlineThinkTags === 'boolean' ? { inlineThinkTags: raw.inlineThinkTags } : {}),
+    ...(raw.longCache === true ? { longCache: true } : {}),
+    supportsPromptCacheKey: raw.supportsPromptCacheKey !== false,
   }
 }
 

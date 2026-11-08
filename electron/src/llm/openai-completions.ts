@@ -7,6 +7,7 @@
 import type OpenAI from 'openai'
 
 import type { ChatMessage, FinishReason, StreamChunk, TokenUsage, ToolSchema } from '../core/wire.ts'
+import { normalizePromptCacheKey } from './cache.ts'
 import { openAiClient, isAbortError, toRequestError } from './client.ts'
 import { InlineThinkSplitter, chatFinishReason, contentText, mapChatUsage, reasoningText } from './normalize.ts'
 import { StreamAssembler } from './stream-assembler.ts'
@@ -112,6 +113,12 @@ export async function* streamOpenAi(request: GenerateRequest): AsyncGenerator<St
   if (request.reasoningEffort && request.reasoningEffort !== 'off') {
     body.reasoning_effort = request.reasoningEffort
   }
+  const cacheKey = request.cacheKey === undefined ? undefined : normalizePromptCacheKey(request.cacheKey)
+  // Strict gateways reject unknown body fields, so the affinity hint is opt-out.
+  if (cacheKey !== undefined && provider.supportsPromptCacheKey !== false) {
+    body.prompt_cache_key = cacheKey
+  }
+  if (provider.longCache === true) body.prompt_cache_retention = '24h'
 
   const assembler = new StreamAssembler()
   const splitter = new InlineThinkSplitter(provider.inlineThinkTags === true)

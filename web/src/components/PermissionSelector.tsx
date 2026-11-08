@@ -82,7 +82,7 @@ function levelMeta(level: PermissionChoice, levels: ReturnType<typeof levelsFor>
  * 视觉与模型选择器(ComposerModelMenu)对齐:同款透明 chip,
  * 弹层为带图标卡片的菜单,当前项右侧打勾。
  * 审批发生在运行时 —— 越界写文件或提交计划(计划模式)时会在
- * 输入框位置弹出审批面板,不在这里配置。
+ * 输入框区域显示审批操作,不在这里配置。
  */
 export function PermissionSelector({
   value,

@@ -167,6 +167,10 @@ export interface OpenAiProfile {
   headers?: Record<string, string>
   /** 定向兼容:网关把推理内联进 content(以 `</think>` 收尾)时,开启后拆成推理块。默认关闭。 */
   inlineThinkTags?: boolean
+  /** 请求提供方的长缓存档:Anthropic `ttl: "1h"`、OpenAI 24h retention。 */
+  longCache?: boolean
+  /** 路由是否接受 OpenAI 的 `prompt_cache_key`;严格网关可关闭。默认开启。 */
+  supportsPromptCacheKey?: boolean
 }
 
 /** 输入框中的一张粘贴图片:预览 data URL 供缩略图,data 是发给模型的原始 base64。 */

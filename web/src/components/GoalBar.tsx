@@ -21,8 +21,6 @@ function goalStatusLabel(status: GoalState['status']): string {
       return t('goalPhaseActive')
     case 'paused':
       return t('goalPhasePaused')
-    case 'blocked':
-      return t('goalPhaseBlocked')
     case 'budget-limited':
       return t('goalPhaseBudgetLimited')
     case 'complete':
@@ -30,14 +28,33 @@ function goalStatusLabel(status: GoalState['status']): string {
   }
 }
 
+/** 最近一次完成校验的结论:放在标题上,不占横条宽度。 */
+function lastVerificationHint(goal: GoalState): string | undefined {
+  const last = goal.verifications[goal.verifications.length - 1]
+  if (!last) return undefined
+  const lines = [last.reason, last.nextAction].filter(
+    (line): line is string => typeof line === 'string' && line.trim() !== '',
+  )
+  return lines.length > 0 ? lines.join('\n') : undefined
+}
+
+function formatElapsed(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const rest = total % 60
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, '0')}m`
+  if (minutes > 0) return `${minutes}m${String(rest).padStart(2, '0')}s`
+  return `${rest}s`
+}
+
 /**
  * 会话目标指示条:输入框上方的 36px 圆角横条,
- * 图标 + 状态标签 + 截断的目标文本 + 预算胶囊 + 操作按钮。
+ * 图标 + 状态标签 + 截断的目标文本 + 预算胶囊 + 迭代/耗时 + 操作按钮。
  *
  * 交互:编辑是条内内联表单(Enter 保存 / Esc 取消,只有成功才
- * 关表单);暂停/恢复/清除直接执行无确认弹窗;single-flight 防重复提交;
- * complete 的目标整条不渲染("completed goal is history, not chrome")。
- * 预算胶囊是 denia 的扩展(基于 token budget 记账)。
+ * 关表单);暂停/恢复/清除直接执行无确认弹窗;single-flight 防重复提交。
+ * 完成的目标保留横条,让用户能看到完成校验的结论,再手动清除。
  */
 export function GoalBar({
   sessionId,
@@ -57,27 +74,38 @@ export function GoalBar({
   const [budgetDraft, setBudgetDraft] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [now, setNow] = useState(() => Date.now())
   const pendingRef = useRef(false)
   const objectiveRef = useRef<HTMLInputElement | null>(null)
   const selectionRef = useRef(selection)
   selectionRef.current = selection
 
   // 目标被外部变化(清除/重建/状态跳变)时重置编辑态,防止残留草稿覆盖
-  // 新目标;updatedAt 是事件折叠的每次变化时间戳。
+  // 新目标;服务端每次变化都会推进 updated。
+  const goalUpdated = goal?.time.updated ?? null
   useEffect(() => {
     setEditing(false)
     setError(null)
-  }, [goal?.updatedAt, goal === null])
+  }, [goalUpdated, goal === null])
 
   useEffect(() => {
     if (editing) objectiveRef.current?.focus()
   }, [editing])
 
-  if (!goal || goal.status === 'complete') return null
+  // 运行中的目标每秒推进一次显示;tick 只存在于渲染层,不写回会话。
+  const running = goal?.status === 'active' && goal.activeRunStartedAtMs !== null
+  useEffect(() => {
+    if (!running) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [running, goal?.activeRunStartedAtMs])
+
+  if (!goal) return null
 
   const beginEdit = () => {
     setDraft(goal.objective)
-    setBudgetDraft(goal.tokenBudget === undefined ? '' : String(goal.tokenBudget))
+    setBudgetDraft(goal.tokenBudget === null ? '' : String(goal.tokenBudget))
     setError(null)
     setEditing(true)
   }
@@ -124,9 +152,14 @@ export function GoalBar({
 
   const status = goalStatusLabel(goal.status)
   const budgetLabel =
-    goal.tokenBudget !== undefined
-      ? `${formatTokens(view?.tokensUsed ?? 0)}/${formatTokens(goal.tokenBudget)}`
-      : null
+    goal.tokenBudget === null
+      ? formatTokens(goal.tokensUsed)
+      : `${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)}`
+  const elapsedSeconds =
+    goal.timeUsedSeconds +
+    (running && goal.activeRunStartedAtMs !== null
+      ? Math.max(0, Math.floor((now - goal.activeRunStartedAtMs) / 1000))
+      : 0)
 
   if (editing) {
     return (
@@ -189,14 +222,18 @@ export function GoalBar({
       className="goal-bar"
       data-goal-bar=""
       data-goal-status={goal.status}
-      title={goal.status === 'blocked' && goal.blockedReason ? goal.blockedReason : undefined}
+      title={lastVerificationHint(goal)}
     >
       <span className="goal-icon">
         <IconGoal size={14} />
       </span>
       <span className="goal-status-label">{status}</span>
       <span className="goal-objective">{goal.objective}</span>
-      {budgetLabel && <span className="goal-budget-pill">{budgetLabel}</span>}
+      <span className="goal-budget-pill">{budgetLabel}</span>
+      <span className="goal-budget-pill" title={t('goalIterationHint')}>
+        #{goal.iteration}
+      </span>
+      <span className="goal-budget-pill">{formatElapsed(elapsedSeconds)}</span>
       <span className="goal-spacer" />
       {error && (
         <span className="goal-error" role="alert">
@@ -218,7 +255,7 @@ export function GoalBar({
           </svg>
         </button>
       )}
-      {(goal.status === 'paused' || goal.status === 'blocked') && (
+      {(goal.status === 'paused' || goal.status === 'budget-limited') && (
         <button
           type="button"
           className="goal-action"

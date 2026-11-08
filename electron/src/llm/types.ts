@@ -16,6 +16,8 @@ export interface GenerateRequest {
   maxTokens?: number
   stop?: string[]
   reasoningEffort?: string
+  /** Session-scoped provider cache identity (`prompt_cache_key`). */
+  cacheKey?: string
   signal?: AbortSignal
 }
 

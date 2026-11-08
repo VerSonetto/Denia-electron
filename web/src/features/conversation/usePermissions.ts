@@ -109,7 +109,7 @@ export function usePermissions({
     [approvalReq, activeId],
   )
 
-  /* ---- 计划审批(exit_plan):替换整个输入区的审批面板 ---- */
+  /* ---- 计划审批(exit_plan):右侧预览正文，输入区保留审批操作 ---- */
 
   /** 挂起审批是 exit_plan 时,从 args_preview 解析计划正文与标题。 */
   const planReview = useMemo(() => {

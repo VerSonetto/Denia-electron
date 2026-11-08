@@ -29,6 +29,7 @@ import { buildSessionContextQuote, validateContextQuotes } from '../features/con
 import { ComposerEffortControl } from '../components/ComposerEffortControl';
 import { PermissionSelector } from '../components/PermissionSelector';
 import { PlanReviewPanel } from '../components/PlanReviewPanel';
+import { PlanPreviewPanel } from '../components/PlanPreviewPanel';
 import { ApprovalDialog } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
@@ -63,6 +64,8 @@ export default function SessionsPage({
   onToggleSidePane,
   secondary = false,
   navigate,
+  planPreviewInPane = false,
+  onPlanReviewChange,
 }: {
   activeId: string | null
   locked: boolean
@@ -81,6 +84,9 @@ export default function SessionsPage({
    * 把切换(回退重挂/fork/会话消失)约束在本窗格内。
    */
   navigate?: (id: string | null, wsId?: string | null) => void
+  /** 右侧工作台可用时，由 App 自动打开计划标签并承载正文。 */
+  planPreviewInPane?: boolean
+  onPlanReviewChange?: (review: { title?: string; planText: string } | null) => void
 }) {
   const sessions = useSessions()
   const workspaces = useWorkspaces()
@@ -120,6 +126,7 @@ export default function SessionsPage({
   const [selection, setSelection] = useState<ModelSelection | null>(null)
   const [wsMenuOpen, setWsMenuOpen] = useState(false)
   const [sending, setSending] = useState(false)
+  const [planPreviewDismissed, setPlanPreviewDismissed] = useState(false)
   // 提示词优化状态在 usePromptOptimize 里;applyDraft 由 useComposerSlash
   // 产出,晚于该 hook,故走 ref 转发(页面每渲染重赋)。
   const applyDraftRef = useRef<(text: string) => void>(() => {})
@@ -309,25 +316,23 @@ export default function SessionsPage({
   const goalSummaryText = (view: api.GoalView): string => {
     const goal = view.goal
     if (!goal) return t('goalNone')
-    const budget = goal.tokenBudget !== undefined
-      ? `${formatTokens(view.tokensUsed)}/${formatTokens(goal.tokenBudget)}`
-      : formatTokens(view.tokensUsed)
+    const budget = goal.tokenBudget !== null
+      ? `${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)}`
+      : formatTokens(goal.tokensUsed)
     const statusLabel =
       goal.status === 'active'
         ? t('goalPhaseActive')
         : goal.status === 'paused'
           ? t('goalPhasePaused')
-          : goal.status === 'blocked'
-            ? t('goalPhaseBlocked')
-            : goal.status === 'budget-limited'
-              ? t('goalPhaseBudgetLimited')
-              : t('goalPhaseComplete')
+          : goal.status === 'budget-limited'
+            ? t('goalPhaseBudgetLimited')
+            : t('goalPhaseComplete')
     return t('goalSummary', {
       objective: goal.objective,
       status: statusLabel,
       budget,
-      rounds: String(goal.roundsStarted),
-      maxRounds: String(view.maxRounds),
+      iteration: String(goal.iteration),
+      elapsed: `${goal.timeUsedSeconds}s`,
     })
   }
 
@@ -475,7 +480,14 @@ export default function SessionsPage({
     ? resolveSessionReasoningEffort(effortLevels, selection.reasoningEffort)
     : undefined
   const showTranscript = Boolean(
-    activeId && (hasStarted || sending || hasHistory || pendingMessages.length > 0),
+    activeId &&
+      (hasStarted ||
+        sending ||
+        hasHistory ||
+        pendingMessages.length > 0 ||
+        // A goal continuation produces no visible user message; the session
+        // must still leave the hero state so the goal bar and turns show.
+        goalView?.goal),
   )
   const phase = showTranscript ? 'active' : 'hero'
 
@@ -541,6 +553,11 @@ export default function SessionsPage({
     handleApproval, planReview, handlePlanDecision, handlePlanExit, showApproveForMe,
     agentPresetCatalog, agentPresetChoice, agentPresetBusy, agentPresetId, changeAgentPreset,
   } = usePermissions({ activeId, activeSession, catalogTick, applySelection })
+  useEffect(() => {
+    onPlanReviewChange?.(planReview)
+  }, [planReview, onPlanReviewChange])
+  useEffect(() => () => onPlanReviewChange?.(null), [onPlanReviewChange])
+  useEffect(() => setPlanPreviewDismissed(false), [planReview?.requestId])
   const contextSelectionRef = useRef({ start: 0, end: 0 })
   const contextQuotesRef = useRef(trajQuotes)
   contextQuotesRef.current = trajQuotes
@@ -1882,7 +1899,8 @@ export default function SessionsPage({
           setExportBusy={setExportBusy}
         />
       )}
-      <div className="runtime-workspace" data-runtime-visible={runtimeCounts.agents + runtimeCounts.jobs > 0 && !runtimeCollapsed || undefined}>
+      <div className="runtime-workspace" data-runtime-visible={runtimeCounts.agents + runtimeCounts.jobs > 0 && !runtimeCollapsed || undefined}
+        data-plan-preview={planReview && (!planPreviewInPane || planPreviewDismissed) ? 'local' : undefined}>
       <div
         className="conversation-scroll"
         ref={follower.setPort}
@@ -1971,6 +1989,9 @@ export default function SessionsPage({
                   onChanged={() => refreshGoal(activeId)}
                 />
               )}
+              {planReview && !planPreviewInPane && (
+                <PlanPreviewPanel title={planReview.title} planText={planReview.planText} />
+              )}
               {planReview ? (
                 <PlanReviewPanel
                   title={planReview.title}
@@ -2023,6 +2044,11 @@ export default function SessionsPage({
           </div>
         )}
       </div>
+      {planReview && planPreviewInPane && planPreviewDismissed && (
+        <aside className="plan-preview-fallback">
+          <PlanPreviewPanel title={planReview.title} planText={planReview.planText} />
+        </aside>
+      )}
       {phase === 'active' && activeId && (
         <RuntimePanel key={activeId} id={activeId} cwd={activeSession?.cwd} events={runtimeEvents} pendingCount={pendingMessages.length} collapsed={runtimeCollapsed} onCollapse={() => setRuntimeCollapsed(true)} onCountsChange={handleRuntimeCountsChange} />
       )}

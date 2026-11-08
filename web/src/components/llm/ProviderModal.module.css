@@ -281,6 +281,35 @@
   color: var(--label-caption);
 }
 
+.keyViewRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.keyViewRow input {
+  flex: 1;
+}
+
+.keyViewBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border: 1px solid var(--border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--label-secondary);
+  cursor: pointer;
+}
+
+.keyViewBtn:hover {
+  color: var(--label-primary);
+  border-color: var(--border-l3);
+}
+
 .keyWarn {
   display: flex;
   align-items: center;

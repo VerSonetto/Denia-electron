@@ -20,6 +20,9 @@ import type {
 import { isRecord } from '../core/util.ts'
 import type { SessionStore } from '../session/store.ts'
 import { ProfileStore } from './profiles.ts'
+import { findProvider } from '../config.ts'
+import type { AppConfig } from '../config.ts'
+import { presetIdOf, resolvePreset } from '../agent/presets.ts'
 import { ProfileError } from './profiles.ts'
 import type { DelegateArgs } from './resolver.ts'
 import {
@@ -67,6 +70,10 @@ export interface SubagentRuntimeOptions {
   childCreated?(childId: string, parentId: string): void
   /** The child session is gone (dispatch rollback or parent cascade). */
   childRemoved?(childId: string): void
+  /** Notify open settings pages after a model-created permanent definition. */
+  definitionsChanged?(): void
+  /** Live provider catalog for validating frozen selections. */
+  config?(): AppConfig
 }
 
 interface Child {
@@ -117,6 +124,7 @@ export interface SubagentHandoff {
 }
 
 const DEFAULT_CATALOG_BYTES = 8192
+const HISTORY_PROJECTION_FILE = 'history-projection.json'
 const DEFAULT_OUTPUT_BYTES = 64 * 1024
 /** Automatic wakes in a row before waiting for a human turn to reset the budget. */
 const MAX_CONSECUTIVE_WAKES = 3
@@ -134,11 +142,13 @@ export class SubagentRuntime {
   private readonly store: SessionStore
   private readonly profiles: ProfileStore
   private readonly port: SubagentDriverPort
-  private readonly maxConcurrentRuns: number
+  private maxConcurrentRuns: number
   private readonly catalogMaxBytes: number
   private readonly outputBytes: number
   private readonly childCreated: ((childId: string, parentId: string) => void) | undefined
   private readonly childRemoved: ((childId: string) => void) | undefined
+  private readonly definitionsChanged: (() => void) | undefined
+  private readonly getConfig: (() => AppConfig) | undefined
   private readonly children = new Map<string, Child>()
   private readonly paused = new Set<string>()
   private readonly wakeAttempts = new Map<string, number>()
@@ -158,6 +168,8 @@ export class SubagentRuntime {
     this.outputBytes = options.outputBytes ?? DEFAULT_OUTPUT_BYTES
     this.childCreated = options.childCreated
     this.childRemoved = options.childRemoved
+    this.definitionsChanged = options.definitionsChanged
+    this.getConfig = options.config
   }
 
   // —— dispatch ——
@@ -185,7 +197,9 @@ export class SubagentRuntime {
     if (!parentSelection) throw new Error('子代理无法继承模型选择（缺少父会话模型）')
     const projectRoot = this.projectRootOf(ctx.cwd)
     const registered = this.registeredToolNames()
-    const grant = parentGrant(registered, undefined, parentMode)
+    const presetId = presetIdOf(this.store.read(owner)?.events ?? [], parentHeader)
+    const preset = resolvePreset(this.store.home, presetId)
+    const grant = parentGrant(registered, preset.tools, parentMode, preset.features)
 
     let profile = undefined
     if (args.profile_id !== undefined) {
@@ -197,7 +211,7 @@ export class SubagentRuntime {
     const dispatch = resolveDispatch({
       args,
       fork,
-      parent: { registered, mode: parentMode, selection: parentSelection },
+      parent: { registered, mode: parentMode, selection: parentSelection, presetTools: preset.tools, presetFeatures: preset.features },
       ...(profile ? { profile } : {}),
       defaulted: args.profile_id === undefined && args.inline === undefined,
     })
@@ -207,6 +221,8 @@ export class SubagentRuntime {
 
     this.ensureConcurrency()
     const childPermission = effectivePermissionMode(dispatch.permissionCeiling, parentMode)
+    const resolved = this.actualSelection(dispatch.selection, parentSelection, dispatch.modelOrigin)
+    dispatch.selection = resolved.selection
     const labelSource = args.description?.trim() || dispatch.name
     const label = Array.from(labelSource).slice(0, 200).join('')
     const instructionsHash = hashText(dispatch.instructions)
@@ -229,6 +245,9 @@ export class SubagentRuntime {
       createdPermissionMode: parentMode,
       delegationAllowed: false,
       instructionScope: 'project-only',
+      parentPreset: presetId,
+      ...(preset.persona ? { parentPresetPersona: preset.persona } : {}),
+      parentFeatures: preset.features,
       instructionsRef: SUBAGENT_SNAPSHOT_FILE,
       instructionsHash,
       ...(fork
@@ -278,6 +297,7 @@ export class SubagentRuntime {
       )
 
       const result: Record<string, unknown> = {
+        ...(resolved.fallback ? { modelFallback: resolved.fallback } : {}),
         childId: header.id,
         messageId,
         status: 'pending',
@@ -342,6 +362,27 @@ export class SubagentRuntime {
     })
   }
 
+  private actualSelection(
+    requested: ModelSelection,
+    parent: ModelSelection,
+    origin: string,
+  ): { selection: ModelSelection; fallback: string | null } {
+    const provider = this.getConfig ? findProvider(this.getConfig(), requested.provider) : undefined
+    if (provider && provider.models.some((entry) => entry.id === requested.model)) {
+      return { selection: requested, fallback: null }
+    }
+    if (origin === 'profile-explicit') {
+      return {
+        selection: { ...parent },
+        fallback: `子代理定义的模型 ${requested.provider}/${requested.model} 当前不可用，已回退为跟随主会话 ${parent.provider}/${parent.model}`,
+      }
+    }
+    if (this.getConfig) {
+      throw new ProfileError('subagent/model-unavailable', `模型 ${requested.provider}/${requested.model} 当前不可用`, 'model')
+    }
+    return { selection: requested, fallback: null }
+  }
+
   private ensureConcurrency(): void {
     if (this.activeCount() >= this.maxConcurrentRuns) {
       throw new ProfileError(
@@ -373,6 +414,10 @@ export class SubagentRuntime {
   }
 
   private toolNames: () => string[] = () => []
+
+  setConcurrencyLimit(value: number): void {
+    if (Number.isInteger(value)) this.maxConcurrentRuns = Math.max(1, Math.min(64, value))
+  }
 
   /** The host installs the deployed tool registry here. */
   setToolNames(names: () => string[]): void {
@@ -716,6 +761,28 @@ export class SubagentRuntime {
     return this.store.header(sessionId)?.subagent?.selection
   }
 
+  /** Old children resume through a persisted projection, not the mixed legacy log. */
+  historyFor(sessionId: string, events: Envelope[]): Envelope[] {
+    const descriptor = this.store.header(sessionId)?.subagent
+    if (!descriptor || descriptor.snapshotVersion >= SUBAGENT_SNAPSHOT_VERSION) return events
+    if (this.store.readAuxiliary(sessionId, HISTORY_PROJECTION_FILE) === null) {
+      this.store.writeAuxiliary(
+        sessionId,
+        HISTORY_PROJECTION_FILE,
+        JSON.stringify({ version: 1, events: legacyProjection(events) }),
+      )
+    }
+    const raw = this.store.readAuxiliary(sessionId, HISTORY_PROJECTION_FILE)
+    if (!raw) throw new Error(SUBAGENT_CODES.legacyResumeUnsupported)
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (isRecord(parsed) && Array.isArray(parsed.events)) return parsed.events as Envelope[]
+    } catch {
+      // The caller records the failed turn before any provider request.
+    }
+    throw new Error(SUBAGENT_CODES.legacyResumeUnsupported)
+  }
+
   grantOf(sessionId: string): string[] | null {
     const header = this.store.header(sessionId)
     if (!header?.subagent) return null
@@ -732,6 +799,7 @@ export class SubagentRuntime {
         instructions: descriptor.persona ?? '',
         effectiveTools: legacyChildTools(descriptor.allowedTools),
         permissionCeiling: descriptor.permissionCeiling,
+        ...(descriptor.parentPresetPersona ? { parentPersona: descriptor.parentPresetPersona } : {}),
         legacy: true,
       }
     }
@@ -768,6 +836,7 @@ export class SubagentRuntime {
       instructions,
       effectiveTools: descriptor.effectiveTools ?? legacyChildTools(descriptor.allowedTools),
       permissionCeiling: descriptor.permissionCeiling,
+      ...(descriptor.parentPresetPersona ? { parentPersona: descriptor.parentPresetPersona } : {}),
       legacy: false,
     }
   }
@@ -802,6 +871,15 @@ export class SubagentRuntime {
     const schemas = isChild ? CHILD_TOOL_SCHEMAS : PARENT_TOOL_SCHEMAS
     return schemas.filter((schema) => {
       const tools = this.grantOf(sessionId)
+      if (tools === null) {
+        const header = this.store.header(sessionId)
+        if (header && !header.subagent) {
+          const presetId = presetIdOf(this.store.read(sessionId)?.events ?? [], header)
+          const preset = resolvePreset(this.store.home, presetId)
+          const grant = new Set(parentGrant(this.registeredToolNames(), preset.tools, undefined, preset.features))
+          return grant.has(schema.name)
+        }
+      }
       return tools === null || tools.includes(schema.name) || schema.name === 'send_message' || schema.name === 'session_trace'
     })
   }
@@ -881,6 +959,13 @@ export class SubagentRuntime {
     }
   }
 
+  /** A failed legacy migration must reach the parent, not remain a silent failed child. */
+  notifyParent(childId: string, message: string): void {
+    const child = this.childOf(childId)
+    if (!child) return
+    this.enqueue(child.parentId, `legacy-resume:${childId}`, message, 'subagent-legacy')
+  }
+
   private defineSubagent(
     owner: string,
     args: Record<string, unknown>,
@@ -921,6 +1006,13 @@ export class SubagentRuntime {
       }
     }
     const model = parseModelChoice(args.model)
+    const warnings: string[] = []
+    if (model.mode === 'explicit' && this.getConfig) {
+      const provider = findProvider(this.getConfig(), model.selection.provider)
+      if (!provider || !provider.models.some((entry) => entry.id === model.selection.model)) {
+        warnings.push(`模型 ${model.selection.provider}/${model.selection.model} 当前不可用；派遣时会回退为跟随主会话`)
+      }
+    }
     const profile: SubagentProfile = {
       schemaVersion: SUBAGENT_SCHEMA_VERSION,
       id,
@@ -958,6 +1050,7 @@ export class SubagentRuntime {
       view = this.profiles.create(scope, projectRoot, profile, instructions)
       action = 'created'
     }
+    this.definitionsChanged?.()
     return {
       action,
       qualifiedId: view.qualifiedId,
@@ -965,7 +1058,7 @@ export class SubagentRuntime {
       revision: view.revision,
       editable: view.editable,
       profile: view.profile,
-      warnings: [],
+      warnings,
       note: '永久定义已写入子代理管理页；用户可查看、编辑或删除。',
     }
   }
@@ -1388,6 +1481,23 @@ function buildForkSeed(
     cutSeq: closed[closed.length - 1]?.seq ?? 0,
     dropped,
   }
+}
+
+function legacyProjection(events: Envelope[]): Envelope[] {
+  const taskIndex = events.findIndex(
+    (event) => event.type === 'agent-delivery' && event.source.startsWith('agent:'),
+  )
+  const projected: Envelope[] = []
+  for (const event of taskIndex < 0 ? [] : events.slice(taskIndex)) {
+    // An old injected event without a channel cannot be classified safely;
+    // retain it only as a non-model-visible marker in the projection.
+    if (event.type === 'user-message' && event.injected && !event.channel) {
+      projected.push({ ...event, channel: 'legacy-injected' })
+    } else {
+      projected.push(event)
+    }
+  }
+  return projected
 }
 
 function fingerprintOf(dispatch: {

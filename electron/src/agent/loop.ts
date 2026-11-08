@@ -12,14 +12,17 @@ import type {
   ProviderConfig,
 } from '../config.ts'
 import { findProvider, resolveDefault } from '../config.ts'
+import { excludedPresetTools, presetForSession } from './presets.ts'
 import type { ApprovalGrants, PermissionState } from '../core/permission.ts'
 import { ExecPolicy } from '../core/exec-policy.ts'
 import { legacyModeOf, parsePermissionState, presetState, stateFromLegacy } from '../core/permission.ts'
 import type {
+  ChatMessage,
   ContentBlock,
   Envelope,
   ImageData,
   ModelSelection,
+  RequestHeaderSnapshot,
   SessionEvent,
   SessionHeader,
   StreamChunk,
@@ -35,7 +38,7 @@ import type { SessionStore } from '../session/store.ts'
 import type { ToolRegistry } from '../tools/index.ts'
 import type { ToolContext, FileHistoryBackend } from '../tools/types.ts'
 import { toolError } from '../tools/types.ts'
-import type { SubagentPromptContext } from './system-prompt.ts'
+import type { PromptExtraSection, SubagentPromptContext } from './system-prompt.ts'
 import type {
   ApprovalAnswer,
   ApprovalBridge,
@@ -49,7 +52,21 @@ import {
   gateCall,
 } from './gate.ts'
 import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.ts'
-import { deriveHistory, hasOpenTurn, lastTurn } from './history.ts'
+import { deriveHistory, deriveSurface, hasOpenTurn, lastTurn } from './history.ts'
+import type { SurfaceItem } from './history.ts'
+import { CacheWarmer } from './cache-warm.ts'
+import { loadConsoleCacheSettings } from './console-settings.ts'
+import { CLEARED_PLACEHOLDER, planMicrocompact, type MicrocompactSettings } from './microcompact.ts'
+import {
+  buildRequestHeader,
+  contextWindowOf,
+  estimatePressure,
+  frozenSystem,
+  lastAssistantAgeMinutes,
+  lastRequestHeader,
+  sameRequestHeader,
+  SYSTEM_UPDATE_CHANNEL,
+} from './prefix.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
 import { isValidSkillName } from '../skills/skills.ts'
 import type { JobManager } from '../jobs/manager.ts'
@@ -69,6 +86,10 @@ export interface StartTurnOptions {
   skills?: string[]
   /** Resume from the inbox: do not append an empty user message. */
   continueOnly?: boolean
+  /** Model-only turn: the prompt is injected, never shown as a user message. */
+  injected?: boolean
+  /** Injection channel used when `injected` is set. */
+  channel?: string
 }
 
 /**
@@ -96,10 +117,12 @@ export interface SessionServices {
   fileHistory?(sessionId: string, cwd: string): FileHistoryBackend
   /** A human-initiated turn started: reset completion-wake budgets. */
   onTurnStart?(sessionId: string): void
-  /** A turn closed; settle subagents and wake pending inboxes. */
-  onTurnEnd?(sessionId: string): void
-  /** Extra system prompt sections (catalog, MCP discipline, memory). */
-  promptSections?(sessionId: string, header: SessionHeader): string[]
+  /** A turn closed; settle subagents, goal accounting and pending inboxes. */
+  onTurnEnd?(sessionId: string, reason: TurnEndReason, usage?: TokenUsage): void
+  /** Extra system prompt sections; they land at their fixed slots. */
+  promptSections?(sessionId: string, header: SessionHeader): PromptExtraSection[]
+  /** Deployment persona text (SYSTEM.md override or the factory default). */
+  persona?(): string
   /** User-message injections applied at step boundaries (idempotent by channel). */
   injections?(sessionId: string, header: SessionHeader): { channel: string; text: string }[]
   /** Memory directory of this session, used by the permission gate. */
@@ -108,6 +131,12 @@ export interface SessionServices {
   context?(sessionId: string): SubagentPromptContext | null
   /** Frozen selection for resumed child sessions. */
   selectionFor?(sessionId: string): ModelSelection | undefined
+  /** Legacy children need a persisted model-history projection before resume. */
+  historyFor?(sessionId: string, events: Envelope[]): Envelope[]
+  /** Active preset, used to keep schema and execution grants identical. */
+  presetFor?(sessionId: string, header: SessionHeader): { tools?: string[]; features: import('./presets.ts').PresetFeatures }
+  /** Surface an unrecoverable legacy child to its parent. */
+  notifyParent?(sessionId: string, message: string): void
 }
 
 export interface DriverSettings {
@@ -138,6 +167,18 @@ function abortedReason(): TurnEndReason {
   return { kind: 'aborted', cause: { kind: 'user' } }
 }
 
+/**
+ * Mark each wire message with its cache provenance. Only real user turns
+ * (no injection channel) count as conversational turns for the historical
+ * checkpoint decimation; injected reminders and tool results do not.
+ */
+function withCacheProvenance(surface: readonly SurfaceItem[]): ChatMessage[] {
+  return surface.map(({ message, channel }) => ({
+    ...message,
+    cache: { conversationalUser: message.role === 'user' && channel === null },
+  }))
+}
+
 export class SessionDriver {
   private readonly store: SessionStore
   private readonly registry: ToolRegistry
@@ -149,6 +190,7 @@ export class SessionDriver {
   private readonly policy: ExecPolicy
   /** Session-scoped "allow for this window" cache, keyed by normalized action. */
   private readonly grants = new Map<string, Set<string>>()
+  private readonly cacheWarmer = new CacheWarmer()
   private services?: SessionServices
   readonly settings: DriverSettings
 
@@ -176,6 +218,21 @@ export class SessionDriver {
   /** Install host services after both runtimes exist (breaks the cycle). */
   attachServices(services: SessionServices): void {
     this.services = services
+  }
+
+  /** Drop a pending cache-warming replay (new request, compaction, shutdown). */
+  cancelCacheWarm(sessionId: string): void {
+    this.cacheWarmer.cancel(sessionId)
+  }
+
+  /** Release every armed warming timer (host shutdown). */
+  dispose(): void {
+    this.cacheWarmer.dispose()
+  }
+
+  /** Drop a session's warmer state (delete or rewind). */
+  forgetCacheWarm(sessionId: string): void {
+    this.cacheWarmer.forget(sessionId)
   }
 
   /** The session's permission state, projected from its event log. */
@@ -206,6 +263,57 @@ export class SessionDriver {
     return this.running.has(sessionId)
   }
 
+  /** Latest model selection recorded by a turn; goal continuation reuses it. */
+  selectionOf(sessionId: string): ModelSelection | null {
+    const events = this.store.read(sessionId)?.events ?? []
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!
+      if (event.type !== 'request-context') continue
+      return { provider: event.provider, model: event.model }
+    }
+    return null
+  }
+
+  /**
+   * One tool-less model call over the full transcript. Used by the goal
+   * completion verifier; it never appends events to the session log.
+   */
+  async runGoalVerification(input: {
+    sessionId: string
+    prompt: string
+    selection: ModelSelection
+    signal: AbortSignal
+  }): Promise<string> {
+    const session = this.store.read(input.sessionId)
+    if (!session) throw new Error('session not found')
+    const { provider, selection } = this.resolveSelection(this.getConfig(), input.selection)
+    const messages = [
+      ...deriveHistory(session.events),
+      { role: 'user' as const, content: input.prompt },
+    ]
+    const system = buildSystemPrompt({
+      cwd: session.header.cwd,
+      sandbox: session.header.sandbox,
+      tools: [],
+      permission: this.permissionStateOf(input.sessionId),
+      ...(this.services?.persona ? { persona: this.services.persona() } : {}),
+    })
+    let text = ''
+    const stream = streamFor({
+      provider,
+      model: selection.model,
+      messages,
+      system,
+      tools: [],
+      ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+      signal: input.signal,
+    })
+    for await (const chunk of stream) {
+      if (chunk.type === 'block-end' && chunk.block.type === 'text') text += chunk.block.text
+    }
+    return text
+  }
+
   runningIds(): string[] {
     return [...this.running.keys()]
   }
@@ -226,24 +334,40 @@ export class SessionDriver {
     return this.runTurn(sessionId, prompt, options)
   }
 
-  private resolveSelection(config: AppConfig, requested?: ModelSelection): { provider: ProviderConfig; selection: ModelSelection } {
-    const fallback = resolveDefault(config)
-    const providerId = requested?.provider || fallback.provider
-    const provider = findProvider(config, providerId)
+  private resolveSelection(
+    config: AppConfig,
+    requested?: ModelSelection,
+    inherit?: ModelSelection,
+  ): { provider: ProviderConfig; selection: ModelSelection } {
+    const fallback = inherit ?? resolveDefault(config)
+    const provider = requested ? findProvider(config, requested.provider) : findProvider(config, fallback.provider)
     if (!provider) {
+      if (requested) {
+        if (inherit) return this.resolveSelection(config, undefined, inherit)
+        throw new Error(`模型提供商 ${requested.provider} 当前不可用`)
+      }
       const first = config.providers[0]
       if (!first) throw new Error('没有配置任何模型提供商')
       return { provider: first, selection: { provider: first.id, model: first.models[0]?.id ?? 'default' } }
     }
-    const model = requested?.model && provider.models.some((entry) => entry.id === requested.model)
-      ? requested.model
-      : provider.models[0]?.id ?? 'default'
+    const requestedModel = requested?.model ?? fallback.model
+    const model = provider.models.some((entry) => entry.id === requestedModel)
+      ? requestedModel
+      : requested
+        ? undefined
+        : provider.models[0]?.id ?? 'default'
+    if (!model) {
+      if (inherit) return this.resolveSelection(config, undefined, inherit)
+      throw new Error(`模型 ${requestedModel} 当前不可用`)
+    }
     return {
       provider,
       selection: {
         provider: provider.id,
         model,
-        ...(requested?.reasoningEffort ? { reasoningEffort: requested.reasoningEffort } : {}),
+        ...(requested?.reasoningEffort ?? fallback.reasoningEffort
+          ? { reasoningEffort: requested?.reasoningEffort ?? fallback.reasoningEffort }
+          : {}),
       },
     }
   }
@@ -261,7 +385,7 @@ export class SessionDriver {
     let selection: ModelSelection = resolveDefault(config)
     let provider: ProviderConfig | undefined
     try {
-      const resolved = this.resolveSelection(config, frozen)
+      const resolved = this.resolveSelection(config, frozen, session.header.subagent ? resolveDefault(config) : undefined)
       provider = resolved.provider
       selection = resolved.selection
     } catch {
@@ -270,16 +394,36 @@ export class SessionDriver {
 
     let role: SubagentPromptContext | null = null
     let roleError: string | null = null
+    let historyError: string | null = null
     try {
       role = this.services?.context?.(sessionId) ?? null
+      if (options.continueOnly && role?.legacy) this.services?.historyFor?.(sessionId, session.events)
     } catch (error) {
       roleError = errorMessage(error)
+      if (roleError.includes('legacy-resume-unsupported')) {
+        roleError = '旧子代理无法建立安全的历史投影，请查看日志后用 spawn_agent 重新派遣'
+        historyError = roleError
+      }
     }
 
     const turn = lastTurn(session.events) + 1
+    const cacheSettings = loadConsoleCacheSettings(this.store.home)
+    // A new turn replaces the prefix; a pending replay of the old one is stale.
+    this.cacheWarmer.cancel(sessionId)
     const append = (event: Parameters<SessionStore['append']>[1]) => this.store.append(sessionId, event)
     let stepOpen = false
     let turnOpen = false
+    let closedReason: TurnEndReason | null = null
+    let turnUsage: TokenUsage | undefined
+    const addUsage = (usage: TokenUsage | undefined) => {
+      if (!usage) return
+      turnUsage = {
+        inputTokens: (turnUsage?.inputTokens ?? 0) + usage.inputTokens,
+        outputTokens: (turnUsage?.outputTokens ?? 0) + usage.outputTokens,
+        cacheReadTokens: (turnUsage?.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0),
+        reasoningTokens: (turnUsage?.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0),
+      }
+    }
 
     const closeOpenStep = () => {
       if (stepOpen) {
@@ -292,6 +436,7 @@ export class SessionDriver {
       if (turnOpen) {
         append({ type: 'turn-end', turn, reason })
         turnOpen = false
+        closedReason = reason
       }
       this.store.flush(sessionId)
     }
@@ -323,16 +468,18 @@ export class SessionDriver {
           channel: 'skill-invocation',
         })
       }
+      const injectedTurn = options.injected === true
       const userEnvelope = append({
         type: 'user-message',
         text: prompt,
-        injected: false,
+        injected: injectedTurn,
+        ...(injectedTurn && options.channel ? { channel: options.channel } : {}),
         ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
       })
       // Pin the pre-turn file state to this message so a rewind restores the
       // exact bytes the turn started from. Snapshot failure is logged but does
       // not abort the turn (the checkpoint simply has no file history).
-      if (userEnvelope) {
+      if (userEnvelope && !injectedTurn) {
         try {
           this.services?.fileSnapshot?.(sessionId, session.header.cwd, userEnvelope.seq)
         } catch (error) {
@@ -360,6 +507,7 @@ export class SessionDriver {
 
     try {
       if (roleError !== null) {
+        if (historyError) this.services?.notifyParent?.(sessionId, historyError)
         closeTurn({
           kind: 'error',
           failure: { code: 'subagent/snapshot-invalid', message: roleError },
@@ -386,24 +534,39 @@ export class SessionDriver {
           return
         }
 
-        const events = this.store.read(sessionId)?.events ?? []
-        const messages = deriveHistory(events)
+        if (!role?.legacy) {
+          this.applyMicrocompact(
+            sessionId,
+            turn,
+            step,
+            provider,
+            selection.model,
+            cacheSettings.microcompact,
+            cacheSettings.compactionRatio,
+          )
+        }
+        let events = this.store.read(sessionId)?.events ?? []
+        let modelEvents = role?.legacy ? this.services?.historyFor?.(sessionId, events) ?? events : events
+        let surface = deriveSurface(modelEvents)
+        let messages = withCacheProvenance(surface)
         const permission = this.permissionStateOf(sessionId)
         const schemas = this.schemasFor(permission, sessionId, session.header)
-        const system = buildSystemPrompt({
+        const framedCurrent = buildSystemPrompt({
           cwd: session.header.cwd,
           sandbox: session.header.sandbox,
           tools: schemas,
           permission,
+          model: selection.model,
+          provider: selection.provider,
+          ...(this.services?.persona ? { persona: this.services.persona() } : {}),
           ...(role ? { subagent: role } : {}),
           ...(this.services?.promptSections
             ? { extraSections: this.services.promptSections(sessionId, session.header) }
             : {}),
         })
-        // The transcript shows the full prompt that the model actually gets,
-        // not a persona-only projection. Unchanged prompts are logged once:
-        // the UI already collapses consecutive identical rows, and repeating
-        // several KB of prompt on every step would only bloat the log.
+        // The transcript shows the current prompt, not the frozen wire bytes:
+        // unchanged prompts are logged once, and an update that the model
+        // receives is visible as its own injected row.
         let previousSystemPrompt: string | null = null
         for (let index = events.length - 1; index >= 0; index -= 1) {
           const event = events[index]!
@@ -412,8 +575,42 @@ export class SessionDriver {
             break
           }
         }
-        if (previousSystemPrompt !== system) {
-          append({ type: 'system-prompt', turn, step, text: system })
+        if (previousSystemPrompt !== framedCurrent) {
+          append({ type: 'system-prompt', turn, step, text: framedCurrent })
+        }
+        // Rewriting the system bytes would break the provider cache from the
+        // first token. Keep the frozen prefix and append the new prompt as an
+        // update at the end of the cached history.
+        const frozen = frozenSystem(framedCurrent, events, surface)
+        const system = frozen.system
+        if (frozen.update !== null) {
+          append({
+            type: 'user-message',
+            text: frozen.update,
+            injected: true,
+            channel: SYSTEM_UPDATE_CHANNEL,
+          })
+          events = this.store.read(sessionId)?.events ?? events
+          modelEvents = role?.legacy
+            ? this.services?.historyFor?.(sessionId, events) ?? events
+            : events
+          surface = deriveSurface(modelEvents)
+          messages = withCacheProvenance(surface)
+        }
+        // The request header is the durable baseline the frozen system is
+        // restored from after a restart; log it only when the prefix shape
+        // actually changes.
+        const header = buildRequestHeader(selection, system, schemas)
+        const previousHeader = lastRequestHeader(events)
+        if (!previousHeader || !sameRequestHeader(previousHeader.header, header)) {
+          append({
+            type: 'request-header',
+            turn,
+            step,
+            header,
+            reason: previousHeader ? 'change' : 'initial',
+            ...(previousHeader ? { starts_series: true } : {}),
+          })
         }
 
         append({
@@ -431,15 +628,21 @@ export class SessionDriver {
         let finishKind: string | undefined
         let firstTokenTime: number | undefined
 
-        const stream = streamFor({
+        // A request in flight refreshes the cache itself; drop any timer armed
+        // by the previous step so it cannot race this one.
+        const request = {
           provider,
           model: selection.model,
           messages,
           system,
           tools: schemas,
           ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+          cacheKey: sessionId,
           signal: controller.signal,
-        })
+        }
+        this.cacheWarmer.remember(sessionId, provider, request)
+        this.cacheWarmer.cancel(sessionId)
+        const stream = streamFor(request)
 
         for await (const chunk of stream) {
           const envelope = append({ type: 'assistant-chunk', turn, step, chunk })
@@ -466,6 +669,10 @@ export class SessionDriver {
           ...(sourceSeqs.length > 0 ? { source_event_seqs: sourceSeqs } : {}),
           ...(firstTokenTime !== undefined ? { first_token_time: firstTokenTime } : {}),
         })
+        addUsage(usage)
+        // The prefix is hot right now; keep it warm while tools run and the
+        // user reads (the phase decides whether the timer is armed at all).
+        this.cacheWarmer.schedule(sessionId, 'streaming', cacheSettings.cacheWarming)
 
         const calls: ToolCallRef[] = blocks
           .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
@@ -566,8 +773,9 @@ export class SessionDriver {
       this.running.delete(sessionId)
       this.onRunningChange(sessionId, false)
       this.store.flush(sessionId)
+      this.cacheWarmer.schedule(sessionId, 'idle', cacheSettings.cacheWarming)
       try {
-        this.services?.onTurnEnd?.(sessionId)
+        this.services?.onTurnEnd?.(sessionId, closedReason ?? { kind: 'aborted' }, turnUsage)
       } catch {
         /* settlement must never mask the turn result */
       }
@@ -598,6 +806,72 @@ export class SessionDriver {
     }
   }
 
+  /**
+   * Cheap cleanup before an expensive summary: old tool-result contents are
+   * replaced in place via `replaces` events. The log stays append-only and the
+   * UI keeps the full history; only the model surface shrinks.
+   *
+   * The plan guards protect the provider prefix: it clears only results whose
+   * rewrite suffix is still inside the warm budget, never touching ancient
+   * results outside the prompt-cache lookback window.
+   */
+  private applyMicrocompact(
+    sessionId: string,
+    turn: number,
+    step: number,
+    provider: ProviderConfig,
+    model: string,
+    settings: MicrocompactSettings,
+    compactionRatio: number,
+  ): void {
+    if (!settings.enabled) return
+    const header = this.store.header(sessionId)
+    const preset = header ? this.services?.presetFor?.(sessionId, header) : undefined
+    if (preset && !preset.features.compaction) return
+    const events = this.store.read(sessionId)?.events ?? []
+    if (events.length === 0) return
+    const surface = deriveSurface(events)
+    if (surface.length === 0) return
+    const pressure = estimatePressure(
+      events,
+      surface,
+      contextWindowOf(provider, model),
+      compactionRatio,
+    )
+    const decision = planMicrocompact(
+      surface,
+      settings,
+      lastAssistantAgeMinutes(events),
+      pressure?.projectedTokens,
+      pressure?.thresholdTokens ?? undefined,
+    )
+    if (decision.kind !== 'applied') return
+    const originals = new Map(
+      events
+        .filter((event): event is Extract<Envelope, { type: 'tool-result' }> => event.type === 'tool-result')
+        .map((event) => [event.seq, event]),
+    )
+    for (const seq of decision.clearedSeqs) {
+      const item = surface.find((entry) => entry.seq === seq)
+      const original = originals.get(seq)
+      const callId = item?.message.toolCallId
+      if (!callId || !original) continue
+      this.store.append(sessionId, {
+        type: 'tool-result',
+        turn,
+        step,
+        call_id: callId,
+        content: CLEARED_PLACEHOLDER,
+        is_error: original.is_error,
+        ...(original.error !== undefined ? { error: original.error } : {}),
+        ...(original.error_identity !== undefined ? { error_identity: original.error_identity } : {}),
+        ...(original.meta !== undefined ? { meta: original.meta } : {}),
+        ...(original.truncation !== undefined ? { truncation: original.truncation } : {}),
+        replaces: seq,
+      })
+    }
+  }
+
   /** Tool schemas visible under the current permission state. */
   private schemasFor(
     state: PermissionState,
@@ -612,11 +886,13 @@ export class SessionDriver {
       blocked.add('bash')
     }
     const role = header?.subagent
-    const allowed = role
-      ? new Set(role.effectiveTools ?? [])
-      : null
+    const preset = sessionId && header && !role ? this.services?.presetFor?.(sessionId, header) : undefined
+    const excluded = preset ? new Set(excludedPresetTools(preset.features)) : new Set<string>()
+    const presetTools = preset?.tools ? new Set(preset.tools) : null
+    const allowed = role ? new Set(role.effectiveTools ?? []) : null
     const filtered = all.filter((schema) => {
-      if (blocked.has(schema.name)) return false
+      if (blocked.has(schema.name) || excluded.has(schema.name)) return false
+      if (presetTools && !presetTools.has(schema.name)) return false
       if (allowed && !allowed.has(schema.name)) return false
       return true
     })

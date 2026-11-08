@@ -18,6 +18,8 @@ import {
   type CatalogModelEntry,
 } from '../../modelCatalog'
 import { Badge, Button, ChipRadio, Field, NumberInput, TextInput } from './atoms/form'
+import { IconEye, IconPencil } from '../icons'
+import formStyles from './atoms/atoms.module.css'
 import { AutosaveStatus } from './AutosaveStatus'
 import { ModelRowsEditor } from './ModelRowsEditor'
 import type { ProviderAutosave } from './useProviderAutosave'
@@ -119,6 +121,10 @@ export function ProviderModal({
     ),
   )
   const [keyValue, setKeyValue] = useState('')
+  // 已存密钥的查看态:null = 还没拉到;非空后用眼睛切换明文/掩码。
+  const [storedKeyValue, setStoredKeyValue] = useState<string | null>(null)
+  const [keyRevealed, setKeyRevealed] = useState(false)
+  const [keyEditing, setKeyEditing] = useState(false)
   const [headers, setHeaders] = useState<HeaderRow[]>(() =>
     Object.entries(initial?.headers ?? {}).map(([name, value]) => ({ name, value })),
   )
@@ -146,6 +152,7 @@ export function ProviderModal({
     initial?.apiKeyEnv ?? (keyRoot ? deriveKeyRef(keyRoot) : '')
   const credentialForRef = credentials[effectiveKeyRef]
   const keyConfigured = keyValue.trim().length > 0 || credentialForRef?.configured === true
+  const keyFromEnv = credentialForRef?.source === 'environment'
 
   /* ---- 表单 → payload(纯派生) ---- */
 
@@ -169,6 +176,10 @@ export function ProviderModal({
     if (headerEntries.length > 0) profile.headers = Object.fromEntries(headerEntries)
     // 关闭时省略该字段(等同后端默认 false),开启时显式写入;关闭一次即回写清除。
     if (inlineThink) profile.inlineThinkTags = true
+    // 缓存档没有表单控件,但必须原样带回:否则改一次模型列表就把手写的
+    // longCache / supportsPromptCacheKey 冲掉。
+    if (initial?.longCache === true) profile.longCache = true
+    if (initial?.supportsPromptCacheKey === false) profile.supportsPromptCacheKey = false
     return { id, profile, modelsRaw: JSON.stringify(profile.models) }
   }, [
     createdId,
@@ -182,6 +193,8 @@ export function ProviderModal({
     maxTokens,
     headers,
     inlineThink,
+    initial?.longCache,
+    initial?.supportsPromptCacheKey,
   ])
 
   const fingerprint = payload ? `${payload.id}\u0000${JSON.stringify(payload.profile)}` : null
@@ -346,12 +359,35 @@ export function ProviderModal({
     try {
       await api.setCredential(effectiveKeyRef, value)
       setKeyValue('')
+      setKeyEditing(false)
+      setStoredKeyValue(value)
       notify('ok', t('keySaved'))
       onChanged()
     } catch (err) {
       notify('err', err instanceof Error ? err.message : String(err))
     }
   }, [keyValue, effectiveKeyRef, notify, onChanged])
+
+  /** 进入编辑态:输入框从已存值改起,而不是清空重填。 */
+  const startKeyEdit = useCallback(() => {
+    setKeyValue(storedKeyValue ?? '')
+    setKeyEditing(true)
+  }, [storedKeyValue])
+
+  /** 打开弹窗时拉取已存明文供直接查看;失败静默,表单不受影响。 */
+  useEffect(() => {
+    if (!effectiveKeyRef || storedKeyValue !== null) return
+    let alive = true
+    void api
+      .getCredentialValue(effectiveKeyRef)
+      .then((value) => {
+        if (alive) setStoredKeyValue(value)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [effectiveKeyRef, storedKeyValue])
 
   /* ---- 关窗:先 flush,失败不关 ---- */
 
@@ -601,17 +637,55 @@ export function ProviderModal({
                 <h4 className={styles.sectionTitle}>{t('llm.section.key')}</h4>
                 <div ref={keySectionRef} className={styles.keyValueWrap}>
                   <Field label={t('llm.field.keyValueLabel')} hint={t('llm.field.keyValueHint')}>
-                    <TextInput
-                      mono
-                      type="password"
-                      autoComplete="off"
-                      placeholder={t('apiKeyPlaceholder')}
-                      value={keyValue}
-                      onChange={setKeyValue}
-                      onCommit={() => void commitKey()}
-                    />
+                    {keyEditing ? (
+                      <TextInput
+                        mono
+                        type="text"
+                        autoComplete="off"
+                        placeholder={t('apiKeyPlaceholder')}
+                        value={keyValue}
+                        onChange={setKeyValue}
+                        onCommit={() => void commitKey()}
+                      />
+                    ) : (
+                      <div className={styles.keyViewRow}>
+                        <input
+                          className={`${formStyles.input} ${formStyles.mono}`}
+                          type={keyRevealed ? 'text' : 'password'}
+                          autoComplete="off"
+                          readOnly
+                          value={
+                            keyRevealed
+                              ? (storedKeyValue ?? '')
+                              : (storedKeyValue ?? '').replace(/./g, '•')
+                          }
+                          onChange={() => {}}
+                        />
+                        <button
+                          type="button"
+                          className={styles.keyViewBtn}
+                          title={keyRevealed ? t('keyViewHide') : t('keyViewReveal')}
+                          aria-label={keyRevealed ? t('keyViewHide') : t('keyViewReveal')}
+                          onClick={() => setKeyRevealed((prev) => !prev)}
+                        >
+                          <IconEye size={14} />
+                        </button>
+                        {!keyFromEnv && (
+                          <button
+                            type="button"
+                            className={styles.keyViewBtn}
+                            title={t('keyViewEdit')}
+                            aria-label={t('keyViewEdit')}
+                            onClick={startKeyEdit}
+                          >
+                            <IconPencil size={14} />
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </Field>
-                  <span className={styles.keyOptional}>{t('llm.field.keyPasteOptional')}</span>
+                  {keyEditing && <span className={styles.keyOptional}>{t('llm.field.keyPasteOptional')}</span>}
+                  {keyFromEnv && <span className={styles.keyOptional}>{t('keyViewFromEnv')}</span>}
                 </div>
                 {!keyConfigured && effectiveKeyRef && (
                   credentialForRef && !credentialForRef.configured ? (

@@ -1,21 +1,15 @@
 import { useMemo, useState } from 'react'
-import { useContainedWheel } from '../hooks/useContainedWheel'
-import { localeRevision, t } from '../i18n'
+import { t } from '../i18n'
 import type { ApprovalDecisionPayload } from '../api'
 import type { ModelCatalog, ModelSelection } from '../types'
-import { MarkdownText } from '../markdown/MarkdownText'
-import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { ComposerModelMenu } from './ComposerModelMenu'
 import { ComposerEffortControl } from './ComposerEffortControl'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { IconCheck, IconClose, IconPlan } from './icons'
 
 /**
- * 计划审批面板:模型调用 exit_plan 后替换整个输入区。
- * 上层是 markdown 渲染的计划正文,下面是审批区
- * (批准[编辑/完全访问 + 可选执行模型] / 拒绝 + 无边框补充建议),
- * 底部是「退出计划」与「提交审批」。拒绝并填写建议时,模型会
- * 自动按建议重写方案(面板内有标注)。
+ * 计划审批操作卡:正文在右侧「计划」标签预览，这里只保留审批决策。
+ * 模型与思考强度浮层必须能越出卡片，不能用 overflow 裁切。
  */
 export function PlanReviewPanel({
   title,
@@ -26,8 +20,8 @@ export function PlanReviewPanel({
   onExit,
 }: {
   title?: string
+  /** 仅用于确认审批载荷中有计划；正文由右侧预览面板渲染。 */
   planText: string
-  /** 模型目录;未加载完成时为 null(执行模型选择区隐藏)。 */
   catalog: ModelCatalog | null
   selection: ModelSelection | null
   onDecision: (payload: ApprovalDecisionPayload) => Promise<void>
@@ -39,20 +33,9 @@ export function PlanReviewPanel({
   const [modelPicked, setModelPicked] = useState(false)
   const [feedback, setFeedback] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const rootRef = useContainedWheel<HTMLDivElement>()
-
-  const labels = useMemo<MarkdownLabels>(
-    () => ({
-      code: { copyLabel: t('copy'), copiedLabel: t('copied') },
-      footnotes: t('footnotes'),
-    }),
-    [localeRevision()],
-  )
 
   const trimmedFeedback = feedback.trim()
   const canSubmit = planText.trim().length > 0 && !submitting
-
-  // 执行模型的思考强度档位(与 composer 同源:目录 → 模型 → reasoning)。
   const planEfforts = useMemo(() => {
     if (!catalog || !model) return []
     const group = catalog.groups.find((entry) => entry.id === model.provider)
@@ -70,96 +53,52 @@ export function PlanReviewPanel({
         ? {
             decision: 'allow-once',
             executeMode,
-            // 只在用户显式换过模型时携带,避免无谓的"已切换"噪音。
             selection: modelPicked && model ? model : undefined,
             feedback: trimmedFeedback || undefined,
           }
-        : {
-            decision: 'reject',
-            feedback: trimmedFeedback || undefined,
-          }
+        : { decision: 'reject', feedback: trimmedFeedback || undefined }
     try {
       await onDecision(payload)
     } finally {
-      // 决策被服务端结算(approval-decided)后面板由父级卸载;
-      // 提交失败(网络/校验)时恢复按钮可再试。
       setSubmitting(false)
     }
   }
 
   return (
-    <div ref={rootRef} className="plan-review-panel">
+    <div className="plan-review-panel" data-testid="plan-review-actions">
       <div className="plan-review-head">
-        <span className="plan-review-head-icon">
-          <IconPlan size={14} />
-        </span>
+        <span className="plan-review-head-icon"><IconPlan size={14} /></span>
         <span className="plan-review-title">{title?.trim() || t('planReviewTitle')}</span>
         <span className="plan-review-waiting">{t('planReviewWaiting')}</span>
       </div>
-      <div className="plan-review-body">
-        {planText.trim() ? (
-          <MarkdownText text={planText} streaming={false} labels={labels} />
-        ) : (
-          <div className="plan-review-parse-failed">{t('planReviewParseFailed')}</div>
-        )}
-      </div>
       <div className="plan-review-actions">
         <div className="plan-review-choice" role="radiogroup" aria-label={t('planReviewTitle')}>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={choice === 'approve'}
+          <button type="button" role="radio" aria-checked={choice === 'approve'}
             className={`plan-review-choice-btn${choice === 'approve' ? ' active' : ''}`}
-            onClick={() => setChoice('approve')}
-          >
-            <IconCheck size={13} />
-            {t('planReviewApprove')}
+            onClick={() => setChoice('approve')}>
+            <IconCheck size={13} />{t('planReviewApprove')}
           </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={choice === 'reject'}
+          <button type="button" role="radio" aria-checked={choice === 'reject'}
             className={`plan-review-choice-btn${choice === 'reject' ? ' active' : ''}`}
-            onClick={() => setChoice('reject')}
-          >
-            <IconClose size={13} />
-            {t('planReviewReject')}
+            onClick={() => setChoice('reject')}>
+            <IconClose size={13} />{t('planReviewReject')}
           </button>
         </div>
         {choice === 'approve' && (
           <div className="plan-review-exec">
             <div className="plan-review-modes" role="radiogroup" aria-label={t('planReviewApprove')}>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={executeMode === 'auto-edit'}
+              <button type="button" role="radio" aria-checked={executeMode === 'auto-edit'}
                 className={`plan-review-mode-btn${executeMode === 'auto-edit' ? ' active' : ''}`}
-                onClick={() => setExecuteMode('auto-edit')}
-              >
-                {t('planReviewEditMode')}
-              </button>
-              <button
-                type="button"
-                role="radio"
-                aria-checked={executeMode === 'full'}
+                onClick={() => setExecuteMode('auto-edit')}>{t('planReviewEditMode')}</button>
+              <button type="button" role="radio" aria-checked={executeMode === 'full'}
                 className={`plan-review-mode-btn${executeMode === 'full' ? ' active' : ''}`}
-                onClick={() => setExecuteMode('full')}
-              >
-                {t('planReviewFullMode')}
-              </button>
+                onClick={() => setExecuteMode('full')}>{t('planReviewFullMode')}</button>
             </div>
             {model && catalog && catalog.groups.length > 0 && (
               <div className="plan-review-model">
                 <span className="plan-review-model-label">{t('planReviewModelLabel')}</span>
-                <ComposerModelMenu
-                  catalog={catalog}
-                  selection={model}
-                  disabled={submitting}
-                  onChange={(next) => {
-                    setModel(next)
-                    setModelPicked(true)
-                  }}
-                />
+                <ComposerModelMenu catalog={catalog} selection={model} disabled={submitting}
+                  onChange={(next) => { setModel(next); setModelPicked(true) }} />
                 {planEffort && (
                   <ComposerEffortControl
                     key={`${model.provider}:${model.model}`}
@@ -177,25 +116,16 @@ export function PlanReviewPanel({
           </div>
         )}
         <div className="plan-review-feedback">
-          <textarea
-            className="plan-review-feedback-input"
-            value={feedback}
+          <textarea className="plan-review-feedback-input" value={feedback}
             placeholder={t('planReviewFeedbackPlaceholder')}
-            onChange={(event) => setFeedback(event.target.value)}
-            rows={2}
-          />
+            onChange={(event) => setFeedback(event.target.value)} rows={2} />
           <div className="plan-review-hint">{t('planReviewRewriteHint')}</div>
         </div>
         <div className="plan-review-buttons">
           <button type="button" className="plan-review-exit" onClick={onExit} disabled={submitting}>
             {t('planReviewExit')}
           </button>
-          <button
-            type="button"
-            className="plan-review-submit"
-            onClick={() => void submit()}
-            disabled={!canSubmit}
-          >
+          <button type="button" className="plan-review-submit" onClick={() => void submit()} disabled={!canSubmit}>
             {submitting ? t('planReviewSubmitting') : t('planReviewSubmit')}
           </button>
         </div>

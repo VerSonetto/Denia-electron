@@ -34,6 +34,7 @@ import {
   IconFiles,
   IconGlobe,
   IconPanelClose,
+  IconPlan,
   IconPlus,
   IconSearch,
   IconStack,
@@ -44,6 +45,7 @@ import { PanePopover } from './PanePopover'
 import { PANELS } from '../panelRegistry'
 
 export function tabTypeLabel(type: SidePaneTabType): string {
+  if (type === 'plan') return t('planReviewTitle')
   if (type === 'review') return t('sidePaneReview')
   if (type === 'terminal') return t('sidePaneTerminal')
   if (type === 'files') return t('sidePaneFiles')
@@ -52,6 +54,7 @@ export function tabTypeLabel(type: SidePaneTabType): string {
 }
 
 export function TabIcon({ type, size = 13 }: { type: SidePaneTabType; size?: number }) {
+  if (type === 'plan') return <IconPlan size={size} />
   if (type === 'review') return <IconTool size={size} />
   if (type === 'terminal') return <IconTerminal size={size} />
   if (type === 'files') return <IconFiles size={size} />

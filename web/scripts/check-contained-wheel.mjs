@@ -12,7 +12,7 @@ const bundle = join(outDir, 'contained-wheel.mjs')
 await build({
   stdin: {
     contents: `export { useContainedWheel } from './src/hooks/useContainedWheel';
-      export { PlanReviewPanel } from './src/components/PlanReviewPanel';`,
+      export { PlanPreviewPanel } from './src/components/PlanPreviewPanel';`,
     resolveDir: web,
   },
   outfile: bundle, bundle: true, format: 'esm', platform: 'node', jsx: 'automatic',
@@ -31,7 +31,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const React = await import('react')
 const { act } = React
 const { createRoot } = await import('react-dom/client')
-const { useContainedWheel, PlanReviewPanel } = await import(pathToFileURL(bundle).href)
+const { useContainedWheel, PlanPreviewPanel } = await import(pathToFileURL(bundle).href)
 const root = createRoot(w.document.getElementById('root'))
 const H = React.createElement
 let ancestorWheels = 0
@@ -44,7 +44,7 @@ function Harness() {
     show && H('div', { className: 'prompt-scroll', ref: containedRef, style: { overflowY: 'auto', overflowX: 'hidden', lineHeight: '26px' } },
       H('div', { className: 'prompt-editor', contentEditable: true, suppressContentEditableWarning: true, style: { overflow: 'hidden' } },
         H('span', null, 'Long draft'))),
-    H(PlanReviewPanel, { title: 'Plan', planText: '## Long plan\n\nContent', catalog: null, selection: null, onDecision: async () => {}, onExit() {} }),
+    H(PlanPreviewPanel, { title: 'Plan', planText: '## Long plan\n\nContent' }),
   )
 }
 const query = selector => w.document.querySelector(selector)
@@ -162,17 +162,12 @@ try {
   await wheel(clipped, { deltaY: 100 })
   body.scrollTop = 0
   await wheel(paragraph, { deltaY: -100 })
-  await wheel(query('.plan-review-head'), { deltaY: 100 })
+  await wheel(query('.plan-preview-panel .pane-panel-head'), { deltaY: 100 })
   check('plan boundaries and non-scrollable panel chrome cannot reach the messages', () => {
     assert.equal(body.scrollTop, 0)
     assert.equal(messages.scrollTop, 900)
     assert.equal(ancestorWheels, 0)
   })
-  const feedback = query('.plan-review-feedback-input')
-  feedback.style.overflowY = 'auto'
-  geometry(feedback)
-  await wheel(feedback, { deltaY: 25 })
-  check('plan feedback textarea remains independently scrollable', () => assert.equal(feedback.scrollTop, 25))
   const childHandler = event => event.preventDefault()
   code.addEventListener('wheel', childHandler, { passive: false })
   await wheel(code, { deltaX: 30 })

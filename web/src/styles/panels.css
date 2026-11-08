@@ -837,7 +837,7 @@
   color: var(--label-secondary);
 }
 
-/* ---- 计划审批面板(exit_plan):替换输入区,计划 markdown + 审批区 ---- */
+/* ---- 计划审批:右侧工作台预览，输入区只保留决策控件 ---- */
 
 .plan-review-panel {
   display: flex;
@@ -847,7 +847,9 @@
   border-radius: var(--r-lg);
   background: var(--composer-panel-surface);
   box-shadow: var(--shadow-lv2);
-  overflow: hidden;
+  /* 模型与思考强度弹层向上展开，不能裁在审批卡边界内。 */
+  overflow: visible;
+  position: relative;
 }
 
 .plan-review-head {
@@ -887,9 +889,10 @@
 }
 
 .plan-review-body {
-  max-height: 45vh;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 6px 16px;
+  padding: 12px 16px 24px;
   font-size: 13.5px;
   /* 滚动到边界不向祖先链接(配合面板根上的原生 wheel 拦截)。 */
   overscroll-behavior: contain;
@@ -905,8 +908,37 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 16px 14px;
-  border-top: 1px solid var(--border-l1);
+  padding: 0 16px 14px;
+}
+
+.plan-preview-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--pane-surface, var(--sidebar-fill));
+}
+
+.plan-preview-fallback {
+  flex: 0 1 360px;
+  min-width: 280px;
+  border-left: 1px solid var(--border-l1);
+}
+
+.runtime-workspace[data-plan-preview='local'] {
+  flex-direction: column;
+}
+
+.runtime-workspace[data-plan-preview='local'] .plan-preview-panel {
+  flex: none;
+  height: auto;
+  max-height: 38vh;
+  margin: 8px 16px 0;
+  width: min(var(--composer-card-max-width), calc(100% - 32px));
+  align-self: center;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-md);
 }
 
 .plan-review-choice,

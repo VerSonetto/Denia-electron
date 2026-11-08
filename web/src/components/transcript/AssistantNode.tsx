@@ -38,7 +38,14 @@ export function AssistantNode({
           // 思考是否仍在输出:节点在流式,且该块是最后一块(正文块出现即视为
           // 思考完毕,立刻自动折叠)。
           const thinking = node.streaming && index === node.blocks.length - 1
-          return <ThinkRow key={index} text={block.text} streaming={thinking} />
+          return (
+            <ThinkRow
+              key={index}
+              text={block.text}
+              streaming={thinking}
+              durationMs={block.durationMs}
+            />
+          )
         }
         return (
           <div key={index} className="prose">

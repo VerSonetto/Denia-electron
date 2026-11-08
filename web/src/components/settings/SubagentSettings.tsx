@@ -1,22 +1,4 @@
-/**
- * 子代理设置页：定义管理（调度 + 定义清单 + 编辑器 + 预览）。
- *
- * 事实源在服务端：UI 只持草稿；保存后以服务端返回的 view 更新列表（含
- * revision）。保存冲突时保留草稿并提示重新加载，绝不覆盖另一个窗口的修改。
- *
- * 版式与设置弹窗的其它页面同源：骨架用全局 `setm-section`/`setm-card`/
- * `setm-field-block`/`setm-actions` 与共享原件 [`setm.tsx`](./setm.tsx)，
- * 表单控件用共享原子（Field/TextInput/ChipRadio/NumberInput）与
- * `DropdownField`；本页的模块样式只负责定义卡片、工具选择面板、冲突提示与
- * 预览块，且只取主题 token。
- *
- * 三件不做的事（执行计划 11.2）：
- * - 不提供"开启全局 AGENTS.md"或"委派深度"开关：子代理继承主提示基础、
- *   只自动加载项目规则，且禁止派遣子代理是运行时硬规则；
- * - 不在未选工作区时宣称"最终可用工具"（只能显示定义请求集合）；
- * - 不手改 generated 类型：wire 类型来自 Rust。
- */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AgentAvatar, AVATARS, getAgentAvatar, saveAgentAvatar, useAgentAvatar, type AvatarId } from '../AgentAvatar'
 import * as api from '../../api'
 import { subscribeServerEvents } from '../../serverEvents'
@@ -54,18 +36,19 @@ import {
 import styles from './SubagentSettings.module.css'
 
 const POLICY_NS = 'subagent-policy'
-
 const SOURCE_LABELS: Record<ProfileSource, string> = {
   builtin: 'subagentsSourceBuiltin',
   user: 'subagentsSourceUser',
   project: 'subagentsSourceProject',
 }
-
 const SOURCE_ORDER: ProfileSource[] = ['project', 'user', 'builtin']
+const EDITOR_TABS = ['basics', 'role', 'tools', 'model'] as const
+type EditorTab = (typeof EDITOR_TABS)[number]
+type SourceFilter = ProfileSource | 'all'
+type TranslateKey = Parameters<typeof t>[0]
 
 interface Draft {
   kind: 'create' | 'edit' | 'copy'
-  /** 编辑目标（edit 时为被编辑的 qualifiedId）。 */
   target?: string
   writeScope: ProfileWriteScope
   revision: number
@@ -74,47 +57,53 @@ interface Draft {
   avatar: AvatarId
 }
 
+function modelSummary(profile: SubagentProfile): string {
+  return profile.model.mode === 'inherit'
+    ? t('subagentsModelInheritShort')
+    : `${profile.model.selection.provider}/${profile.model.selection.model}`
+}
+
 export function SubagentSettings({ notify }: { notify: Notify }) {
-  // 项目上下文:工作区列表(一工作区一条),替代早期的"每个会话一条"下拉。
-  // scope 载体是 cwd(服务端用它推导项目根),会话只是 cwd 的代理,不再枚举。
   const [workspaces, setWorkspaces] = useState<{ id: string; title: string; path: string }[]>([])
   const [workspaceId, setWorkspaceId] = useState('')
   const [catalog, setCatalog] = useState<SubagentCatalogView | null>(null)
   const [models, setModels] = useState<ModelCatalog | null>(null)
   const [tools, setTools] = useState<SubagentToolsView | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [preview, setPreview] = useState<SubagentPreview | null>(null)
+  const [previewing, setPreviewing] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [actionId, setActionId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
   const [policy, setPolicy] = useState<number | null>(null)
   const [catalogBudget, setCatalogBudget] = useState<number | null>(null)
   const [policyRevision, setPolicyRevision] = useState(0)
   const [policySaved, setPolicySaved] = useState(false)
-  // 调度是"设一次就不管"的配置，定义清单才是这页的主体：默认折叠。
   const [policyOpen, setPolicyOpen] = useState(false)
-  const editorRef = useRef<HTMLDivElement | null>(null)
-
-  /** 编辑卡在列表上方打开：进入视野，避免"点了编辑却没反应"的错觉。 */
-  useEffect(() => {
-    if (draft) editorRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
-  }, [draft?.kind, draft?.target])
+  const editorRef = useRef<HTMLElement | null>(null)
 
   const cwd = workspaces.find((entry) => entry.id === workspaceId)?.path ?? ''
   const scope = cwd ? { cwd } : {}
+  const requestIdRef = useRef(0)
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current
+    const requestedScope = cwd ? { cwd } : {}
     setLoading(true)
     setError('')
     try {
       const [profileView, toolView, settings, workspaceList, modelCatalog] = await Promise.all([
-        api.listSubagentProfiles(scope),
-        api.listSubagentTools(scope),
+        api.listSubagentProfiles(requestedScope),
+        api.listSubagentTools(requestedScope),
         api.getSettings(),
         api.listWorkspaces(),
         api.getCatalog().catch(() => null),
       ])
+      if (requestId !== requestIdRef.current) return
       setCatalog(profileView)
       setTools(toolView)
       setModels(modelCatalog)
@@ -124,21 +113,27 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
         path: entry.path,
       }))
       setWorkspaces(rows)
-      // 工作区被删时回退到用户级,不挂死在一个非法 cwd 上。
       setWorkspaceId((current) => (current && rows.some((row) => row.id === current) ? current : ''))
+      setSelectedId((current) => {
+        const all = [...profileView.effective, ...profileView.shadowed]
+        return current && all.some((view) => view.qualifiedId === current)
+          ? current
+          : profileView.effective.find((view) => view.source === 'builtin')?.qualifiedId ??
+              profileView.effective[0]?.qualifiedId ?? profileView.shadowed[0]?.qualifiedId ?? null
+      })
       const ns = settings.namespaces.find((entry) => entry.ns === POLICY_NS)
       if (ns) {
-        setPolicy(typeof ns.value.maxConcurrentRuns === 'number' ? (ns.value.maxConcurrentRuns as number) : 8)
+        setPolicy(typeof ns.value.maxConcurrentRuns === 'number' ? ns.value.maxConcurrentRuns : 8)
         setPolicyRevision(ns.revision)
       }
-      // 目录预算属于 runtime 命名空间（与工作区指令预算并列，改 YAML 生效）。
       const runtimeNs = settings.namespaces.find((entry) => entry.ns === 'runtime')
       const budget = runtimeNs?.value?.subagentCatalogMaxBytes
       setCatalogBudget(typeof budget === 'number' ? budget : null)
     } catch (reason) {
+      if (requestId !== requestIdRef.current) return
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
   }, [workspaceId])
 
@@ -146,96 +141,104 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     void load()
   }, [load])
 
-  // 主代理用 create_subagent 写入永久定义时，管理页要即时出现新条目，
-  // 不需要用户关掉设置再打开。
   useEffect(
     () =>
       subscribeServerEvents((type) => {
-        if (type === 'subagents-updated') void load()
+        if (type === 'subagents-updated' && !draft?.dirty) void load()
       }),
-    [load],
+    [load, draft?.dirty],
   )
 
-  const startCreate = () => {
-    const profile = blankProfile()
+  useEffect(() => {
+    if (draft && window.matchMedia('(max-width: 779px)').matches) {
+      editorRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  }, [draft?.kind, draft?.target])
+
+  const discardDraft = () => !draft?.dirty || window.confirm(t('subagentsDiscardConfirm'))
+  const requestProfileChange = (change: () => void) => {
+    if (!discardDraft()) return
+    setDraft(null)
     setPreview(null)
-    setDraft({
-      kind: 'create',
-      writeScope: cwd && catalog?.projectDir ? 'project' : 'user',
-      revision: 0,
-      profile,
-      dirty: true,
-      avatar: getAgentAvatar(`user:${profile.id}`, cwd),
+    setError('')
+    change()
+  }
+  const closeEditor = () => {
+    if (!discardDraft()) return
+    setDraft(null)
+    setPreview(null)
+    setError('')
+  }
+  const selectProfile = (view: SubagentProfileView) => {
+    if (view.qualifiedId === selectedId && !draft) return
+    requestProfileChange(() => setSelectedId(view.qualifiedId))
+  }
+  const startCreate = () => {
+    requestProfileChange(() => {
+      const profile = blankProfile()
+      setDraft({
+        kind: 'create',
+        writeScope: cwd && catalog?.projectDir ? 'project' : 'user',
+        revision: 0,
+        profile,
+        dirty: true,
+        avatar: getAgentAvatar(`user:${profile.id}`, cwd),
+      })
     })
   }
-
   const startEdit = (view: SubagentProfileView, kind: 'edit' | 'copy') => {
-    setPreview(null)
-    const profile = kind === 'copy' ? copyProfile(view) : cloneProfile(view)
-    setDraft({
-      kind,
-      target: kind === 'edit' ? view.qualifiedId : undefined,
-      writeScope: kind === 'edit' && view.source === 'project' ? 'project' : 'user',
-      revision: view.revision,
-      profile,
-      dirty: true,
-      avatar: getAgentAvatar(view.qualifiedId, cwd),
+    requestProfileChange(() => {
+      const profile = kind === 'copy' ? copyProfile(view) : cloneProfile(view)
+      setSelectedId(view.qualifiedId)
+      setDraft({
+        kind,
+        target: kind === 'edit' ? view.qualifiedId : undefined,
+        writeScope: kind === 'edit' && view.source === 'project' ? 'project' : 'user',
+        revision: view.revision,
+        profile,
+        dirty: kind !== 'edit',
+        avatar: getAgentAvatar(view.qualifiedId, cwd),
+      })
     })
   }
 
   const save = async () => {
     if (!draft) return
-    // 只读上限与写/命令类工具的冲突必须由用户显式解决：不偷偷放宽上限，
-    // 也不静默丢掉已选工具。
     const conflicts = readOnlyConflicts(
       draft.profile.permissionCeiling,
       allowlistOf(draft.profile) ?? [],
       tools?.tools ?? [],
     )
     if (conflicts.length > 0) {
-      setError(
-        `${t('subagentsReadOnlyConflict')}：${conflicts.join('、')}。${t('subagentsReadOnlyConflictHint')}`,
-      )
+      setError(`${t('subagentsReadOnlyConflict')}：${conflicts.join('、')}。${t('subagentsReadOnlyConflictHint')}`)
       return
     }
     setSaving(true)
     setError('')
     try {
-      if (draft.kind === 'edit' && draft.target) {
-        const result = await api.updateSubagentProfile(draft.target, {
-          profile: draft.profile,
-          expectedRevision: draft.revision,
-          ...scope,
-        })
-        saveAgentAvatar(result.profile.qualifiedId, cwd, draft.avatar)
-        // 以服务端返回为准：内置定义的编辑落到用户覆盖层，目标随返回的
-        // qualifiedId 与 revision 更新（不靠本地推论）。
-        setDraft({
-          kind: 'edit',
-          dirty: false,
-          avatar: draft.avatar,
-          ...draftAfterSave(draft.writeScope, result.profile),
-        })
-        notify('ok', t('subagentsSaved'))
-      } else {
-        const result = await api.createSubagentProfile({
-          scope: draft.writeScope,
-          profile: draft.profile,
-          ...scope,
-        })
-        saveAgentAvatar(result.profile.qualifiedId, cwd, draft.avatar)
-        setDraft({
-          kind: 'edit',
-          dirty: false,
-          avatar: draft.avatar,
-          ...draftAfterSave(draft.writeScope, result.profile),
-        })
-        notify('ok', t('subagentsCreated'))
-      }
+      const result = draft.kind === 'edit' && draft.target
+        ? await api.updateSubagentProfile(draft.target, {
+            profile: draft.profile,
+            expectedRevision: draft.revision,
+            ...scope,
+          })
+        : await api.createSubagentProfile({
+            scope: draft.writeScope,
+            profile: draft.profile,
+            ...scope,
+          })
+      saveAgentAvatar(result.profile.qualifiedId, cwd, draft.avatar)
+      setDraft({
+        kind: 'edit',
+        dirty: false,
+        avatar: draft.avatar,
+        ...draftAfterSave(draft.writeScope, result.profile),
+      })
+      setSelectedId(result.profile.qualifiedId)
+      notify('ok', t(draft.kind === 'edit' ? 'subagentsSaved' : 'subagentsCreated'))
       await load()
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason)
-      // 保存冲突：草稿保留，提示重新加载。
       const status = reason instanceof api.ApiError ? reason.status : 0
       const { conflict } = conflictKeepsDraft(draft, status)
       setError(conflict ? `${t('subagentsConflict')}（${message}）` : message)
@@ -245,13 +248,36 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     }
   }
 
-  const runAction = async (action: () => Promise<unknown>, okKey: Parameters<typeof t>[0]) => {
+  const runAction = async (
+    view: SubagentProfileView,
+    action: 'toggle' | 'delete' | 'reset',
+  ) => {
+    if (action === 'delete' && !window.confirm(t('subagentsDeleteConfirm').replace('{name}', view.profile.name))) return
+    if (action === 'reset' && !window.confirm(t('subagentsResetConfirm').replace('{name}', view.profile.name))) return
     setSaving(true)
+    setActionId(view.qualifiedId)
     setError('')
     try {
-      await action()
-      notify('ok', t(okKey))
-      setDraft(null)
+      if (action === 'toggle') {
+        await api.updateSubagentProfile(view.qualifiedId, {
+          profile: { ...view.profile, enabled: !view.profile.enabled },
+          expectedRevision: view.revision,
+          ...scope,
+        })
+      } else if (action === 'reset') {
+        await api.resetSubagentProfile(view.qualifiedId, {
+          scope: view.source === 'project' ? 'project' : 'user',
+          ...scope,
+        })
+      } else {
+        await api.deleteSubagentProfile(view.qualifiedId, {
+          scope: view.source === 'project' ? 'project' : 'user',
+          expectedRevision: view.revision,
+          ...scope,
+        })
+      }
+      notify('ok', t(action === 'delete' ? 'subagentsDeleted' : 'subagentsSaved'))
+      if (draft?.target === view.qualifiedId) setDraft(null)
       setPreview(null)
       await load()
     } catch (reason) {
@@ -260,18 +286,33 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
       notify('err', message)
     } finally {
       setSaving(false)
+      setActionId(null)
+    }
+  }
+
+  const showPreview = async (request: () => Promise<SubagentPreview>) => {
+    setPreviewing(true)
+    setError('')
+    try {
+      setPreview(await request())
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason)
+      setError(message)
+      notify('err', message)
+    } finally {
+      setPreviewing(false)
     }
   }
 
   const refreshPreview = async () => {
     if (!draft) return
     if (draft.kind === 'edit' && draft.target) {
-      setPreview(await api.previewSubagentProfile({ profileId: draft.target, ...scope }))
+      await showPreview(() => api.previewSubagentProfile({ profileId: draft.target, ...scope }))
       return
     }
     const { profile } = draft
-    setPreview(
-      await api.previewSubagentProfile({
+    await showPreview(() =>
+      api.previewSubagentProfile({
         inline: {
           name: profile.name || 'inline',
           description: profile.description || 'inline',
@@ -294,6 +335,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
       const settings = await api.getSettings()
       const ns = settings.namespaces.find((entry) => entry.ns === POLICY_NS)
       if (ns) setPolicyRevision(ns.revision)
+      else setPolicyRevision(0)
       setPolicySaved(true)
       notify('ok', t('runtimeSaved'))
     } catch (reason) {
@@ -305,26 +347,25 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     }
   }
 
-  const filtered = useMemo(() => {
-    const list = catalog?.effective ?? []
+  const rows = useMemo(() => {
+    const all = [...(catalog?.effective ?? []), ...(catalog?.shadowed ?? [])]
     const needle = search.trim().toLowerCase()
-    if (!needle) return list
-    return list.filter((view) =>
-      [view.profile.id, view.profile.name, view.profile.description]
+    return all.filter((view) => {
+      if (sourceFilter !== 'all' && view.source !== sourceFilter) return false
+      return !needle || [view.profile.id, view.profile.name, view.profile.description]
         .join(' ')
         .toLowerCase()
-        .includes(needle),
-    )
-  }, [catalog, search])
+        .includes(needle)
+    })
+  }, [catalog, search, sourceFilter])
 
   const grouped = useMemo(() => {
     const map = new Map<ProfileSource, SubagentProfileView[]>()
     for (const source of SOURCE_ORDER) map.set(source, [])
-    for (const view of filtered) map.get(view.source)?.push(view)
+    for (const view of rows) map.get(view.source)?.push(view)
     return map
-  }, [filtered])
+  }, [rows])
 
-  // 项目下拉选项:首项用户级,其余一工作区一条(label 取标题尾段,hint 取全路径)。
   const workspaceOptions = useMemo<SelectOption<string>[]>(
     () => [
       { id: '', label: t('subagentsScopeUser'), hint: t('subagentsSessionHint') },
@@ -344,48 +385,42 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
   }
 
   const effective = catalog?.effective ?? []
-  const shadowed = catalog?.shadowed ?? []
+  const shadowedIds = new Set((catalog?.shadowed ?? []).map((view) => view.qualifiedId))
   const diagnostics = catalog?.diagnostics ?? []
-  const effectiveCount = effective.length
+  const selected = rows.find((view) => view.qualifiedId === selectedId) ?? null
   const enabledCount = effective.filter((view) => view.profile.enabled).length
+  const busy = saving || loading
 
   return (
-    <section className="setm-section" data-testid="subagent-settings">
-      {error && (
-        <p className={styles.error} role="alert">
-          {error}
-        </p>
-      )}
-
-      <header className={styles.head}>
-        <div>
-          <p className={styles.summary}>
-            {t('subagentsEffective')} {effectiveCount} · {t('subagentsEnabled')} {enabledCount} ·{' '}
-            {cwd ? t('subagentsScopeProject') : t('subagentsScopeUser')}
-          </p>
-          <p className="setm-section-hint">
-            {t('subagentsInheritNote')} {t('subagentsNoDispatchNote')}
-          </p>
+    <section className={`setm-section ${styles.page}`} data-testid="subagent-settings">
+      <header className={styles.pageHead}>
+        <div className={styles.pageCopy}>
+          <h4>{t('subagentsPaneTitle')}</h4>
+          <p>{t('subagentsInheritNote')} {t('subagentsNoDispatchNote')}</p>
         </div>
-        <SetmBtn disabled={draft != null} onClick={startCreate}>
+        <SetmBtn disabled={saving || loading} onClick={startCreate}>
           {t('subagentsNew')}
         </SetmBtn>
       </header>
 
-      <div className={styles.toolbar}>
-        <Field label={t('subagentsSearch')} error={null}>
-          <TextInput value={search} onChange={setSearch} placeholder={t('subagentsSearch')} />
-        </Field>
+      <div className={styles.scopeBar}>
         <DropdownField
           label={t('subagentsSessionLabel')}
           value={workspaceId}
           options={workspaceOptions}
+          disabled={saving}
           onChange={(next) => {
-            setWorkspaceId(next)
-            setDraft(null)
-            setPreview(null)
+            if (next === workspaceId) return
+            requestProfileChange(() => {
+              setWorkspaceId(next)
+              setSelectedId(null)
+              setCatalog(null)
+            })
           }}
         />
+        <p className={styles.scopeSummary}>
+          {t('subagentsEffective')} {effective.length} · {t('subagentsEnabled')} {enabledCount}
+        </p>
       </div>
 
       <SetmCard
@@ -397,288 +432,243 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
       >
         <div className="setm-field-block">
           <div className="setm-field-label">{t('subagentsMaxConcurrentRuns')}</div>
-          <NumberInput
-            value={policy ?? undefined}
-            onChange={(next) => {
-              setPolicySaved(false)
-              setPolicy(next ?? null)
-            }}
-          />
+          <NumberInput value={policy ?? undefined} onChange={(next) => { setPolicySaved(false); setPolicy(next ?? null) }} />
         </div>
         {catalogBudget !== null && (
           <p className="setm-callout">
-            {t('subagentsCatalogBudget')}：{catalogBudget}（runtime.subagentCatalogMaxBytes，改 YAML
-            生效；超限按 UTF-8 边界截断并明示）
+            {t('subagentsCatalogBudget')}：{catalogBudget}（runtime.subagentCatalogMaxBytes，改 YAML 生效；超限按 UTF-8 边界截断并明示）
           </p>
         )}
         <SetmActions>
-          <SetmBtn disabled={saving || policy === null} onClick={() => void savePolicy()}>
-            {t('subagentsSave')}
-          </SetmBtn>
-          {policySaved && <span className={styles.saved}>{t('runtimeSaved')}</span>}
+          <SetmBtn disabled={saving || policy === null} onClick={() => void savePolicy()}>{t('subagentsSave')}</SetmBtn>
+          {policySaved && <span className={styles.saved} role="status">{t('runtimeSaved')}</span>}
         </SetmActions>
       </SetmCard>
 
-      {draft && (
-        <div ref={editorRef}>
-          <DraftEditor
-            draft={draft}
-            tools={tools}
-            models={models}
-            preview={preview}
-            projectWritable={Boolean(catalog?.projectDir)}
-            saving={saving}
-            onChange={update}
-            onAvatarChange={(avatar) => setDraft({ ...draft, avatar, dirty: true })}
-            onScopeChange={(writeScope) => setDraft({ ...draft, writeScope, dirty: true })}
-            onToolsChange={(next) => setDraft({ ...draft, profile: { ...draft.profile, tools: next }, dirty: true })}
-            onModelChange={(next) => setDraft({ ...draft, profile: { ...draft.profile, model: next }, dirty: true })}
-            onSave={() => void save()}
-            onPreview={() => void refreshPreview()}
-            onClose={() => {
-              setDraft(null)
-              setPreview(null)
-            }}
-          />
-        </div>
-      )}
+      {error && <div className={styles.error} role="alert">{error}</div>}
 
-      <div className="setm-section">
-        <div className="setm-section-label">{t('subagentsDefinitions')}</div>
-
-        {loading ? (
-          <p className="setm-empty">{t('loading')}</p>
-        ) : filtered.length === 0 ? (
-          <p className="setm-empty">{t('subagentsEmpty')}</p>
-        ) : (
-          <div className={styles.list}>
-            {SOURCE_ORDER.map((source) => {
-              const rows = grouped.get(source) ?? []
-              if (rows.length === 0) return null
+      <div className={`${styles.workbench}${draft ? ` ${styles.workbenchEditing}` : ''}`}>
+        <aside className={styles.browser} aria-label={t('subagentsDefinitions')}>
+          <div className={styles.browserHead}>
+            <div className={styles.browserTitleRow}>
+              <h5>{t('subagentsDefinitions')}</h5>
+              <span>{rows.length}</span>
+            </div>
+            <Field label={t('subagentsSearch')} error={null}>
+              <TextInput value={search} onChange={setSearch} placeholder={t('subagentsSearch')} />
+            </Field>
+            <DropdownField
+              label={t('subagentsSourceFilter')}
+              value={sourceFilter}
+              options={[
+                { id: 'all', label: t('subagentsAllSources') },
+                ...SOURCE_ORDER.map((source) => ({ id: source, label: t(SOURCE_LABELS[source] as TranslateKey) })),
+              ]}
+              onChange={(value) => setSourceFilter(value as SourceFilter)}
+            />
+          </div>
+          <div className={styles.profileList} aria-busy={loading}>
+            {loading && !catalog ? (
+              <p className="setm-empty">{t('loading')}</p>
+            ) : rows.length === 0 ? (
+              <div className={styles.emptyList}>
+                <p>{effective.length === 0 ? t('subagentsEmpty') : t('subagentsNoMatches')}</p>
+                {effective.length === 0 && <SetmBtn small onClick={startCreate}>{t('subagentsNew')}</SetmBtn>}
+              </div>
+            ) : SOURCE_ORDER.map((source) => {
+              const sourceRows = grouped.get(source) ?? []
+              if (sourceRows.length === 0) return null
               return (
-                <div key={source} className={styles.list}>
-                  <h5 className={styles.groupHead}>
-                    {t(SOURCE_LABELS[source] as Parameters<typeof t>[0])}
-                  </h5>
-                  {rows.map((view) => (
-                    <ProfileRow
+                <div key={source} className={styles.sourceGroup}>
+                  <h6>{t(SOURCE_LABELS[source] as TranslateKey)}</h6>
+                  {sourceRows.map((view) => (
+                    <ProfileListItem
                       key={view.qualifiedId}
                       view={view}
                       cwd={cwd}
                       models={models}
-                      active={draft?.target === view.qualifiedId}
-                      onEdit={() => startEdit(view, 'edit')}
-                      onCopy={() => startEdit(view, 'copy')}
-                      onToggle={() =>
-                        void runAction(
-                          () =>
-                            api.updateSubagentProfile(view.qualifiedId, {
-                              profile: { ...view.profile, enabled: !view.profile.enabled },
-                              expectedRevision: view.revision,
-                              ...scope,
-                            }),
-                          'subagentsSaved',
-                        )
-                      }
-                      onReset={() =>
-                        void runAction(
-                          () =>
-                            api.resetSubagentProfile(view.qualifiedId, {
-                              scope: view.source === 'project' ? 'project' : 'user',
-                              ...scope,
-                            }),
-                          'subagentsSaved',
-                        )
-                      }
-                      onDelete={() =>
-                        void runAction(
-                          () =>
-                            api.deleteSubagentProfile(view.qualifiedId, {
-                              scope: view.source === 'project' ? 'project' : 'user',
-                              expectedRevision: view.revision,
-                              ...scope,
-                            }),
-                          'subagentsDeleted',
-                        )
-                      }
+                      selected={selectedId === view.qualifiedId}
+                      editing={draft?.target === view.qualifiedId}
+                      shadowed={shadowedIds.has(view.qualifiedId)}
+                      disabled={busy}
+                      onSelect={() => selectProfile(view)}
                     />
                   ))}
                 </div>
               )
             })}
           </div>
-        )}
+          {diagnostics.length > 0 && (
+            <details className={styles.diagnostics}>
+              <summary>{t('subagentsDiagnostics')} ({diagnostics.length})</summary>
+              <ul>{diagnostics.map((issue, index) => <li key={`${issue.code}-${index}`}><code>{issue.code}</code> {issue.message}</li>)}</ul>
+            </details>
+          )}
+        </aside>
 
-        {shadowed.length > 0 && (
-          <div className={styles.list}>
-            <h5 className={styles.groupHead}>{t('subagentsShadowed')}</h5>
-            {shadowed.map((view) => (
-              <ProfileRow
-                key={view.qualifiedId}
-                view={view}
-                cwd={cwd}
-                models={models}
-                shadowed
-                onCopy={() => startEdit(view, 'copy')}
-              />
-            ))}
-          </div>
-        )}
-
-        {diagnostics.length > 0 && (
-          <div className={styles.list}>
-            <h5 className={styles.groupHead}>{t('subagentsDiagnostics')}</h5>
-            <ul className={styles.alertList}>
-              {diagnostics.map((issue, index) => (
-                <li key={`${issue.code}-${index}`}>
-                  <code>{issue.code}</code> {issue.message}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+        <div className={styles.detail}>
+          {draft ? (
+            <DraftEditor
+              ref={editorRef}
+              draft={draft}
+              tools={tools}
+              models={models}
+              preview={preview}
+              previewing={previewing}
+              projectWritable={Boolean(catalog?.projectDir)}
+              saving={saving}
+              onChange={update}
+              onAvatarChange={(avatar) => setDraft({ ...draft, avatar, dirty: true })}
+              onScopeChange={(writeScope) => setDraft({ ...draft, writeScope, dirty: true })}
+              onToolsChange={(next) => setDraft({ ...draft, profile: { ...draft.profile, tools: next }, dirty: true })}
+              onModelChange={(next) => setDraft({ ...draft, profile: { ...draft.profile, model: next }, dirty: true })}
+              onSave={() => void save()}
+              onPreview={() => void refreshPreview()}
+              onClose={closeEditor}
+            />
+          ) : selected ? (
+            <ProfileDetail
+              key={selected.qualifiedId}
+              view={selected}
+              cwd={cwd}
+              models={models}
+              preview={preview}
+              previewing={previewing}
+              shadowed={shadowedIds.has(selected.qualifiedId)}
+              busy={busy}
+              acting={actionId === selected.qualifiedId}
+              onEdit={() => startEdit(selected, 'edit')}
+              onCopy={() => startEdit(selected, 'copy')}
+              onToggle={() => void runAction(selected, 'toggle')}
+              onReset={() => void runAction(selected, 'reset')}
+              onDelete={() => void runAction(selected, 'delete')}
+              onPreview={() => void showPreview(() => api.previewSubagentProfile({ profileId: selected.qualifiedId, ...scope }))}
+            />
+          ) : (
+            <div className={styles.emptyDetail}>
+              <h5>{effective.length === 0 ? t('subagentsEmpty') : t('subagentsSelectPrompt')}</h5>
+              {effective.length === 0 && <SetmBtn onClick={startCreate}>{t('subagentsNew')}</SetmBtn>}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   )
 }
 
-function ProfileRow({
-  view,
-  cwd,
-  models,
-  active,
-  shadowed,
-  onEdit,
-  onCopy,
-  onToggle,
-  onReset,
-  onDelete,
-}: {
-  view: SubagentProfileView
-  cwd: string
-  models: ModelCatalog | null
-  active?: boolean
-  shadowed?: boolean
-  onEdit?: () => void
-  onCopy?: () => void
-  onToggle?: () => void
-  onReset?: () => void
-  onDelete?: () => void
-}) {
-  const avatar = useAgentAvatar(view.qualifiedId, cwd)
-  // 摘要由共享纯函数产出：inherit 与"空列表"必须给出不同文案。
+function ProfileFacts({ view, models }: { view: SubagentProfileView; models: ModelCatalog | null }) {
   const tools = toolSelectionSummary(view.profile.tools, {
     inherit: t('subagentsToolsInherit'),
     none: t('subagentsToolsNone'),
     count: (n) => t('subagentsToolsCount').replace('{n}', String(n)),
   })
-  const model =
-    view.profile.model.mode === 'inherit'
-      ? t('subagentsModelInherit')
-      : `${view.profile.model.selection.provider}/${view.profile.model.selection.model}`
-  const availability =
-    view.profile.model.mode === 'explicit'
-      ? modelAvailability(models, view.profile.model.selection)
-      : 'inherit'
-  const modelHint =
-    availability === 'unavailable'
-      ? t('subagentsModelFallbackHint')
-      : availability === 'inherit'
-        ? t('subagentsModelSourceInherit')
-        : t('subagentsModelSourceExplicit')
-  const diagnostic = view.diagnostics?.[0]?.message
+  const unavailable = view.profile.model.mode === 'explicit' && modelAvailability(models, view.profile.model.selection) === 'unavailable'
   return (
-    <article
-      className={`${styles.def}${active ? ` ${styles.defActive}` : ''}`}
-      data-qualified={view.qualifiedId}
-    >
-      <div className={styles.defHead}>
-        <div className={styles.defIdentity}>
-          <AgentAvatar avatar={avatar} size={34} />
-          <div className={styles.defTitle}>
-            <span className={styles.defName}>{view.profile.name}</span>
-            <code className={styles.defId}>{view.qualifiedId}</code>
-          </div>
-        </div>
-        <div className={styles.defTitle}>
-          {!view.profile.enabled && (
-            <span className={`${styles.tag} ${styles.tagMuted}`}>{t('subagentsDisabled')}</span>
-          )}
-          {view.overridesBuiltin && (
-            <span className={`${styles.tag} ${styles.tagAccent}`}>
-              {t('subagentsSourceUser')}
-            </span>
-          )}
-          <span className={styles.tag}>
-            {t(SOURCE_LABELS[view.source] as Parameters<typeof t>[0])}
-          </span>
-        </div>
-      </div>
-      {view.profile.description && <p className={styles.defDesc}>{view.profile.description}</p>}
-      <p className={styles.defMeta}>
-        <span>{tools}</span>
-        <span title={modelHint} className={availability === 'unavailable' ? styles.modelWarn : undefined}>
-          {model}
-          {availability === 'unavailable' ? ` · ${t('subagentsModelUnavailable')}` : ''}
-        </span>
-        <span>
-          {view.profile.permissionCeiling === 'read-only'
-            ? t('subagentsCeilingReadOnly')
-            : t('subagentsCeilingInherit')}
-        </span>
-        {diagnostic && <span>{diagnostic}</span>}
-      </p>
-      <div className={styles.defActions}>
-        {onEdit && (
-          <SetmBtn small variant="ghost" onClick={onEdit}>
-            {t('subagentsEdit')}
-          </SetmBtn>
-        )}
-        {onCopy && (
-          <SetmBtn small variant="ghost" onClick={onCopy}>
-            {t('subagentsCopy')}
-          </SetmBtn>
-        )}
-        {!shadowed && onToggle && (
-          <SetmBtn small variant="ghost" onClick={onToggle}>
-            {view.profile.enabled ? t('subagentsDisable') : t('subagentsEnable')}
-          </SetmBtn>
-        )}
-        {!shadowed && onReset && view.source !== 'builtin' && (
-          <SetmBtn small variant="ghost" onClick={onReset}>
-            {t('subagentsReset')}
-          </SetmBtn>
-        )}
-        {!shadowed && onDelete && view.source !== 'builtin' && (
-          <SetmBtn small variant="danger" onClick={onDelete}>
-            {t('subagentsDelete')}
-          </SetmBtn>
-        )}
-      </div>
-    </article>
+    <div className={styles.facts}>
+      <span><small>{t('subagentsEnabled')}</small>{view.profile.enabled ? t('subagentsEnable') : t('subagentsDisable')}</span>
+      <span><small>{t('subagentsToolsTitle')}</small>{tools}</span>
+      <span className={unavailable ? styles.modelWarn : undefined} title={unavailable ? t('subagentsModelFallbackHint') : undefined}>
+        <small>{t('subagentsModelTitle')}</small>{modelSummary(view.profile)}
+        {unavailable && <em>{t('subagentsModelUnavailable')}</em>}
+      </span>
+    </div>
   )
 }
 
-function DraftEditor({
-  draft,
-  tools,
-  models,
-  preview,
-  projectWritable,
-  saving,
-  onChange,
-  onAvatarChange,
-  onScopeChange,
-  onToolsChange,
-  onModelChange,
-  onSave,
-  onPreview,
-  onClose,
-}: {
+function ProfileListItem({ view, cwd, models, selected, editing, shadowed, disabled, onSelect }: {
+  view: SubagentProfileView
+  cwd: string
+  models: ModelCatalog | null
+  selected: boolean
+  editing: boolean
+  shadowed: boolean
+  disabled: boolean
+  onSelect: () => void
+}) {
+  const avatar = useAgentAvatar(view.qualifiedId, cwd)
+  return (
+    <button
+      type="button"
+      className={`${styles.profileItem}${selected ? ` ${styles.profileItemSelected}` : ''}`}
+      aria-pressed={selected}
+      aria-label={`${view.profile.name}, ${view.profile.enabled ? t('subagentsEnabled') : t('subagentsDisabled')}`}
+      data-qualified={view.qualifiedId}
+      disabled={disabled}
+      onClick={onSelect}
+    >
+      <AgentAvatar avatar={avatar} size={30} />
+      <span className={styles.profileItemBody}>
+        <span className={styles.profileItemName}>{view.profile.name}{shadowed && <small>{t('subagentsShadowedShort')}</small>}</span>
+        <ProfileFacts view={view} models={models} />
+      </span>
+      {editing && <span className={styles.editingMark}>{t('subagentsEditing')}</span>}
+    </button>
+  )
+}
+
+function ProfileDetail({ view, cwd, models, preview, previewing, shadowed, busy, acting, onEdit, onCopy, onToggle, onReset, onDelete, onPreview }: {
+  view: SubagentProfileView
+  cwd: string
+  models: ModelCatalog | null
+  preview: SubagentPreview | null
+  previewing: boolean
+  shadowed: boolean
+  busy: boolean
+  acting: boolean
+  onEdit: () => void
+  onCopy: () => void
+  onToggle: () => void
+  onReset: () => void
+  onDelete: () => void
+  onPreview: () => void
+}) {
+  const avatar = useAgentAvatar(view.qualifiedId, cwd)
+  const disabled = busy || acting
+  return (
+    <section className={styles.detailCard} data-testid="subagent-detail">
+      <header className={styles.detailHead}>
+        <div className={styles.detailIdentity}>
+          <AgentAvatar avatar={avatar} size={40} />
+          <div><h5>{view.profile.name}</h5><code>{view.qualifiedId}</code></div>
+        </div>
+        <div className={styles.tags}>
+          <span className={`${styles.tag} ${view.profile.enabled ? styles.tagAccent : styles.tagMuted}`}>
+            {view.profile.enabled ? t('subagentsEnabled') : t('subagentsDisabled')}
+          </span>
+          <span className={styles.tag}>{t(SOURCE_LABELS[view.source] as TranslateKey)}</span>
+          {shadowed && <span className={styles.tagMuted}>{t('subagentsShadowedShort')}</span>}
+        </div>
+      </header>
+      <div className={styles.detailBody}>
+        <p className={styles.description}>{view.profile.description || t('subagentsNoDescription')}</p>
+        <ProfileFacts view={view} models={models} />
+        <dl className={styles.detailMeta}>
+          <div><dt>{t('subagentsCeilingTitle')}</dt><dd>{view.profile.permissionCeiling === 'read-only' ? t('subagentsCeilingReadOnly') : t('subagentsCeilingInherit')}</dd></div>
+          <div><dt>{t('subagentsModelTitle')}</dt><dd>{view.profile.model.mode === 'inherit' ? t('subagentsModelSourceInherit') : t('subagentsModelSourceExplicit')}</dd></div>
+        </dl>
+        {view.profile.instructions && <div className={styles.roleSummary}><span>{t('subagentsInstructions')}</span><p>{view.profile.instructions}</p></div>}
+        {(view.diagnostics ?? []).length > 0 && <div className={styles.alert} role="status"><strong>{t('subagentsDiagnostics')}</strong><ul>{view.diagnostics?.map((issue, index) => <li key={`${issue.code}-${index}`}><code>{issue.code}</code> {issue.message}</li>)}</ul></div>}
+        {view.source === 'builtin' && <p className={styles.hint}>{t('subagentsBuiltinReset')}</p>}
+        {preview && <PreviewPanel preview={preview} />}
+      </div>
+      <footer className={styles.detailActions}>
+        {!shadowed && <SetmBtn disabled={disabled || !view.editable} onClick={onEdit}>{t('subagentsEdit')}</SetmBtn>}
+        <SetmBtn variant="ghost" disabled={disabled} onClick={onCopy}>{t('subagentsCopy')}</SetmBtn>
+        <SetmBtn variant="ghost" disabled={disabled || previewing} onClick={onPreview}>{previewing ? t('loading') : t('subagentsPreview')}</SetmBtn>
+        {!shadowed && <SetmBtn variant="ghost" disabled={disabled || !view.editable} onClick={onToggle}>{view.profile.enabled ? t('subagentsDisable') : t('subagentsEnable')}</SetmBtn>}
+        {!shadowed && view.source !== 'builtin' && <SetmBtn variant="ghost" disabled={disabled || !view.editable} onClick={onReset}>{t('subagentsReset')}</SetmBtn>}
+        {!shadowed && view.source !== 'builtin' && <SetmBtn variant="danger" disabled={disabled || !view.editable} onClick={onDelete}>{t('subagentsDelete')}</SetmBtn>}
+      </footer>
+    </section>
+  )
+}
+
+const DraftEditor = forwardRef<HTMLElement, {
   draft: Draft
   tools: SubagentToolsView | null
   models: ModelCatalog | null
   preview: SubagentPreview | null
+  previewing: boolean
   projectWritable: boolean
   saving: boolean
   onChange: (patch: Partial<SubagentProfile>) => void
@@ -689,422 +679,144 @@ function DraftEditor({
   onSave: () => void
   onPreview: () => void
   onClose: () => void
-}) {
+}>(function DraftEditor({ draft, tools, models, preview, previewing, projectWritable, saving, onChange, onAvatarChange, onScopeChange, onToolsChange, onModelChange, onSave, onPreview, onClose }, ref) {
   const [toolFilter, setToolFilter] = useState('')
+  const [tab, setTab] = useState<EditorTab>('basics')
   const { profile } = draft
   const allowlist = profile.tools.mode === 'allowlist' ? profile.tools.names : []
   const rows: SubagentToolRow[] = tools?.tools ?? []
   const needle = toolFilter.trim().toLowerCase()
   const visible = rows.filter((row) => !needle || row.name.toLowerCase().includes(needle))
   const categories = Array.from(new Set(visible.map((row) => row.category)))
-  // 离线/已卸载工具与只读冲突都在这里算：保存前拦住冲突，未知项始终可见。
   const unknown = unknownToolNames(allowlist, rows)
   const conflicts = readOnlyConflicts(profile.permissionCeiling, allowlist, rows)
-
-  const toggleTool = (name: string) => {
-    onToolsChange({ mode: 'allowlist', names: toggleToolName(allowlist, name) })
-  }
+  const modelUnavailable = profile.model.mode === 'explicit' && modelAvailability(models, profile.model.selection) === 'unavailable'
+  const tabLabels: Record<EditorTab, string> = { basics: t('subagentsBasic'), role: t('subagentsInstructions'), tools: t('subagentsToolsTitle'), model: t('subagentsModelTitle') }
+  const toggleTool = (name: string) => onToolsChange({ mode: 'allowlist', names: toggleToolName(allowlist, name) })
 
   return (
-    <section className={`setm-card open ${styles.block}`} data-testid="subagent-editor">
+    <section ref={ref} className={styles.editor} data-testid="subagent-editor">
       <header className={styles.editorHead}>
-        <div>
-          <div className={styles.editorTitle}>
-            {draft.kind === 'edit'
-              ? t('subagentsEdit')
-              : draft.kind === 'copy'
-                ? t('subagentsCopy')
-                : t('subagentsNew')}
-          </div>
-          <p className={styles.editorNote}>{t('subagentsEditorHint')}</p>
+        <div className={styles.editorHeading}>
+          <h5>{draft.kind === 'edit' ? t('subagentsEdit') : draft.kind === 'copy' ? t('subagentsCopy') : t('subagentsNew')}</h5>
+          <span>{profile.name || profile.id || t('subagentsUntitled')}</span>
         </div>
-        <SetmBtn small variant="ghost" onClick={onClose}>
-          {t('runtimeClose')}
-        </SetmBtn>
+        <div className={styles.editorActions}>
+          <SetmBtn small variant="ghost" disabled={saving} onClick={onClose}>{t('cancel')}</SetmBtn>
+          <SetmBtn small disabled={saving} onClick={onSave}>{saving ? t('loading') : t('subagentsSave')}</SetmBtn>
+        </div>
       </header>
-
-      <div className="setm-card-body">
-        {/* ---------- 基本信息 ---------- */}
-        <div className="setm-field-label">{t('subagentsBasic')}</div>
-        <Field label={t('subagentsAvatar')} hint={t('subagentsAvatarLocal')} error={null}>
-          <div className={styles.avatarGrid} role="group" aria-label={t('subagentsAvatar')}>
-            {AVATARS.map((avatar, index) => <button key={avatar} type="button" className={styles.avatarOption}
-              aria-label={`${t('subagentsAvatar')} ${index + 1}`} aria-pressed={draft.avatar === avatar}
-              onClick={() => onAvatarChange(avatar)}><AgentAvatar avatar={avatar} size={36} /></button>)}
+      <div className={styles.editorTabBar} role="tablist" aria-label={t('subagentsEditorSections')}>
+        {EDITOR_TABS.map((id) => (
+          <button key={id} id={`subagent-tab-${id}`} type="button" role="tab" aria-selected={tab === id} aria-controls={`subagent-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={tab === id ? styles.editorTabActive : undefined} onClick={() => setTab(id)} onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const index = EDITOR_TABS.indexOf(id)
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? EDITOR_TABS.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + EDITOR_TABS.length) % EDITOR_TABS.length
+            setTab(EDITOR_TABS[next])
+            document.getElementById(`subagent-tab-${EDITOR_TABS[next]}`)?.focus()
+          }}>
+            {tabLabels[id]}{id === 'tools' && conflicts.length > 0 && <span className={styles.tabAlert} aria-label={t('subagentsReadOnlyConflict')} />}{id === 'model' && modelUnavailable && <span className={styles.tabAlert} aria-label={t('subagentsModelUnavailable')} />}
+          </button>
+        ))}
+      </div>
+      <div className={styles.editorBody}>
+        <p className={styles.editorNote}>{t('subagentsEditorHint')}</p>
+        {tab === 'basics' && <div id="subagent-panel-basics" role="tabpanel" aria-labelledby="subagent-tab-basics" className={styles.editorPanel}>
+          <div className="setm-form-grid two">
+            <Field label="id" hint="^[a-z0-9][a-z0-9-]{0,63}$" error={null}><TextInput value={profile.id} mono disabled={draft.kind === 'edit'} placeholder="api-reviewer" onChange={(value) => onChange({ id: value })} /></Field>
+            <Field label={t('subagentsName')} error={null}><TextInput value={profile.name} onChange={(value) => onChange({ name: value })} /></Field>
           </div>
-        </Field>
-        <div className="setm-form-grid two">
-          <Field label="id" hint="^[a-z0-9][a-z0-9-]{0,63}$" error={null}>
-            <TextInput
-              value={profile.id}
-              mono
-              disabled={draft.kind === 'edit'}
-              placeholder="api-reviewer"
-              onChange={(value) => onChange({ id: value })}
-            />
-          </Field>
-          <Field label={t('subagentsName')} error={null}>
-            <TextInput value={profile.name} onChange={(value) => onChange({ name: value })} />
-          </Field>
-        </div>
-        <Field label={t('subagentsDescription')} error={null}>
-          <textarea
-            className={styles.textArea}
-            rows={3}
-            value={profile.description}
-            onChange={(event) => onChange({ description: event.target.value })}
-          />
-        </Field>
-
-        <div className="setm-form-grid two">
-          <Field label={t('subagentsEnabled')} error={null}>
-            <ChipRadio
-              value={profile.enabled ? 'on' : 'off'}
-              options={[
-                { id: 'on', label: t('subagentsEnable') },
-                { id: 'off', label: t('subagentsDisable') },
-              ]}
-              onChange={(value) => onChange({ enabled: value === 'on' })}
-            />
-          </Field>
-          <Field label={t('subagentsCeilingTitle')} hint={t('subagentsCeilingHint')} error={null}>
-            <ChipRadio
-              value={profile.permissionCeiling}
-              options={[
-                { id: 'inherit', label: t('subagentsCeilingInherit') },
-                { id: 'read-only', label: t('subagentsCeilingReadOnly') },
-              ]}
-              onChange={(value) =>
-                onChange({ permissionCeiling: value as SubagentProfile['permissionCeiling'] })
-              }
-            />
-          </Field>
-          <Field label={t('subagentsScope')} hint={t('subagentsScopeHint')} error={null}>
-            <ChipRadio
-              value={draft.writeScope}
-              options={[
-                { id: 'user', label: t('subagentsScopeUser') },
-                { id: 'project', label: t('subagentsScopeProject') },
-              ]}
-              disabled={draft.kind === 'edit' && draft.writeScope === 'project'}
-              onChange={(value) => onScopeChange(value as ProfileWriteScope)}
-            />
-          </Field>
-        </div>
-        {!projectWritable && <p className={styles.hint}>{t('subagentsScopeProjectUnavailable')}</p>}
-
-        {/* ---------- 角色提示 ---------- */}
-        <div className="setm-field-label">{t('subagentsInstructions')}</div>
-        <div className="setm-prompt-shell">
-          <textarea
-            className="setm-textarea"
-            rows={9}
-            spellCheck={false}
-            value={profile.instructions}
-            onChange={(event) => onChange({ instructions: event.target.value })}
-          />
-        </div>
-        <p className={styles.hint}>{t('subagentsInstructionsHint')}</p>
-
-        {/* ---------- 工具选择 ---------- */}
-        <div className="setm-field-label">{t('subagentsToolsTitle')}</div>
-        <ChipRadio
-          value={profile.tools.mode}
-          options={[
-            { id: 'inherit', label: t('subagentsToolsInheritOption') },
-            { id: 'allowlist', label: t('subagentsToolsAllowlistOption') },
-          ]}
-          onChange={(value) =>
-            onToolsChange(
-              value === 'inherit' ? { mode: 'inherit' } : { mode: 'allowlist', names: allowlist },
-            )
-          }
-        />
-        {profile.tools.mode === 'allowlist' && (
-          <>
-            <p className={styles.hint}>
-              {allowlist.length === 0
-                ? t('subagentsToolsNone')
-                : t('subagentsToolsCount').replace('{n}', String(allowlist.length))}{' '}
-              · {t('subagentsToolsSectionHint')}
-            </p>
-            <div className={styles.toolFilter}>
-              <Field label={t('subagentsSearch')} error={null}>
-                <TextInput value={toolFilter} onChange={setToolFilter} placeholder="bash" />
-              </Field>
-            </div>
+          <Field label={t('subagentsDescription')} error={null}><textarea className={styles.textArea} aria-label={t('subagentsDescription')} rows={3} value={profile.description} onChange={(event) => onChange({ description: event.target.value })} /></Field>
+          <div className="setm-form-grid two">
+            <Field label={t('subagentsEnabled')} error={null}><ChipRadio value={profile.enabled ? 'on' : 'off'} options={[{ id: 'on', label: t('subagentsEnable') }, { id: 'off', label: t('subagentsDisable') }]} onChange={(value) => onChange({ enabled: value === 'on' })} /></Field>
+            <Field label={t('subagentsCeilingTitle')} hint={t('subagentsCeilingHint')} error={null}><ChipRadio value={profile.permissionCeiling} options={[{ id: 'inherit', label: t('subagentsCeilingInherit') }, { id: 'read-only', label: t('subagentsCeilingReadOnly') }]} onChange={(value) => onChange({ permissionCeiling: value as SubagentProfile['permissionCeiling'] })} /></Field>
+            <Field label={t('subagentsScope')} hint={t('subagentsScopeHint')} error={null}><ChipRadio value={draft.writeScope} options={[{ id: 'user', label: t('subagentsScopeUser') }, { id: 'project', label: t('subagentsScopeProject') }]} disabled={draft.kind === 'edit'} onChange={(value) => onScopeChange(value as ProfileWriteScope)} /></Field>
+          </div>
+          {!projectWritable && <p className={styles.hint}>{t('subagentsScopeProjectUnavailable')}</p>}
+          <Field label={t('subagentsAvatar')} hint={t('subagentsAvatarLocal')} error={null}><div className={styles.avatarGrid} role="group" aria-label={t('subagentsAvatar')}>{AVATARS.map((avatar, index) => <button key={avatar} type="button" className={styles.avatarOption} aria-label={`${t('subagentsAvatar')} ${index + 1}`} aria-pressed={draft.avatar === avatar} onClick={() => onAvatarChange(avatar)}><AgentAvatar avatar={avatar} size={26} /></button>)}</div></Field>
+        </div>}
+        {tab === 'role' && <div id="subagent-panel-role" role="tabpanel" aria-labelledby="subagent-tab-role" className={styles.editorPanel}>
+          <div className="setm-prompt-shell"><textarea className="setm-textarea" aria-label={t('subagentsInstructions')} rows={12} spellCheck={false} value={profile.instructions} onChange={(event) => onChange({ instructions: event.target.value })} /></div>
+          <p className={styles.hint}>{t('subagentsInstructionsHint')}</p>
+        </div>}
+        {tab === 'tools' && <div id="subagent-panel-tools" role="tabpanel" aria-labelledby="subagent-tab-tools" className={styles.editorPanel}>
+          <ChipRadio ariaLabel={t('subagentsToolsTitle')} value={profile.tools.mode} options={[{ id: 'inherit', label: t('subagentsToolsInheritOption') }, { id: 'allowlist', label: t('subagentsToolsAllowlistOption') }]} onChange={(value) => onToolsChange(value === 'inherit' ? { mode: 'inherit' } : { mode: 'allowlist', names: allowlist })} />
+          {profile.tools.mode === 'allowlist' && <>
+            <p className={styles.hint}>{allowlist.length === 0 ? t('subagentsToolsNone') : t('subagentsToolsCount').replace('{n}', String(allowlist.length))} · {t('subagentsToolsSectionHint')}</p>
+            <div className={styles.toolFilter}><Field label={t('subagentsSearch')} error={null}><TextInput value={toolFilter} onChange={setToolFilter} placeholder="bash" /></Field></div>
             <div className={styles.toolPanel} data-testid="subagent-tools">
               {visible.length === 0 && <p className={styles.hint}>{t('subagentsToolNoMatch')}</p>}
-              {categories.map((category) => (
-                <div key={category}>
-                  <div className={styles.toolCategory}>{category}</div>
-                  {visible
-                    .filter((row) => row.category === category)
-                    .map((row) => {
-                      const selected = allowlist.includes(row.name)
-                      const note = row.hardDenied
-                        ? t('subagentsToolHardDenied')
-                        : row.granted === false
-                          ? t('subagentsToolUngranted')
-                          : row.reason
-                      return (
-                        <button
-                          key={row.name}
-                          type="button"
-                          role="switch"
-                          aria-checked={selected}
-                          disabled={rowIsDisabled(row)}
-                          title={note}
-                          className={`${styles.toolRow}${selected ? ` ${styles.toolRowOn}` : ''}`}
-                          data-tool={row.name}
-                          onClick={() => toggleTool(row.name)}
-                        >
-                          <span className={styles.toolName}>
-                            {selected ? '✓ ' : ''}
-                            {row.name}
-                          </span>
-                          <span className={styles.toolEffect}>{row.effect || note}</span>
-                          <span className={`${styles.toolState}${selected ? ` ${styles.toolOn}` : ''}`}>
-                            {selected ? t('subagentsToolSelected') : note ? t('subagentsToolBlocked') : ''}
-                          </span>
-                        </button>
-                      )
-                    })}
-                </div>
-              ))}
+              {categories.map((category) => <div key={category}><div className={styles.toolCategory}>{category}</div>{visible.filter((row) => row.category === category).map((row) => {
+                const selected = allowlist.includes(row.name)
+                const note = row.hardDenied ? t('subagentsToolHardDenied') : row.granted === false ? t('subagentsToolUngranted') : row.reason
+                return <button key={row.name} type="button" role="switch" aria-checked={selected} aria-label={row.name} disabled={rowIsDisabled(row)} title={note} className={`${styles.toolRow}${selected ? ` ${styles.toolRowOn}` : ''}`} data-tool={row.name} onClick={() => toggleTool(row.name)}><span className={styles.toolName}>{selected ? '✓ ' : ''}{row.name}</span><span className={styles.toolEffect}>{row.effect || note}</span><span className={`${styles.toolState}${selected ? ` ${styles.toolOn}` : ''}`}>{selected ? t('subagentsToolSelected') : note ? t('subagentsToolBlocked') : ''}</span></button>
+              })}</div>)}
             </div>
-            {unknown.length > 0 && (
-              <div className={styles.alert} role="alert" data-testid="unknown-tools">
-                <span className={styles.alertTitle}>{t('subagentsUnknownTools')}</span>
-                <p className={styles.hint}>{t('subagentsUnknownToolsHint')}</p>
-                <ul className={styles.alertList}>
-                  {unknown.map((name) => (
-                    <li key={name} className={styles.alertItem}>
-                      <code>{name}</code>
-                      <SetmBtn small variant="ghost" onClick={() => toggleTool(name)}>
-                        {t('subagentsRemoveTool')}
-                      </SetmBtn>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {conflicts.length > 0 && (
-              <div className={styles.alert} role="alert" data-testid="readonly-conflicts">
-                <span className={styles.alertTitle}>{t('subagentsReadOnlyConflict')}</span>
-                <p className={styles.hint}>{t('subagentsReadOnlyConflictHint')}</p>
-                <code>{conflicts.join('、')}</code>
-                <div className={styles.alertActions}>
-                  <SetmBtn small variant="ghost" onClick={() => onChange({ permissionCeiling: 'inherit' })}>
-                    {t('subagentsUseInheritCeiling')}
-                  </SetmBtn>
-                  <SetmBtn
-                    small
-                    variant="ghost"
-                    onClick={() =>
-                      onToolsChange({
-                        mode: 'allowlist',
-                        names: allowlist.filter((name) => !conflicts.includes(name)),
-                      })
-                    }
-                  >
-                    {t('subagentsDropConflicts')}
-                  </SetmBtn>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* ---------- 模型 ---------- */}
-        <div className="setm-field-label">{t('subagentsModelTitle')}</div>
-        <ChipRadio
-          value={profile.model.mode}
-          options={[
-            { id: 'inherit', label: t('subagentsModelInherit') },
-            { id: 'explicit', label: t('subagentsModelExplicit') },
-          ]}
-          onChange={(value) =>
-            onModelChange(
-              value === 'inherit'
-                ? { mode: 'inherit' }
-                : {
-                    mode: 'explicit',
-                    selection: { provider: '', model: '', reasoningEffort: undefined },
-                  },
-            )
-          }
-        />
-        {profile.model.mode === 'explicit' && (
-          <ExplicitModelFields models={models} model={profile.model.selection} onChange={onModelChange} />
-        )}
-
-        <SetmActions>
-          <SetmBtn disabled={saving} onClick={onSave}>
-            {t('subagentsSave')}
-          </SetmBtn>
-          <SetmBtn variant="ghost" disabled={saving} onClick={onPreview}>
-            {t('subagentsPreview')}
-          </SetmBtn>
-          {draft.dirty && <span className={styles.saved}>{t('subagentsDraftChanged')}</span>}
-        </SetmActions>
-
-        {preview && (
-          <div className={styles.preview} data-testid="subagent-preview">
-            <span className={styles.previewTitle}>{t('subagentsPreviewTitle')}</span>
-            {preview.final ? (
-              <>
-                <p className={styles.defMeta}>
-                  <span>{preview.profile?.qualifiedId}</span>
-                  <span>
-                    {preview.model?.provider}/{preview.model?.model}
-                  </span>
-                  <span>
-                    {preview.modelOrigin === 'parent'
-                      ? t('subagentsModelSourceInherit')
-                      : t('subagentsModelSourceExplicit')}
-                  </span>
-                  <span>
-                    {preview.permissionCeiling === 'read-only'
-                      ? t('subagentsCeilingReadOnly')
-                      : t('subagentsCeilingInherit')}
-                  </span>
-                  <span>{preview.instructionScope}</span>
-                </p>
-                {preview.modelFallback && (
-                  <p className={styles.modelWarn} role="status">
-                    {preview.modelFallback}
-                  </p>
-                )}
-                <span className={styles.sectionLabel}>{t('subagentsPreviewTools')}</span>
-                {(preview.tools ?? []).length === 0 ? (
-                  <p className={styles.hint}>{t('subagentsToolsNone')}</p>
-                ) : (
-                  <ul className={styles.chipList}>
-                    {(preview.tools ?? []).map((name) => (
-                      <li key={name} className={styles.chip}>
-                        {name}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </>
-            ) : (
-              <p className={styles.hint}>
-                {preview.note ?? t('subagentsPreviewHint')}（{t('subagentsPreviewNoSession')}）
-              </p>
-            )}
-          </div>
-        )}
+            {unknown.length > 0 && <div className={styles.alert} role="alert" data-testid="unknown-tools"><span className={styles.alertTitle}>{t('subagentsUnknownTools')}</span><p className={styles.hint}>{t('subagentsUnknownToolsHint')}</p><ul className={styles.alertList}>{unknown.map((name) => <li key={name} className={styles.alertItem}><code>{name}</code><SetmBtn small variant="ghost" onClick={() => toggleTool(name)}>{t('subagentsRemoveTool')}</SetmBtn></li>)}</ul></div>}
+            {conflicts.length > 0 && <div className={styles.alert} role="alert" data-testid="readonly-conflicts"><span className={styles.alertTitle}>{t('subagentsReadOnlyConflict')}</span><p className={styles.hint}>{t('subagentsReadOnlyConflictHint')}</p><code>{conflicts.join('、')}</code><div className={styles.alertActions}><SetmBtn small variant="ghost" onClick={() => onChange({ permissionCeiling: 'inherit' })}>{t('subagentsUseInheritCeiling')}</SetmBtn><SetmBtn small variant="ghost" onClick={() => onToolsChange({ mode: 'allowlist', names: allowlist.filter((name) => !conflicts.includes(name)) })}>{t('subagentsDropConflicts')}</SetmBtn></div></div>}
+          </>}
+        </div>}
+        {tab === 'model' && <div id="subagent-panel-model" role="tabpanel" aria-labelledby="subagent-tab-model" className={styles.editorPanel}>
+          <ChipRadio ariaLabel={t('subagentsModelTitle')} value={profile.model.mode} options={[{ id: 'inherit', label: t('subagentsModelInherit') }, { id: 'explicit', label: t('subagentsModelExplicit') }]} onChange={(value) => onModelChange(value === 'inherit' ? { mode: 'inherit' } : { mode: 'explicit', selection: { provider: '', model: '', reasoningEffort: undefined } })} />
+          {profile.model.mode === 'explicit' && <ExplicitModelFields models={models} model={profile.model.selection} onChange={onModelChange} />}
+        </div>}
+        <div className={styles.editorFooter}>
+          <SetmBtn variant="ghost" disabled={saving || previewing} onClick={onPreview}>{previewing ? t('loading') : t('subagentsPreview')}</SetmBtn>
+          {draft.dirty && <span className={styles.saved} role="status">{t('subagentsDraftChanged')}</span>}
+        </div>
+        {preview && <PreviewPanel preview={preview} />}
       </div>
     </section>
   )
+})
+
+function PreviewPanel({ preview }: { preview: SubagentPreview }) {
+  return <div className={styles.preview} data-testid="subagent-preview">
+    <span className={styles.previewTitle}>{preview.final ? t('subagentsPreviewTitle') : t('subagentsPreview')}</span>
+    {preview.final ? <>
+      <p className={styles.defMeta}><span>{preview.profile?.qualifiedId}</span><span>{preview.model?.provider}/{preview.model?.model}</span><span>{preview.modelOrigin === 'parent' ? t('subagentsModelSourceInherit') : t('subagentsModelSourceExplicit')}</span><span>{preview.permissionCeiling === 'read-only' ? t('subagentsCeilingReadOnly') : t('subagentsCeilingInherit')}</span><span>{preview.instructionScope}</span></p>
+      {preview.modelFallback && <p className={styles.modelWarn} role="status">{preview.modelFallback}</p>}
+      <span className={styles.sectionLabel}>{t('subagentsPreviewTools')}</span>
+      {(preview.tools ?? []).length === 0 ? <p className={styles.hint}>{t('subagentsToolsNone')}</p> : <ul className={styles.chipList}>{(preview.tools ?? []).map((name) => <li key={name} className={styles.chip}>{name}</li>)}</ul>}
+    </> : <p className={styles.hint}>{preview.note ?? t('subagentsPreviewHint')}（{t('subagentsPreviewNoSession')}）</p>}
+  </div>
 }
 
-/** 显式模型在目录里的可用性;`unknown` = 目录还没加载出来,不误报。 */
-function modelAvailability(
-  models: ModelCatalog | null,
-  selection: ModelSelection,
-): 'ok' | 'unavailable' | 'unknown' {
+function modelAvailability(models: ModelCatalog | null, selection: ModelSelection): 'ok' | 'unavailable' | 'unknown' {
   if (!models || models.groups.length === 0) return 'unknown'
   const group = models.groups.find((entry) => entry.id === selection.provider)
   if (!group) return 'unavailable'
   return group.models.some((entry) => entry.id === selection.model) ? 'ok' : 'unavailable'
 }
 
-function ExplicitModelFields({
-  models,
-  model,
-  onChange,
-}: {
-  models: ModelCatalog | null
-  model: ModelSelection
-  onChange: (next: SubagentProfile['model']) => void
-}) {
-  const patch = (part: Partial<ModelSelection>) =>
-    onChange({ mode: 'explicit', selection: { ...model, ...part } })
+function ExplicitModelFields({ models, model, onChange }: { models: ModelCatalog | null; model: ModelSelection; onChange: (next: SubagentProfile['model']) => void }) {
+  // Every selection replaces the whole model choice; no provider/model/effort subfield is saved alone.
+  const patch = (part: Partial<ModelSelection>) => onChange({ mode: 'explicit', selection: { ...model, ...part } })
   const availability = modelAvailability(models, model)
   const groups = models?.groups ?? []
   const group = groups.find((entry) => entry.id === model.provider)
   const modelInfo = group?.models.find((entry) => entry.id === model.model)
-  // 目录里没有当前保存的 provider/model 时，把已保存值作为一项保留在选择
-  // 器里：否则下拉框只显示占位符，用户看不到定义里究竟写了什么。
-  const providerOptions: SelectOption<string>[] = groups.map((entry) => ({
-    id: entry.id,
-    label: entry.name || entry.id,
-  }))
-  if (model.provider && !providerOptions.some((option) => option.id === model.provider)) {
-    providerOptions.push({ id: model.provider, label: model.provider })
-  }
-  const modelOptions: SelectOption<string>[] = (group?.models ?? []).map((entry) => ({
-    id: entry.id,
-    label: entry.name,
-  }))
-  if (model.model && !modelOptions.some((option) => option.id === model.model)) {
-    modelOptions.push({ id: model.model, label: model.model })
-  }
-  const effortOptions: SelectOption[] = [
-    { id: '', label: t('subagentsEffortDefault') },
-    ...(modelInfo?.reasoning?.efforts ?? []).map((effort) => ({
-      id: effort.id,
-      label: effort.name,
-    })),
-  ]
+  const providerOptions: SelectOption<string>[] = groups.map((entry) => ({ id: entry.id, label: entry.name || entry.id }))
+  if (model.provider && !providerOptions.some((option) => option.id === model.provider)) providerOptions.push({ id: model.provider, label: model.provider })
+  const modelOptions: SelectOption<string>[] = (group?.models ?? []).map((entry) => ({ id: entry.id, label: entry.name }))
+  if (model.model && !modelOptions.some((option) => option.id === model.model)) modelOptions.push({ id: model.model, label: model.model })
+  const effortOptions: SelectOption[] = [{ id: '', label: t('subagentsEffortDefault') }, ...(modelInfo?.reasoning?.efforts ?? []).map((effort) => ({ id: effort.id, label: effort.name }))]
+  if (model.reasoningEffort && !effortOptions.some((option) => option.id === model.reasoningEffort)) effortOptions.push({ id: model.reasoningEffort, label: model.reasoningEffort })
 
-  // 目录可用时给选择器(避免手输 provider/model 拼错);目录为空/加载失败
-  // 时退回文本框,不阻断用户编辑已有定义。
   if (groups.length > 0) {
-    return (
-      <div className="setm-form-grid two">
-        <DropdownField
-          label="provider"
-          value={model.provider}
-          options={providerOptions}
-          onChange={(provider) => {
-            const nextGroup = groups.find((entry) => entry.id === provider)
-            patch({
-              provider,
-              model: nextGroup?.models[0]?.id ?? '',
-              reasoningEffort: undefined,
-            })
-          }}
-        />
-        <DropdownField
-          label="model"
-          value={model.model}
-          options={modelOptions}
-          onChange={(nextModel) => patch({ model: nextModel, reasoningEffort: undefined })}
-        />
-        <DropdownField
-          label="reasoning effort"
-          value={model.reasoningEffort ?? ''}
-          options={effortOptions}
-          onChange={(effort) => patch({ reasoningEffort: effort || undefined })}
-        />
-        {availability === 'unavailable' && (
-          <div className={`${styles.alert} ${styles.modelAlert}`} role="alert">
-            <span className={styles.alertTitle}>{t('subagentsModelUnavailable')}</span>
-            <p className={styles.hint}>{t('subagentsModelFallbackHint')}</p>
-          </div>
-        )}
-      </div>
-    )
+    return <div className="setm-form-grid two">
+      <DropdownField label="provider" value={model.provider} options={providerOptions} onChange={(provider) => { const nextGroup = groups.find((entry) => entry.id === provider); patch({ provider, model: nextGroup?.models[0]?.id ?? '', reasoningEffort: undefined }) }} />
+      <DropdownField label="model" value={model.model} options={modelOptions} onChange={(nextModel) => patch({ model: nextModel, reasoningEffort: undefined })} />
+      <DropdownField label="reasoning effort" value={model.reasoningEffort ?? ''} options={effortOptions} onChange={(effort) => patch({ reasoningEffort: effort || undefined })} />
+      {availability === 'unavailable' && <div className={`${styles.alert} ${styles.modelAlert}`} role="alert"><span className={styles.alertTitle}>{t('subagentsModelUnavailable')}</span><p className={styles.hint}>{t('subagentsModelFallbackHint')}</p></div>}
+    </div>
   }
 
-  return (
-    <div className="setm-form-grid two">
-      <Field label="provider" error={null}>
-        <TextInput value={model.provider} onChange={(value) => patch({ provider: value })} />
-      </Field>
-      <Field label="model" error={null}>
-        <TextInput value={model.model} onChange={(value) => patch({ model: value })} />
-      </Field>
-      <Field label="reasoning effort" hint={t('subagentsEffortHint')} error={null}>
-        <TextInput
-          value={model.reasoningEffort ?? ''}
-          onChange={(value) => patch({ reasoningEffort: value || undefined })}
-        />
-      </Field>
-    </div>
-  )
+  return <div className="setm-form-grid two">
+    <Field label="provider" error={null}><TextInput value={model.provider} onChange={(value) => patch({ provider: value })} /></Field>
+    <Field label="model" error={null}><TextInput value={model.model} onChange={(value) => patch({ model: value })} /></Field>
+    <Field label="reasoning effort" hint={t('subagentsEffortHint')} error={null}><TextInput value={model.reasoningEffort ?? ''} onChange={(value) => patch({ reasoningEffort: value || undefined })} /></Field>
+    {availability === 'unavailable' && <div className={`${styles.alert} ${styles.modelAlert}`} role="alert"><span className={styles.alertTitle}>{t('subagentsModelUnavailable')}</span><p className={styles.hint}>{t('subagentsModelFallbackHint')}</p></div>}
+  </div>
 }

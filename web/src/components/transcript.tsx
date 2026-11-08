@@ -1,8 +1,11 @@
 import { useMemo } from 'react'
 import { t } from '../i18n'
+import { useConversationFoldMode } from '../features/conversation/foldMode'
 import {
   assistantHasContent,
   assistantHasActions,
+  groupProcessRows,
+  groupToolRows,
   groupTranscript,
   openTurnStartedAt,
   transcriptNodeKey,
@@ -13,6 +16,8 @@ import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { ViewportRow } from './ViewportRow'
 import { NodeView } from './transcript/NodeView'
+import { ProcessGroup } from './transcript/ProcessGroupRow'
+import { ToolGroup } from './transcript/ToolGroupRow'
 import { TurnOverview } from './transcript/TurnOverview'
 import { WorkIndicator } from './transcript/WorkIndicator'
 
@@ -70,15 +75,23 @@ export function Transcript({
     }
     return { lastStep, ended }
   }, [nodes])
-  const rows = useMemo(() => groupTranscript(viewNodes).flatMap((row) => {
+  const foldMode = useConversationFoldMode()
+  const rows = useMemo(() => {
+    const laidOut = groupTranscript(viewNodes)
+    const display = foldMode === 'tool-group'
+      ? groupToolRows(laidOut)
+      : foldMode === 'standard' ? groupProcessRows(laidOut) : laidOut
+    return display.flatMap((row) => {
     const showActions = row.kind === 'node' && row.node.kind === 'assistant' &&
+      row.node.displayPart !== 'process' &&
       turnIndex.ended.has(row.node.turn) &&
       row.node.step === turnIndex.lastStep.get(row.node.turn) &&
       assistantHasActions(row.node, onFork)
     if (row.kind === 'node' && (row.node.kind === 'turn-start' ||
       (row.node.kind === 'assistant' && !assistantHasContent(row.node) && !showActions))) return []
     return [{ row, showActions }]
-  }), [viewNodes, turnIndex, onFork])
+    })
+  }, [viewNodes, turnIndex, onFork, foldMode])
   if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
@@ -86,6 +99,9 @@ export function Transcript({
     <>
       {rows.map(({ row, showActions }, index) => {
         const key = row.kind === 'node' ? transcriptNodeKey(row.node) :
+          row.kind === 'tool-group' ? `tool-group:${row.group}:${row.tools[0]?.callId}` :
+          row.kind === 'process-group' ?
+            `process-group:${row.nodes[0] ? transcriptNodeKey(row.nodes[0]) : 'empty'}` :
           `overview:${transcriptNodeKey(row.hidden[0])}`
         const content = row.kind === 'node' ? (
           <NodeView
@@ -98,6 +114,20 @@ export function Transcript({
             onAskAnswer={onAskAnswer}
             onAskCancel={onAskCancel}
             showActions={showActions}
+          />
+        ) : row.kind === 'tool-group' ? (
+          <ToolGroup
+            key={key}
+            row={row}
+            onAskAnswer={onAskAnswer}
+            onAskCancel={onAskCancel}
+          />
+        ) : row.kind === 'process-group' ? (
+          <ProcessGroup
+            key={key}
+            row={row}
+            onAskAnswer={onAskAnswer}
+            onAskCancel={onAskCancel}
           />
         ) : (
           <TurnOverview key={key} row={row} />

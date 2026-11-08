@@ -28,6 +28,19 @@ export interface ChatMessage {
   reasoningReplay?: Array<{ protocol: string; payload: unknown }>
   toolCalls?: ToolCallRef[]
   toolCallId?: string
+  /** Prompt-cache provenance; runtime-only, never persisted. */
+  cache?: MessageCache
+}
+
+/**
+ * How one wire message relates to the provider's prompt cache. `perCall`
+ * marks content rebuilt for every request (a prefix that spans it cannot
+ * match); `conversationalUser` marks a real user turn, which is the only
+ * thing the historical checkpoint decimation counts.
+ */
+export interface MessageCache {
+  perCall?: boolean
+  conversationalUser?: boolean
 }
 
 export type BlockType = 'text' | 'reasoning' | 'tool-call'
@@ -175,6 +188,8 @@ export type SessionEvent =
       error_identity?: { name: string; code: string }
       meta?: unknown
       truncation?: { total_chars: number; shown_chars: number }
+      /** This result replaces the surface of an older event with that seq. */
+      replaces?: number
     }
   | { type: 'tool-output-chunk'; call_id: string; stream: string; text: string }
   | { type: 'todo-write'; todos: TodoItem[] }
@@ -218,6 +233,12 @@ export type SessionEvent =
       post_tokens?: number
     }
   | { type: 'agent-preset'; preset: string }
+  | {
+      type: 'goal'
+      op: string
+      status: 'active' | 'paused' | 'budget-limited' | 'complete'
+      targetId: string
+    }
   | { type: 'command-run'; name: string; text: string }
   | { type: 'request-context'; turn: number; step: number; provider: string; model: string; context_window?: number }
   | {

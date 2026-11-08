@@ -369,8 +369,8 @@ test('host integrations: skill tool, catalog injection, memory write and APIs', 
     )
     assert.equal(systemPrompts.length, 1, 'the unchanged prompt is logged once')
     assert.ok(
-      systemPrompts[0]?.text.includes('Working rules:') &&
-        systemPrompts[0]?.text.includes('# 项目记忆'),
+      systemPrompts[0]?.text.includes('## 核心原则') &&
+        systemPrompts[0]?.text.includes('## 项目记忆'),
       'the transcript must carry the full prompt, not a persona-only projection',
     )
 

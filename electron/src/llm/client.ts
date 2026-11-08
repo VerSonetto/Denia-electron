@@ -26,6 +26,25 @@ function headersOf(provider: ProviderConfig): Record<string, string> {
   return { ...(provider.headers ?? {}) }
 }
 
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+
+/**
+ * Beta opt-ins share one comma-separated header, so the long-cache opt-in must
+ * merge with a caller-supplied list instead of replacing it.
+ */
+function anthropicHeaders(provider: ProviderConfig): Record<string, string> {
+  const headers = headersOf(provider)
+  if (provider.longCache !== true) return headers
+  const key = Object.keys(headers).find((name) => name.toLowerCase() === 'anthropic-beta')
+  const entries = (key === undefined ? '' : (headers[key] ?? ''))
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  if (entries.includes(EXTENDED_CACHE_TTL_BETA)) return headers
+  headers[key ?? 'anthropic-beta'] = [...entries, EXTENDED_CACHE_TTL_BETA].join(',')
+  return headers
+}
+
 export function openAiClient(provider: ProviderConfig): OpenAI {
   return new OpenAI({
     apiKey: resolveApiKey(provider) ?? 'denia-no-key',
@@ -39,7 +58,7 @@ export function anthropicClient(provider: ProviderConfig): Anthropic {
   return new Anthropic({
     apiKey: resolveApiKey(provider) ?? 'denia-no-key',
     baseURL: anthropicBaseURL(provider),
-    defaultHeaders: headersOf(provider),
+    defaultHeaders: anthropicHeaders(provider),
     maxRetries: 0,
   })
 }

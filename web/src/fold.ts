@@ -30,6 +30,12 @@ export interface UiBlock {
   id?: string
   name?: string
   args?: string
+  /** 流式阶段记录的开始时刻；历史快照没有该字段。 */
+  startedAt?: number
+  /** 推理块结束时刻；用于在运行中显示思考耗时，而不是正文摘要。 */
+  endedAt?: number
+  /** 推理块从开始到结束的耗时。 */
+  durationMs?: number
 }
 
 export type TranscriptNode =
@@ -66,6 +72,12 @@ export type TranscriptNode =
       usage?: TokenUsage
       interrupted: boolean
       streaming: boolean
+      /**
+       * 展示投影标记：同一条助手消息可能既有推理又有正文。标准模式需要把
+       * 推理并入工作步骤、正文留在折叠区外，因此拆成两个合成节点；该字段
+       * 只存在于展示投影，不写回会话日志。
+       */
+      displayPart?: 'process' | 'response'
       /** step-start 事件的 epoch ms;无 step-start 时为 undefined。 */
       stepStartTime?: number
       /**
@@ -280,7 +292,7 @@ function patchAt(
  * 所有下标都先过 [`slotFor`]:提供方给的 index 不可信,越界写会造出渲染期
  * 读得到的 undefined(见那里的说明)。
  */
-function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
+function applyChunk(blocks: UiBlock[], chunk: StreamChunk, time: number): UiBlock[] {
   switch (chunk.type) {
     case 'block-start': {
       // 正常流:delta 携带的 index 与已打开块数一致。异常流(网络错误重试,
@@ -291,7 +303,7 @@ function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
       const index = slotFor(chunk.index, blocks.length)
       if (index < 0) return blocks
       if (index < blocks.length) return blocks
-      return [...blocks, { kind: blockKindOf(chunk.block_type), text: '' }]
+      return [...blocks, { kind: blockKindOf(chunk.block_type), text: '', startedAt: time }]
     }
     case 'text-delta':
     case 'reasoning-delta': {
@@ -302,6 +314,7 @@ function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
           ...previous,
           kind: previous.kind === 'text' ? kind : previous.kind,
           text: previous.text + chunk.text,
+          startedAt: previous.startedAt ?? time,
         }
       })
     }
@@ -313,6 +326,7 @@ function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
           args: (previous.args ?? '') + chunk.arguments_delta,
           id: chunk.id || previous.id,
           name: chunk.name ?? previous.name,
+          startedAt: previous.startedAt ?? time,
         }
       })
     }
@@ -323,14 +337,46 @@ function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
       // 显示两遍;真正的权威是随后落盘的 assistant-message(它整体重建 blocks)。
       if (index < 0 || index >= blocks.length) return blocks
       const settled = toUiBlock(chunk.block)
-      return patchAt(blocks, chunk.index, (block) => ({
-        ...settled,
-        text: settled.text || block?.text || '',
-      }))
+      return patchAt(blocks, chunk.index, (block) => {
+        const startedAt = block?.startedAt
+        return {
+          ...settled,
+          text: settled.text || block?.text || '',
+          ...(startedAt !== undefined ? { startedAt } : {}),
+          endedAt: time,
+          ...(settled.kind === 'reasoning' && startedAt !== undefined
+            ? { durationMs: Math.max(0, time - startedAt) }
+            : {}),
+        }
+      })
     }
     default:
       return blocks
   }
+}
+
+/**
+ * assistant-message 是最终权威,会整体重建 blocks;把流式阶段已经量到的
+ * 推理起止时间按同下标、同 kind 合并回来。历史快照没有这些字段时保持缺省,
+ * 渲染侧会退化为“持续了几秒”。
+ */
+function keepBlockTimings(next: UiBlock[], prior: UiBlock[]): UiBlock[] {
+  return next.map((block, index) => {
+    const previous = prior[index]
+    if (
+      previous === undefined ||
+      previous.kind !== block.kind ||
+      (previous.startedAt === undefined && previous.durationMs === undefined)
+    ) {
+      return block
+    }
+    return {
+      ...block,
+      ...(previous.startedAt !== undefined ? { startedAt: previous.startedAt } : {}),
+      ...(previous.endedAt !== undefined ? { endedAt: previous.endedAt } : {}),
+      ...(previous.durationMs !== undefined ? { durationMs: previous.durationMs } : {}),
+    }
+  })
 }
 
 /**
@@ -520,13 +566,13 @@ export function foldEvents(events: SessionEnvelope[], parentSessionId?: string):
         if (open.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)) {
           open.firstTokenTime = event.time
         }
-        open.blocks = applyChunk(open.blocks, event.chunk)
+        open.blocks = applyChunk(open.blocks, event.chunk, event.time)
         break
       }
       case 'assistant-message': {
-        const blocks = event.blocks.map(toUiBlock)
+        const authoritative = event.blocks.map(toUiBlock)
         if (open && open.turn === event.turn && open.step === event.step) {
-          open.blocks = blocks
+          open.blocks = keepBlockTimings(authoritative, open.blocks)
           open.usage = event.usage
           open.interrupted = event.interrupted ?? false
           open.settleTime = event.time
@@ -542,7 +588,7 @@ export function foldEvents(events: SessionEnvelope[], parentSessionId?: string):
             turn: event.turn,
             step: event.step,
             seq: event.seq,
-            blocks,
+            blocks: authoritative,
             usage: event.usage,
             interrupted: event.interrupted ?? false,
             streaming: false,
@@ -805,7 +851,7 @@ export function applyEnvelopes(
         if (acc.node.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)) {
           acc.node = { ...acc.node, firstTokenTime: event.time }
         }
-        acc.blocks = applyChunk(acc.blocks, event.chunk)
+        acc.blocks = applyChunk(acc.blocks, event.chunk, event.time)
         continue
       }
       // 先落掉上一个累积节点(节点迁移),再开新累积。
@@ -818,7 +864,7 @@ export function applyEnvelopes(
         tail.step === event.step
       ) {
         const node = isTokenDeltaChunk(event.chunk) ? { ...tail, firstTokenTime: tail.firstTokenTime ?? event.time } : tail
-        const blocks = applyChunk(node.blocks, event.chunk)
+        const blocks = applyChunk(node.blocks, event.chunk, event.time)
         acc = { node, blocks }
       } else {
         const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
@@ -831,7 +877,7 @@ export function applyEnvelopes(
           stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
         }
         if (isTokenDeltaChunk(event.chunk)) fresh.firstTokenTime = event.time
-        acc = { node: fresh, blocks: applyChunk(fresh.blocks, event.chunk) }
+        acc = { node: fresh, blocks: applyChunk(fresh.blocks, event.chunk, event.time) }
         current = [...current, fresh]
       }
       continue
@@ -910,7 +956,10 @@ function applyEnvelopeStep(
           last.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)
             ? { ...last, firstTokenTime: event.time }
             : last
-        return [...nodes.slice(0, -1), { ...node, blocks: applyChunk(node.blocks, event.chunk) }]
+        return [
+          ...nodes.slice(0, -1),
+          { ...node, blocks: applyChunk(node.blocks, event.chunk, event.time) },
+        ]
       }
       const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
         kind: 'assistant',
@@ -922,7 +971,7 @@ function applyEnvelopeStep(
         stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
       }
       if (isTokenDeltaChunk(event.chunk)) fresh.firstTokenTime = event.time
-      return [...nodes, { ...fresh, blocks: applyChunk(fresh.blocks, event.chunk) }]
+      return [...nodes, { ...fresh, blocks: applyChunk(fresh.blocks, event.chunk, event.time) }]
     }
     case 'assistant-message': {
       const last = nodes[nodes.length - 1]
@@ -935,7 +984,7 @@ function applyEnvelopeStep(
         turn: event.turn,
         step: event.step,
         seq: event.seq,
-        blocks: event.blocks.map(toUiBlock),
+        blocks: keepBlockTimings(event.blocks.map(toUiBlock), prior?.blocks ?? []),
         usage: event.usage,
         interrupted: event.interrupted ?? false,
         streaming: false,
@@ -1118,6 +1167,8 @@ export interface OverviewRow {
   durationMs: number
   toolCount: number
   hidden: TranscriptNode[]
+  /** 轮次没有留下可见回答时默认展开，避免整轮内容只剩一行标题。 */
+  defaultOpen: boolean
 }
 
 /**
@@ -1135,9 +1186,145 @@ export function withoutCompacting(nodes: TranscriptNode[]): TranscriptNode[] {
   return nodes.filter((node) => node.kind !== 'compacting')
 }
 
-export type TranscriptRow =
-  | { kind: 'node'; node: TranscriptNode }
-  | OverviewRow
+export type ToolGroupKind = 'explore' | 'terminal'
+
+/** 相邻同类工具调用合并成一行；展开后才渲染各自的工具行。 */
+export interface ToolGroupRow {
+  kind: 'tool-group'
+  group: ToolGroupKind
+  tools: ToolNode[]
+}
+
+export interface NodeRow {
+  kind: 'node'
+  node: TranscriptNode
+}
+
+/** 标准模式下的一段工作步骤，成员包括思考与工具调用。 */
+export interface ProcessGroupRow {
+  kind: 'process-group'
+  nodes: TranscriptNode[]
+  running: boolean
+}
+
+export type TranscriptRow = NodeRow | ToolGroupRow | ProcessGroupRow | OverviewRow
+
+/** 可折叠工具的分类；不在其中的工具始终单独渲染。 */
+function toolGroupKind(node: ToolNode): ToolGroupKind | undefined {
+  if (node.name === 'bash') return 'terminal'
+  if (node.name === 'read_file' || node.name === 'ls' || node.name === 'glob' || node.name === 'grep') {
+    return 'explore'
+  }
+  return undefined
+}
+
+/**
+ * 把相邻的同类工具折叠成一行。单个工具保持原样；只有连续出现第二项时
+ * 才升级成组，避免为一次调用凭空多一层容器。
+ */
+export function groupToolRows(rows: TranscriptRow[]): TranscriptRow[] {
+  const grouped: TranscriptRow[] = []
+  for (const row of rows) {
+    if (row.kind !== 'node' || row.node.kind !== 'tool') {
+      grouped.push(row)
+      continue
+    }
+    const group = toolGroupKind(row.node)
+    if (group === undefined) {
+      grouped.push(row)
+      continue
+    }
+    const last = grouped.at(-1)
+    if (last?.kind === 'tool-group' && last.group === group) {
+      last.tools.push(row.node)
+      continue
+    }
+    if (
+      last?.kind === 'node' &&
+      last.node.kind === 'tool' &&
+      toolGroupKind(last.node) === group
+    ) {
+      grouped[grouped.length - 1] = { kind: 'tool-group', group, tools: [last.node, row.node] }
+      continue
+    }
+    grouped.push(row)
+  }
+  return grouped
+}
+
+/** 只含节点行的区块（如展开后的过程详情）按同一规则聚合工具。 */
+export function groupToolNodes(nodes: TranscriptNode[]): Array<NodeRow | ToolGroupRow> {
+  return groupToolRows(nodes.map((node) => ({ kind: 'node', node }) as NodeRow)) as Array<
+    NodeRow | ToolGroupRow
+  >
+}
+
+/** 哪些节点属于工作步骤：工具调用与只有推理的助手块；正文另起一段。 */
+function isProcessDisplayNode(node: TranscriptNode): boolean {
+  if (node.kind === 'tool') return node.ask === undefined
+  if (node.kind !== 'assistant') return false
+  return assistantHasContent(node) && !node.blocks.some(
+    (block) => block.kind === 'text' && block.text.trim().length > 0,
+  )
+}
+
+/** 组内仍有正在执行的工具或流式思考。 */
+function isActiveProcessNode(node: TranscriptNode): boolean {
+  if (node.kind === 'tool') return node.result === undefined
+  return node.kind === 'assistant' && node.streaming
+}
+
+function groupProcessNodeList(nodes: TranscriptNode[]): Array<NodeRow | ProcessGroupRow> {
+  const rows: Array<NodeRow | ProcessGroupRow> = []
+  let current: ProcessGroupRow | null = null
+  for (const node of nodes) {
+    if (isProcessDisplayNode(node)) {
+      if (current === null) {
+        current = {
+          kind: 'process-group',
+          nodes: [],
+          running: false,
+        }
+        rows.push(current)
+      }
+      current.nodes.push(node)
+      if (isActiveProcessNode(node)) current.running = true
+      continue
+    }
+    current = null
+    rows.push({ kind: 'node', node })
+  }
+  return rows
+}
+
+/** 标准模式：按工作步骤组调整显示行，助手正文与输入事件自然切断分组。 */
+export function groupProcessRows(rows: TranscriptRow[]): TranscriptRow[] {
+  const grouped: TranscriptRow[] = []
+  let current: ProcessGroupRow | null = null
+  for (const row of rows) {
+    if (row.kind === 'node' && isProcessDisplayNode(row.node)) {
+      if (current === null) {
+        current = { kind: 'process-group', nodes: [], running: false }
+        grouped.push(current)
+      }
+      current.nodes.push(row.node)
+      if (isActiveProcessNode(row.node)) current.running = true
+      continue
+    }
+    current = null
+    grouped.push(row)
+  }
+  // 末尾工作段仍属未结束轮次：即使当前工具刚结束、下一段思考还未到，
+  // 标题也应继续显示运行态，而不是闪回完成摘要。
+  const last = grouped.at(-1)
+  if (last?.kind === 'process-group') last.running = true
+  return grouped
+}
+
+/** 标准模式完成态：把一段被折叠的步骤内容拆成工作步骤组与普通行。 */
+export function groupProcessNodes(nodes: TranscriptNode[]): Array<NodeRow | ProcessGroupRow> {
+  return groupProcessNodeList(nodes)
+}
 
 /* ---- 收尾轮次的文件产物 ---- */
 
@@ -1300,37 +1487,74 @@ function withProduced(endNode: TurnEndNode, span: TranscriptNode[]): TranscriptN
 }
 
 /**
- * Groups transcript nodes for display. A closed turn folds everything through
- * its last tool call (inclusive) into one "worked X · N tool calls" overview
- * row, keeping only the answer that follows it visible; genuine user messages
- * stay in place. An open (running) turn is left flat: tool calls render as
- * individual rows so the reader always sees live progress.
+ * An assistant message can contain both reasoning and a reply. The standard
+ * work-step view needs to keep the reasoning inside the process group while
+ * leaving the reply visible, so project the two halves as separate display
+ * nodes. The original node is returned untouched when it only has one half.
+ */
+function splitAssistantForDisplay(
+  node: Extract<TranscriptNode, { kind: 'assistant' }>,
+): TranscriptNode[] {
+  const reasoning = node.blocks.filter(
+    (block) => block.kind === 'reasoning' && block.text.trim().length > 0,
+  )
+  const text = node.blocks.filter(
+    (block) => block.kind === 'text' && block.text.trim().length > 0,
+  )
+  if (reasoning.length === 0 || text.length === 0) return [node]
+  return [
+    {
+      ...node,
+      blocks: reasoning,
+      streaming: false,
+      interrupted: false,
+      displayPart: 'process',
+    },
+    {
+      ...node,
+      blocks: text,
+      displayPart: 'response',
+    },
+  ]
+}
+
+/**
+ * Groups transcript nodes for display. A closed turn folds its work process
+ * (tools and reasoning, including reasoning after the final tool) into one
+ * overview row, keeping the reply that follows it visible; genuine user
+ * messages stay in place. An open (running) turn is left flat at this layer:
+ * the active work-details mode decides how its process rows are presented.
  */
 export function groupTranscript(nodes: TranscriptNode[]): TranscriptRow[] {
+  const displayNodes = nodes.flatMap((node) =>
+    node.kind === 'assistant' ? splitAssistantForDisplay(node) : [node],
+  )
   const rows: TranscriptRow[] = []
   let index = 0
-  while (index < nodes.length) {
-    const marker = nodes[index]
+  while (index < displayNodes.length) {
+    const marker = displayNodes[index]
     if (marker.kind !== 'turn-start') {
       rows.push({ kind: 'node', node: marker })
       index += 1
       continue
     }
     let end = -1
-    for (let j = index + 1; j < nodes.length; j++) {
-      if (nodes[j].kind === 'turn-end') {
+    for (let j = index + 1; j < displayNodes.length; j++) {
+      if (displayNodes[j].kind === 'turn-end') {
         end = j
         break
       }
     }
     if (end < 0) {
-      for (const node of nodes.slice(index + 1)) {
-        if (node.kind !== 'turn-start') rows.push({ kind: 'node', node })
+      // 保留后续 turn-start 作为工具分组的硬边界；渲染层本来就会过滤它。
+      // 丢掉边界会让相邻两轮末尾/开头的同类工具错误合并成一组。
+      for (const node of displayNodes.slice(index + 1)) {
+        rows.push({ kind: 'node', node })
       }
       break
     }
-    const span = nodes.slice(index + 1, end)
-    const endNode = nodes[end] as TurnEndNode
+    const span = displayNodes.slice(index + 1, end)
+    const endNode = displayNodes[end] as TurnEndNode
     rows.push(...closedTurnRows(span, marker, endNode))
     rows.push({ kind: 'node', node: withProduced(endNode, span) })
     index = end + 1
@@ -1338,23 +1562,24 @@ export function groupTranscript(nodes: TranscriptNode[]): TranscriptRow[] {
   return rows
 }
 
-/** Fold one closed turn's prefix *through* its last tool call into an overview row. */
+/** Fold one closed turn's work process into an overview row, keeping replies visible. */
 function closedTurnRows(
   span: TranscriptNode[],
   marker: Extract<TranscriptNode, { kind: 'turn-start' }>,
   endNode: Extract<TranscriptNode, { kind: 'turn-end' }>,
 ): TranscriptRow[] {
-  let lastTool = -1
+  // 末尾的工作步骤也可能是最后一条工具之后的推理（同一条消息已按推理/
+  // 正文拆开）；它同样属于本轮过程，不能漏在折叠区外。
+  let lastWork = -1
   for (let i = span.length - 1; i >= 0; i--) {
-    if (span[i].kind === 'tool') {
-      lastTool = i
+    const node = span[i]
+    if (node.kind === 'tool' || (node.kind === 'assistant' && isProcessDisplayNode(node))) {
+      lastWork = i
       break
     }
   }
-  if (lastTool < 0) return span.map((node) => ({ kind: 'node', node }) as TranscriptRow)
-  // 折叠窗口含最后一条工具调用(用户规格:最后一条工具调用"以上"全部折叠),
-  // 可见部分只剩其后的最终回答。
-  const foldEnd = lastTool + 1
+  if (lastWork < 0) return span.map((node) => ({ kind: 'node', node }) as TranscriptRow)
+  const foldEnd = lastWork + 1
   const prefix = span.slice(0, foldEnd)
   // 用户消息、**父代理来信**与**带图注入**是对话内容,必须留在原位:
   // 前者被藏进 "worked X" 后子代理读不到主代理交代了什么;后者藏起来
@@ -1372,6 +1597,7 @@ function closedTurnRows(
       durationMs: Math.max(0, endNode.time - marker.time),
       toolCount: span.reduce((count, node) => count + (node.kind === 'tool' ? 1 : 0), 0),
       hidden,
+      defaultOpen: !span.slice(foldEnd).some(rendersContent),
     }
     : null
   const rows: TranscriptRow[] = []
@@ -1420,7 +1646,11 @@ const localNodeKeys = new WeakMap<TranscriptNode, number>()
 let nextLocalNodeKey = 0
 
 export function transcriptNodeKey(node: TranscriptNode): string {
-  if (node.kind === 'assistant') return `assistant:${node.turn}:${node.step}`
+  if (node.kind === 'assistant') {
+    return node.displayPart === undefined
+      ? `assistant:${node.turn}:${node.step}`
+      : `assistant:${node.turn}:${node.step}:${node.displayPart}`
+  }
   if (node.kind === 'tool') return `tool:${node.callId}`
   if (node.kind === 'user' && node.anchor !== undefined) return `user:${node.anchor}`
   if (node.kind === 'turn-start' || node.kind === 'turn-end') return `${node.kind}:${node.turn}`

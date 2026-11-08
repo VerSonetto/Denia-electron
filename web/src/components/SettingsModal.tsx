@@ -25,6 +25,11 @@ import {
   setQueueDefaultAction,
   type QueueDefaultAction,
 } from '../features/conversation/queueDefaults'
+import {
+  normalizeConversationFoldMode,
+  setConversationFoldMode,
+  type ConversationFoldMode,
+} from '../features/conversation/foldMode'
 
 type SettingsTab =
   | 'runtime'
@@ -70,6 +75,17 @@ const QUEUE_DEFAULT_OPTIONS: {
   { id: 'ask', nameKey: 'queueDefaultAsk' },
   { id: 'interject', nameKey: 'queueModeInterject' },
   { id: 'guide', nameKey: 'queueModeGuide' },
+]
+
+/** 工作步骤展示方式:标准按整段折叠,工具分组只合并连续同类工具,详细完整展开。 */
+const CONVERSATION_FOLD_OPTIONS: {
+  id: ConversationFoldMode
+  nameKey: Parameters<typeof t>[0]
+  hintKey: Parameters<typeof t>[0]
+}[] = [
+  { id: 'standard', nameKey: 'conversationFoldStandard', hintKey: 'conversationFoldStandardHint' },
+  { id: 'tool-group', nameKey: 'conversationFoldToolGroup', hintKey: 'conversationFoldToolGroupHint' },
+  { id: 'detailed', nameKey: 'conversationFoldDetailed', hintKey: 'conversationFoldDetailedHint' },
 ]
 
 function normalizeDefaultPermission(raw: unknown): PermissionMode {
@@ -208,6 +224,8 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
   const [locale, setLocaleState] = useState('zh')
   const [defaultPermission, setDefaultPermission] = useState<PermissionMode>('auto-edit')
   const [queueDefaultAction, setQueueDefaultActionState] = useState<QueueDefaultAction>('ask')
+  const [conversationFoldMode, setConversationFoldModeState] =
+    useState<ConversationFoldMode>('standard')
   const [consoleValue, setConsoleValue] = useState<Record<string, unknown>>({})
   const [consoleRevision, setConsoleRevision] = useState(0)
   const [promptText, setPromptText] = useState('')
@@ -246,6 +264,9 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
         )
         setQueueDefaultActionState(
           normalizeQueueDefaultAction(console.value.queueDefaultAction),
+        )
+        setConversationFoldModeState(
+          normalizeConversationFoldMode(console.value.conversationFoldMode),
         )
         setConsoleRevision(console.revision)
       }
@@ -349,6 +370,31 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
       setConsoleValue(next)
       setQueueDefaultAction(queueDefaultAction)
       notify('ok', t('queueDefaultSaved'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+      void load()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 对话流折叠方式:写 console 设置,并同步对话流的本地缓存。 */
+  const saveConversationFoldMode = async () => {
+    setSaving(true)
+    try {
+      const next = {
+        ...consoleValue,
+        theme,
+        locale,
+        defaultPermissionMode: defaultPermission,
+        queueDefaultAction,
+        conversationFoldMode,
+      }
+      const view = await api.replaceNamespace(CONSOLE_NS, next, consoleRevision)
+      setConsoleRevision((view as { revision: number }).revision)
+      setConsoleValue(next)
+      setConversationFoldMode(conversationFoldMode)
+      notify('ok', t('conversationFoldSaved'))
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       void load()
@@ -567,6 +613,34 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
                       />
                       <SetmActions>
                         <SetmBtn disabled={saving} onClick={() => void saveQueueDefaultAction()}>
+                          {t('save')}
+                        </SetmBtn>
+                      </SetmActions>
+                    </SetmCard>
+
+                    <SetmCard
+                      title={t('conversationFoldTitle')}
+                      hint={t(
+                        (CONVERSATION_FOLD_OPTIONS.find((o) => o.id === conversationFoldMode) ??
+                          CONVERSATION_FOLD_OPTIONS[0]).hintKey,
+                      )}
+                      summary={t(
+                        (CONVERSATION_FOLD_OPTIONS.find((o) => o.id === conversationFoldMode) ??
+                          CONVERSATION_FOLD_OPTIONS[0]).nameKey,
+                      )}
+                      open={openCard === 'conversation-fold'}
+                      onToggle={() => toggleCard('conversation-fold')}
+                    >
+                      <SetmTiles
+                        value={conversationFoldMode}
+                        options={CONVERSATION_FOLD_OPTIONS.map((option) => ({
+                          id: option.id,
+                          label: t(option.nameKey),
+                        }))}
+                        onChange={setConversationFoldModeState}
+                      />
+                      <SetmActions>
+                        <SetmBtn disabled={saving} onClick={() => void saveConversationFoldMode()}>
                           {t('save')}
                         </SetmBtn>
                       </SetmActions>

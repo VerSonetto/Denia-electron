@@ -94,7 +94,7 @@ export function renderIndexBlock(root: string, index: string): string {
 
 /** The `# 项目记忆` discipline section, with the real memory directory. */
 export function renderMemorySection(root: string): string {
-  return `# 项目记忆
+  return `## 项目记忆
 
 - **默认不写**：记忆是例外而非常规——多数轮次结束时什么都不该留下；只有「下个会话缺了它就会犯错或重复劳动」时才写，判断不了就不写，宁可漏记也不堆积。
 - 记忆目录在 \`${root}\`（由「项目记忆」注入且已存在），直接用 write_file 写入，不运行 mkdir、不先检查目录是否存在。每轮结束前判断一次本轮有无值得跨会话保留的信息，有就写；用户明确说“记住”时立刻写，没有值得留的不强写。

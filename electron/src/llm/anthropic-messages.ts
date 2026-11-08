@@ -14,6 +14,14 @@ import type {
   TokenUsage,
   ToolSchema,
 } from '../core/wire.ts'
+import {
+  anthropicCacheControl,
+  applyAnthropicMessageCaching,
+  cacheMetaOf,
+  mergeCacheMeta,
+  type AnthropicWireMessage,
+  type WireCacheMeta,
+} from './cache.ts'
 import { anthropicClient, isAbortError, toRequestError } from './client.ts'
 import { isRecord } from './normalize.ts'
 import { StreamAssembler } from './stream-assembler.ts'
@@ -54,15 +62,28 @@ function parseToolInput(argumentsText: string): unknown {
   }
 }
 
-function toAnthropicMessages(messages: ChatMessage[]): unknown[] {
-  const out: { role: 'user' | 'assistant'; content: unknown[] }[] = []
-  const push = (role: 'user' | 'assistant', parts: unknown[]): void => {
+interface EncodedMessages {
+  messages: AnthropicWireMessage[]
+  /** Cache provenance aligned with `messages`, one entry per wire message. */
+  metas: WireCacheMeta[]
+}
+
+function toAnthropicMessages(messages: ChatMessage[]): EncodedMessages {
+  const out: AnthropicWireMessage[] = []
+  const metas: WireCacheMeta[] = []
+  const push = (role: 'user' | 'assistant', parts: unknown[], meta: WireCacheMeta): void => {
     if (parts.length === 0) return
     const last = out[out.length - 1]
-    if (last && last.role === role) last.content.push(...parts)
-    else out.push({ role, content: parts })
+    if (last && last.role === role) {
+      last.content.push(...parts)
+      mergeCacheMeta(metas[metas.length - 1]!, meta)
+      return
+    }
+    out.push({ role, content: parts })
+    metas.push({ ...meta })
   }
   for (const message of messages) {
+    const meta = cacheMetaOf(message)
     if (message.role === 'user') {
       const parts: unknown[] = []
       if (message.content) parts.push({ type: 'text', text: message.content })
@@ -72,7 +93,7 @@ function toAnthropicMessages(messages: ChatMessage[]): unknown[] {
           source: { type: 'base64', media_type: image.mime, data: image.data },
         })
       }
-      push('user', parts)
+      push('user', parts, meta)
       continue
     }
     if (message.role === 'assistant') {
@@ -95,23 +116,29 @@ function toAnthropicMessages(messages: ChatMessage[]): unknown[] {
           input: parseToolInput(call.arguments),
         })
       }
-      push('assistant', parts)
+      push('assistant', parts, meta)
       continue
     }
     if (message.role === 'tool') {
-      push('user', [
-        {
-          type: 'tool_result',
-          tool_use_id: message.toolCallId ?? '',
-          content: message.content,
-        },
-      ])
+      push(
+        'user',
+        [
+          {
+            type: 'tool_result',
+            tool_use_id: message.toolCallId ?? '',
+            content: message.content,
+          },
+        ],
+        // A tool result is not a conversational user turn; when it merges
+        // into a real user message, that message keeps its own flags.
+        { perCall: false, conversationalUser: false },
+      )
     }
   }
-  return out
+  return { messages: out, metas }
 }
 
-function toTools(tools: ToolSchema[]): unknown[] | undefined {
+function toTools(tools: ToolSchema[]): Record<string, unknown>[] | undefined {
   if (tools.length === 0) return undefined
   return tools.map((tool) => ({
     name: tool.name,
@@ -159,14 +186,23 @@ export async function* streamAnthropic(request: GenerateRequest): AsyncGenerator
   const { provider, signal } = request
   const client = anthropicClient(provider)
   const maxTokens = request.maxTokens ?? provider.defaultMaxTokens ?? DEFAULT_MAX_TOKENS
+  const cacheControl = anthropicCacheControl(provider.longCache === true)
+  const { messages, metas } = toAnthropicMessages(request.messages)
+  const system = request.system && request.system.length > 0 ? request.system : undefined
+  const tools = toTools(request.tools)
+  if (tools) tools[tools.length - 1]!.cache_control = cacheControl
+  // Head anchors: the last tool keeps the tools cached even when the system
+  // text changes; the system block caches tools + system in wire order.
+  const headBreakpoints = (tools ? 1 : 0) + (system ? 1 : 0)
+  applyAnthropicMessageCaching(messages, metas, headBreakpoints, cacheControl)
+
   const body: Record<string, unknown> = {
     model: request.model,
     max_tokens: maxTokens,
-    messages: toAnthropicMessages(request.messages),
+    messages,
     stream: true,
   }
-  if (request.system) body.system = request.system
-  const tools = toTools(request.tools)
+  if (system) body.system = [{ type: 'text', text: system, cache_control: cacheControl }]
   if (tools) body.tools = tools
   if (request.temperature !== undefined) body.temperature = request.temperature
   if (request.stop && request.stop.length > 0) body.stop_sequences = request.stop

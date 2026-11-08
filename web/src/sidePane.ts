@@ -15,6 +15,8 @@
 
 /** 面板里能放的东西(标签类型的子集)。 */
 export type SidePaneTabType =
+  /** 待审批计划:只读预览。由 exit_plan 自动打开，单例。 */
+  | 'plan'
   /** 审查:Git 状态与 Diff。单例。 */
   | 'review'
   /** 终端:交互式 PTY。可多开。 */

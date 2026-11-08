@@ -40,16 +40,21 @@ import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
 import { startQueueScheduler } from './features/conversation/queueScheduler'
+import { prefetchModelMeta } from './modelMeta'
 import {
   normalizeQueueDefaultAction,
   setQueueDefaultAction,
 } from './features/conversation/queueDefaults'
+import {
+  normalizeConversationFoldMode,
+  setConversationFoldMode,
+} from './features/conversation/foldMode'
 import { useSidebarCollapse } from './hooks/useSidebarCollapse'
 import { useSplitView } from './hooks/useSplitView'
 import { registerOpenFile } from './fileOpen'
 import { registerOpenReview, type OpenReviewOptions } from './reviewOpen'
 import { setTurnChanges } from './turnChangesStore'
-import { scopeKey, upsertTab } from './sidePane'
+import { closeTab, scopeKey, upsertTab } from './sidePane'
 import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
 import { closeTerminal } from './terminalApi'
@@ -149,6 +154,7 @@ export default function App() {
   // 而用户在空白页也已经选好了工作区。
   const paneWorkspacePath = activeSessionForPane?.cwd ?? getActiveWorkspace()?.path ?? null
   const pane = useSidePaneController(activeId, paneWorkspacePath)
+  const [planReview, setPlanReview] = useState<{ title?: string; planText: string } | null>(null)
 
   /**
    * 可视化请求 → 面板动作。
@@ -383,6 +389,9 @@ export default function App() {
         else document.documentElement.dataset.theme = theme
         setLocale((console?.value.locale as string) ?? 'zh')
         setQueueDefaultAction(normalizeQueueDefaultAction(console?.value.queueDefaultAction))
+        setConversationFoldMode(
+          normalizeConversationFoldMode(console?.value.conversationFoldMode),
+        )
         bumpCatalogTick()
       })
       .catch(() => {})
@@ -466,6 +475,10 @@ export default function App() {
   // 放在 App 层而不是会话页:页面卸载不影响调度器，且全局只有一套 running
   // 订阅，不会为后台会话额外建 SSE 连接。
   useEffect(() => startQueueScheduler(), [])
+
+  // 应用启动时预取一次公开模型清单,之后自动补全只读内存、不再发请求;
+  // 界面刷新(整页重载)时本模块重新执行,自然再拉一次。
+  useEffect(() => void prefetchModelMeta(), [])
 
   /* ---- URL 会话状态 ---- */
 
@@ -803,6 +816,24 @@ export default function App() {
     else setPickerOpen(true)
   }
 
+  // 计划正文进入右侧工作台；分屏或手机放不下两列时，仍由会话页本地预览。
+  const handlePlanReviewChange = useCallback((review: { title?: string; planText: string } | null) => {
+    setPlanReview(review)
+    if (!activeId) return
+    if (review && !isMobile && !splitActive) {
+      const current = peekSidePane(activeId)
+      // 用户手动收起预览后不反复抢走视图；新的审批请求仍可重新打开。
+      if (current.tabs.some((tab) => tab.type === 'plan')) return
+      pane.openPanel('plan', { title: review.title })
+      return
+    }
+    const current = peekSidePane(activeId)
+    const planTab = current.tabs.find((tab) => tab.type === 'plan')
+    if (!planTab) return
+    updateSidePane(activeId, (value) => closeTab(value, planTab.id))
+    if (current.tabs.length === 1) setSidePaneCollapsed(activeId, true)
+  }, [activeId, isMobile, splitActive, pane.openPanel])
+
   const toggleSidePane = () => {
     // 从折叠态点开时,如果还没有任何标签,顺手开一个审查面板 ——
     // 否则用户点了按钮只看到引导页,还要再点一次才有内容。
@@ -825,6 +856,8 @@ export default function App() {
       onAddWorkspace={openDirectoryFlow}
       sidePaneOpen={!pane.collapsed}
       onToggleSidePane={isMobile ? undefined : toggleSidePane}
+      planPreviewInPane={!isMobile && !splitActive}
+      onPlanReviewChange={handlePlanReviewChange}
     />
   )
 
@@ -1172,6 +1205,7 @@ export default function App() {
                 <LazyBrowserPanel visible={visible} onClose={closeBrowserSidebar} />
               </Suspense>
             )}
+            planReview={planReview}
           />
           )}
         </div>

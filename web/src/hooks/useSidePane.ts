@@ -147,7 +147,7 @@ export function useSidePaneController(
       //   反而让人以为"新开了一个浏览器"。
       // - 工作区文件:树是相对工作区根的唯一一份,两个标签必然同内容。
       // 终端相反:每个终端是独立 PTY,必须可多开。
-      if (type === 'review' || type === 'browser' || type === 'files') {
+      if (type === 'plan' || type === 'review' || type === 'browser' || type === 'files') {
         const existing = current.tabs.find((tab) => tab.type === type)
         if (existing) {
           updateSidePane(sessionId, (value) => ({ ...value, activeTabId: existing.id }))
@@ -156,7 +156,7 @@ export function useSidePaneController(
         }
       }
       const tab: SidePaneTab = {
-        id: newId(type),
+        id: type === 'plan' ? 'plan' : newId(type),
         type,
         openedAt: Date.now(),
         ...(options.title ? { title: options.title } : {}),

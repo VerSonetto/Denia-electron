@@ -11,6 +11,9 @@ import { startHost } from '../src/host/server.ts'
 import type { Host } from '../src/host/server.ts'
 import type { Envelope } from '../src/core/wire.ts'
 import { ProfileError, ProfileStore } from '../src/subagents/profiles.ts'
+import { SubagentRuntime } from '../src/subagents/runtime.ts'
+import { SessionStore } from '../src/session/store.ts'
+import { loadConfig } from '../src/config.ts'
 import { resolveDispatch, toolCatalogRows, parentGrant } from '../src/subagents/resolver.ts'
 import type { SubagentProfile } from '../src/subagents/types.ts'
 import { startMockGateway, lastToolContents, lastUserText, writeConfig } from './helpers/mock-gateway.ts'
@@ -216,6 +219,21 @@ test('dispatch resolution: tools, ceiling, hard denials and fork model rules', (
   })
   assert.equal(inline.inline, true)
   assert.deepEqual(inline.tools, [])
+  const narrowedParent = { ...parent, presetTools: ['read_file'] }
+  assert.deepEqual(parentGrant(registered, narrowedParent.presetTools, parent.mode), ['read_file'])
+  const inlineNarrowed = resolveDispatch({
+    args: {
+      prompt: '受限',
+      inline: {
+        name: 'reader', description: 'reader', instructions: '',
+        tools: { mode: 'inherit' }, model: { mode: 'inherit' }, permissionCeiling: 'inherit',
+      },
+    },
+    fork: false,
+    parent: narrowedParent,
+    defaulted: false,
+  })
+  assert.deepEqual(inlineNarrowed.tools, ['read_file'])
 
   assert.throws(
     () =>
@@ -355,6 +373,131 @@ test('profile API and preview expose the catalog and final tool set', async () =
   } finally {
     await host.close()
     await mock.close()
+  }
+})
+
+test('saved explicit models survive reload and remain frozen for the actual child dispatch', async () => {
+  const home = tempDir('denia-subagent-model-home-')
+  const cwd = tempDir('denia-subagent-model-cwd-')
+  const mock = await startMockGateway((request) => {
+    const user = lastUserText(request)
+    if (user.includes('model task')) return { text: 'model child done' }
+    if (user.includes('[子代理执行结束]')) return { text: 'noted' }
+    if (user.includes('use model')) {
+      if (lastToolContents(request).some((text) => text.includes('"childId"'))) return { text: 'parent done' }
+      return { calls: [{ name: 'spawn_agent', arguments: { prompt: 'model task', profile_id: 'user:custom-model' } }] }
+    }
+    return { text: 'idle' }
+  })
+  writeConfig(home, mock.baseURL)
+  const host = await startHost({ home, webDir: tempDir('denia-subagent-model-web-'), port: 0 })
+  try {
+    const parentId = await createSession(host, cwd)
+    const profile: SubagentProfile = {
+      schemaVersion: 1,
+      id: 'custom-model',
+      name: '指定模型',
+      description: '验证保存与派遣使用同一模型',
+      instructions: '报告结果。',
+      enabled: true,
+      tools: { mode: 'allowlist', names: [] },
+      model: { mode: 'explicit', selection: { provider: 'mock', model: 'mock-1', reasoningEffort: 'high' } },
+      permissionCeiling: 'inherit',
+    }
+    const created = await fetch(`${host.baseUrl}/api/subagent-profiles`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scope: 'user', cwd, profile }),
+    })
+    assert.equal(created.status, 201)
+    if (profile.model.mode !== 'explicit') throw new Error('expected an explicit model selection')
+    const reloaded = new ProfileStore(home).resolve(null, 'user:custom-model')
+    assert.deepEqual(reloaded.profile.model, profile.model)
+    await prompt(host, parentId, 'use model')
+    const child = await waitFor(async () => {
+      const current = await summaries(host)
+      return current.sessions.find((entry) => entry.parent_session === parentId) ?? null
+    })
+    const descriptor = (await snapshot(host, child.id as string)).header.subagent
+    assert.deepEqual(descriptor?.selection, profile.model.selection)
+    await waitFor(async () => (host.driver.isRunning(parentId) ? null : true))
+    const toolResult = (await snapshot(host, parentId)).events.find(
+      (event) => event.type === 'tool-result' && event.content.includes('"childId"'),
+    )
+    assert.ok(toolResult && toolResult.type === 'tool-result')
+    assert.ok(!toolResult.content.includes('modelFallback'))
+  } finally {
+    await host.close()
+    await mock.close()
+  }
+})
+
+test('runtime falls back to the parent model and persists the disclosed fallback', async () => {
+  const home = tempDir('denia-subagent-fallback-home-')
+  const cwd = tempDir('denia-subagent-fallback-cwd-')
+  fs.mkdirSync(path.join(cwd, '.git'), { recursive: true })
+  const mock = await startMockGateway(() => ({ text: 'done' }))
+  writeConfig(home, mock.baseURL)
+  const profiles = new ProfileStore(home)
+  profiles.create('user', null, {
+    schemaVersion: 1, id: 'stale-model', name: '失效模型', description: '不可用模型回退',
+    instructions: '', enabled: true, tools: { mode: 'allowlist', names: [] },
+    model: { mode: 'explicit', selection: { provider: 'missing', model: 'gone' } },
+    permissionCeiling: 'inherit',
+  }, '')
+  const store = new SessionStore(home)
+  const parent = store.create(cwd, { sandbox: false })
+  const runtime = new SubagentRuntime(store, profiles, {
+    startTurn: async () => {}, cancel: () => false, isRunning: () => false,
+    append: (id, event) => store.append(id, event),
+    permissionStateOf: () => ({ sandbox: 'danger-full-access', approval: 'never', reviewer: 'user', collaboration: 'default' }),
+  }, { config: () => loadConfig(home) })
+  try {
+    const result = await runtime.spawn(parent.id, { prompt: 'fallback', profile_id: 'user:stale-model' },
+      { cwd, selection: { provider: 'mock', model: 'mock-1' } }, false)
+    assert.equal(typeof result.modelFallback, 'string')
+    assert.deepEqual((result.profile as { model: unknown }).model, { provider: 'mock', model: 'mock-1' })
+    assert.deepEqual(store.header(result.childId as string)?.subagent?.selection, { provider: 'mock', model: 'mock-1' })
+  } finally {
+    for (const child of store.list()) {
+      if (child.parent_session === parent.id) store.delete(child.id)
+    }
+    store.delete(parent.id)
+    await mock.close()
+  }
+})
+
+test('parent presets narrow dispatch and child persona stays frozen', async () => {
+  const home = tempDir('denia-subagent-preset-home-')
+  const cwd = tempDir('denia-subagent-preset-cwd-')
+  fs.mkdirSync(path.join(cwd, '.git'), { recursive: true })
+  fs.mkdirSync(path.join(home, 'agent-presets', 'reader'), { recursive: true })
+  fs.writeFileSync(path.join(home, 'agent-presets', 'reader', 'preset.yml'), 'name: Reader\npersona: |\n  Parent role.\ntools:\n  - read_file\n  - spawn_agent\nfeatures:\n  skills: false\n')
+  const store = new SessionStore(home)
+  const parent = store.create(cwd, { sandbox: false })
+  store.append(parent.id, { type: 'agent-preset', preset: 'reader' })
+
+  let childId: string | null = null
+  const runtime = new SubagentRuntime(store, new ProfileStore(home), {
+    startTurn: async () => {}, cancel: () => false, isRunning: () => false,
+    append: (id, event) => store.append(id, event),
+    permissionStateOf: () => ({ sandbox: 'danger-full-access', approval: 'never', reviewer: 'user', collaboration: 'default' }),
+  })
+  runtime.setToolNames(() => ['read_file', 'write_file', 'skill', 'spawn_agent', 'send_message'])
+  try {
+    const result = await runtime.spawn(parent.id, {
+      prompt: 'read only', inline: {
+        name: 'reader', description: 'reader', instructions: '', tools: { mode: 'inherit' },
+        model: { mode: 'inherit' }, permissionCeiling: 'inherit',
+      },
+    }, { cwd, selection: { provider: 'mock', model: 'mock-1' } }, false)
+    childId = result.childId as string
+    const descriptor = store.header(childId)?.subagent
+    assert.deepEqual(descriptor?.effectiveTools, ['read_file'])
+    assert.equal(descriptor?.parentPresetPersona, 'Parent role.')
+    assert.deepEqual(runtime.toolSchemas(parent.id).map((schema) => schema.name), ['spawn_agent'])
+  } finally {
+    if (childId) store.delete(childId)
+    store.delete(parent.id)
   }
 })
 

@@ -26,6 +26,7 @@ export interface PanelDescriptor {
   type: SidePaneTabType
   /** i18n 键;标签栏与菜单共用同一份文案。 */
   labelKey:
+    | 'planReviewTitle'
     | 'sidePaneReview'
     | 'sidePaneTerminal'
     | 'sidePaneBrowser'
@@ -33,6 +34,7 @@ export interface PanelDescriptor {
     | 'sidePaneFile'
   /** 空态卡片上的一句话说明。 */
   descriptionKey:
+    | 'planReviewTitle'
     | 'sidePaneReviewDesc'
     | 'sidePaneTerminalDesc'
     | 'sidePaneBrowserDesc'
@@ -45,6 +47,13 @@ export interface PanelDescriptor {
 }
 
 export const PANELS: PanelDescriptor[] = [
+  {
+    type: 'plan',
+    labelKey: 'planReviewTitle',
+    descriptionKey: 'planReviewTitle',
+    available: () => false,
+    singleton: true,
+  },
   {
     type: 'file',
     labelKey: 'sidePaneFile',

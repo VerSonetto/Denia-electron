@@ -1,8 +1,7 @@
 // History derivation: session events → model-facing messages.
 //
 // Only settled message events participate. Streaming chunks, transient
-// tool-output increments and UI state events stay out of the model surface,
-// exactly like the Rust `derive_surface`.
+// tool-output increments and UI state events stay out of the model surface.
 
 import type { ChatMessage, ContentBlock, Envelope } from '../core/wire.ts'
 
@@ -35,7 +34,24 @@ function toolCallsOf(blocks: ContentBlock[]) {
     .map((block) => ({ id: block.id, name: block.name, arguments: block.arguments }))
 }
 
-export function deriveHistory(events: Envelope[]): ChatMessage[] {
+/**
+ * One model-facing message plus the log provenance it came from.
+ *
+ * `seq` is the event seq that owns the message in the log; a tool-result with
+ * `replaces` rewrites the item found by that seq instead of appending, which
+ * is how microcompaction shrinks the surface while the log stays append-only.
+ * `channel` is the injection channel of a user message (null for ordinary
+ * messages and for everything that is not a user message); `isError` mirrors
+ * the tool-result flag.
+ */
+export interface SurfaceItem {
+  seq: number
+  message: ChatMessage
+  isError: boolean
+  channel: string | null
+}
+
+export function deriveSurface(events: readonly Envelope[]): SurfaceItem[] {
   type Compaction = {
     from: number
     to: number
@@ -76,28 +92,48 @@ export function deriveHistory(events: Envelope[]): ChatMessage[] {
   const lastBaseline = new Map<string, number>()
   for (const event of events) {
     if (event.type !== 'user-message' || skipped(event.seq)) continue
-    const channel = baselineChannelOf(event)
-    if (channel) lastBaseline.set(channel, event.seq)
+    const channel = injectionChannelOf(event)
+    if (channel !== null && BASELINE_CHANNELS.has(channel)) lastBaseline.set(channel, event.seq)
   }
-  const messages: ChatMessage[] = []
+  const surface: SurfaceItem[] = []
   for (const event of events) {
     const summary = summaryBefore(event.seq)
-    if (summary !== null) messages.push({ role: 'user', content: summary })
+    if (summary !== null) {
+      // The summary occupies the log position just before the kept window, so
+      // later rewrites can still locate it by seq.
+      surface.push({
+        seq: Math.max(0, event.seq - 1),
+        message: { role: 'user', content: summary },
+        isError: false,
+        channel: null,
+      })
+    }
     if (skipped(event.seq)) continue
     switch (event.type) {
       case 'agent-delivery': {
         // Delivery is the model-visible half of the agent inbox; the inbox
         // event itself stays out of the model surface.
-        messages.push({ role: 'user', content: event.text })
+        surface.push({
+          seq: event.seq,
+          message: { role: 'user', content: event.text },
+          isError: false,
+          channel: null,
+        })
         break
       }
       case 'user-message': {
-        const channel = baselineChannelOf(event)
-        if (channel && lastBaseline.get(channel) !== event.seq) break
-        messages.push({
-          role: 'user',
-          content: event.text,
-          ...(event.images && event.images.length > 0 ? { images: event.images } : {}),
+        const channel = injectionChannelOf(event)
+        const baseline = channel !== null && BASELINE_CHANNELS.has(channel) ? channel : null
+        if (baseline !== null && lastBaseline.get(baseline) !== event.seq) break
+        surface.push({
+          seq: event.seq,
+          message: {
+            role: 'user',
+            content: event.text,
+            ...(event.images && event.images.length > 0 ? { images: event.images } : {}),
+          },
+          isError: false,
+          channel,
         })
         break
       }
@@ -105,20 +141,46 @@ export function deriveHistory(events: Envelope[]): ChatMessage[] {
         const calls = toolCallsOf(event.blocks)
         const reasoning = reasoningOf(event.blocks)
         const replay = reasoningReplayOf(event.blocks)
-        messages.push({
-          role: 'assistant',
-          content: textOf(event.blocks),
-          ...(reasoning ? { reasoningContent: reasoning } : {}),
-          ...(replay.length > 0 ? { reasoningReplay: replay } : {}),
-          ...(calls.length > 0 ? { toolCalls: calls } : {}),
+        surface.push({
+          seq: event.seq,
+          message: {
+            role: 'assistant',
+            content: textOf(event.blocks),
+            ...(reasoning ? { reasoningContent: reasoning } : {}),
+            ...(replay.length > 0 ? { reasoningReplay: replay } : {}),
+            ...(calls.length > 0 ? { toolCalls: calls } : {}),
+          },
+          isError: false,
+          channel: null,
         })
         break
       }
       case 'tool-result': {
-        messages.push({
-          role: 'tool',
-          content: event.content,
-          toolCallId: event.call_id,
+        // A replacement keeps the original item (and its seq) and only swaps
+        // the content: the model sees the cleared text where the result used
+        // to be, in the same position, so no orphan tool message is created.
+        const replaced =
+          event.replaces === undefined
+            ? undefined
+            : surface.find((item) => item.seq === event.replaces)
+        if (replaced !== undefined) {
+          replaced.message = {
+            role: 'tool',
+            content: event.content,
+            toolCallId: event.call_id,
+          }
+          replaced.isError = event.is_error
+          break
+        }
+        surface.push({
+          seq: event.seq,
+          message: {
+            role: 'tool',
+            content: event.content,
+            toolCallId: event.call_id,
+          },
+          isError: event.is_error,
+          channel: null,
         })
         break
       }
@@ -126,16 +188,22 @@ export function deriveHistory(events: Envelope[]): ChatMessage[] {
         break
     }
   }
-  return messages
+  return surface
 }
 
-/** Baseline channels: only the newest occurrence is model-visible. */
-function baselineChannelOf(
-  event: Extract<Envelope, { type: 'user-message' }>,
-): string | null {
-  if (event.channel) {
-    return BASELINE_CHANNELS.has(event.channel) ? event.channel : null
-  }
+export function deriveHistory(events: readonly Envelope[]): ChatMessage[] {
+  return deriveSurface(events).map((item) => item.message)
+}
+
+/**
+ * Source channel of an injected user message (null for ordinary messages).
+ *
+ * The channel field wins; old logs without one fall back to the injection
+ * prefixes. Only [`BASELINE_CHANNELS`] fold by "newest wins"; a channel in
+ * this field is provenance, not a folding decision.
+ */
+function injectionChannelOf(event: Extract<Envelope, { type: 'user-message' }>): string | null {
+  if (event.channel) return event.channel
   if (!event.injected) return null
   if (event.text.startsWith('<system-reminder>\n工作区指令:')) return 'workspace-instructions'
   if (event.text.startsWith('<system-reminder>\n技能目录:')) return 'skill-catalog'
@@ -147,6 +215,8 @@ function baselineChannelOf(
   }
   return null
 }
+
+/** Baseline channels: only the newest occurrence is model-visible. */
 
 const BASELINE_CHANNELS = new Set([
   'workspace-instructions',

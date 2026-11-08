@@ -21,6 +21,8 @@ import type { ApprovalAnswer } from '../agent/gate.ts'
 import { createModelReviewer } from '../agent/reviewer.ts'
 import type { Reviewer } from '../agent/reviewer.ts'
 import { buildSystemPrompt } from '../agent/system-prompt.ts'
+import { allPresetFeatures, presetForSession, presetRows, presetSettings } from '../agent/presets.ts'
+import type { AgentPresetRow } from '../agent/presets.ts'
 import { scheduleSessionTitle } from '../agent/session-title.ts'
 import { compactSession, estimateTokens } from '../agent/compact.ts'
 import type { AppConfig } from '../config.ts'
@@ -45,6 +47,8 @@ import type { Envelope, ImageData, ModelSelection, SessionEvent, ToolCallRef } f
 import { errorMessage, isRecord } from '../core/util.ts'
 import { SessionStore } from '../session/store.ts'
 import { FileHistoryStore } from '../session/file-history.ts'
+import { GoalStore } from '../goal/store.ts'
+import { GoalCommandError, GoalRuntime } from '../goal/runtime.ts'
 import { ToolRegistry } from '../tools/index.ts'
 import { ServerApprovalBridge } from './approval-bridge.ts'
 import { HostServices } from './services.ts'
@@ -362,6 +366,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     maxConcurrentRuns: subagentPolicyConcurrency(home),
     childCreated: attachToParentWorkspaces,
     childRemoved: detachFromWorkspaces,
+    definitionsChanged: () => broadcast({ type: 'subagents-updated' }),
+    config: () => config,
   })
   const jobs = new JobManager({
     onDone: (job) => {
@@ -390,15 +396,33 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   // A settled child must not leave background processes behind: they belong to
   // the child's lifetime, and the notice lists what was cancelled.
   subagents.setJobCleaner((sessionId) => jobs.removeOwner(sessionId))
-  driver.attachServices(new HostServices({
+  const goalStore = new GoalStore(home)
+  const goalRuntime = new GoalRuntime({
+    goalStore,
+    config: () => config,
+    isRunning: (sessionId) => driver.isRunning(sessionId),
+    startTurn: (sessionId, prompt, options) => {
+      void driver.startTurn(sessionId, prompt, options)
+    },
+    cancel: (sessionId) => driver.cancel(sessionId),
+    selectionOf: (sessionId) => driver.selectionOf(sessionId),
+    verify: (input) => driver.runGoalVerification(input),
+    planEnabled: (sessionId) => driver.permissionStateOf(sessionId).collaboration === 'plan',
+    append: (sessionId, event) => store.append(sessionId, event),
+  })
+  let instanceBase = ''
+  const hostServices = new HostServices({
     mcp,
     subagents,
     jobs,
     home,
     store,
     fileHistory,
+    goal: goalRuntime,
     permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
-  }))
+    apiBase: () => instanceBase,
+  })
+  driver.attachServices(hostServices)
 
   // Startup recovery: results enqueued before the host stopped are still in the
   // session log; replay recent child completions and wake their sessions.
@@ -470,7 +494,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         }
         const preset = typeof body.agentPreset === 'string' && body.agentPreset.trim()
           ? body.agentPreset.trim()
-          : 'standard'
+          : presetSettings(home).default
         const header = store.create(cwd, { sandbox: true })
         const initial = stateFromLegacy(defaultPermissionMode)
         store.append(header.id, { type: 'permission-mode', mode: defaultPermissionMode })
@@ -534,6 +558,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         }
         subagents.removeOwner(sessionId)
         jobs.removeOwner(sessionId)
+        goalStore.remove(sessionId)
+        driver.forgetCacheWarm(sessionId)
         store.flush(sessionId)
         store.delete(sessionId)
         fileHistory.forget(sessionId)
@@ -617,6 +643,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest === '/cancel' && method === 'POST') {
+        goalRuntime.pause(sessionId)
         driver.cancel(sessionId)
         json(res, 200, { ok: true })
         return
@@ -703,12 +730,58 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         return
       }
       if (rest === '/goal' && method === 'GET') {
-        json(res, 200, {
-          goal: null,
-          tokensUsed: 0,
-          maxRounds: 0,
-          maxGoalTokenBudget: 0,
-        })
+        json(res, 200, goalRuntime.view(sessionId))
+        return
+      }
+      if (rest === '/goal' && method === 'POST') {
+        const body = await readJson(req)
+        const action = typeof body.action === 'string' ? body.action : 'set'
+        const objective = typeof body.objective === 'string' ? body.objective : ''
+        const rawBudget = body.tokenBudget
+        const tokenBudget =
+          typeof rawBudget === 'number'
+            ? rawBudget
+            : rawBudget === null
+              ? null
+              : undefined
+        const selection: ModelSelection | undefined =
+          typeof body.provider === 'string' && typeof body.model === 'string'
+            ? {
+                provider: body.provider,
+                model: body.model,
+                ...(typeof body.reasoningEffort === 'string'
+                  ? { reasoningEffort: body.reasoningEffort }
+                  : {}),
+              }
+            : undefined
+        if (typeof body.echoText === 'string' && body.echoText.trim() !== '') {
+          store.append(sessionId, { type: 'command-run', name: 'goal', text: body.echoText })
+        }
+        try {
+          if (action === 'pause') {
+            goalRuntime.pause(sessionId)
+          } else if (action === 'clear') {
+            goalRuntime.clear(sessionId)
+          } else if (action === 'resume') {
+            goalRuntime.resume(sessionId, selection)
+          } else if (action === 'set' || action === 'edit') {
+            if (driver.isRunning(sessionId)) {
+              apiError(res, 409, 'session/running', '上一轮还在运行，请先等待或暂停目标')
+              return
+            }
+            goalRuntime.set(sessionId, objective, tokenBudget, selection)
+          } else {
+            apiError(res, 400, 'goal/bad-action', `未知的目标操作: ${action}`)
+            return
+          }
+        } catch (error) {
+          if (error instanceof GoalCommandError) {
+            apiError(res, error.status, error.code, error.message)
+            return
+          }
+          throw error
+        }
+        json(res, 200, goalRuntime.view(sessionId))
         return
       }
       if (rest === '/compact' && method === 'POST') {
@@ -717,6 +790,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           return
         }
         json(res, 202, { accepted: true, id: sessionId })
+        driver.cancelCacheWarm(sessionId)
         void compactSession({
           store,
           config,
@@ -736,6 +810,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           sandbox: store.header(sessionId)?.sandbox ?? false,
           tools,
           permission,
+          persona: hostServices.persona(),
         })
         const messageChars = events.reduce((sum, event) => {
           if (event.type === 'user-message') return sum + event.text.length
@@ -871,6 +946,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         // The removed branch may have left paused flags or auto-wake budgets;
         // both point at events that no longer exist on the new branch.
         subagents.onSessionRewound(sessionId)
+        driver.forgetCacheWarm(sessionId)
         broadcast({ type: 'sessions-updated' })
         json(res, 200, {
           ok: true,
@@ -1092,8 +1168,16 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     if (settingsMatch && (method === 'PATCH' || method === 'PUT')) {
       const ns = safeDecode(settingsMatch[1]!)
       const body = await readJson(req)
+      if (ns === 'subagent-policy') {
+        const value = body.value
+        if (!isRecord(value) || !Number.isInteger(value.maxConcurrentRuns) || (value.maxConcurrentRuns as number) < 1 || (value.maxConcurrentRuns as number) > 64) {
+          apiError(res, 400, 'subagent-policy/invalid', 'maxConcurrentRuns 必须是 1–64 的整数')
+          return
+        }
+      }
       saveSettingsNamespace(home, ns, body.value)
       config = loadConfig(home)
+      if (ns === 'subagent-policy') subagents.setConcurrencyLimit(subagentPolicyConcurrency(home))
       if (ns === 'mcp') {
         mcpSettings = loadMcpSettings(home)
         mcpReady = mcp.reload(mcpSettings.servers)
@@ -1110,6 +1194,18 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         .map((ref) => ref.trim())
         .filter(Boolean)
       json(res, 200, { credentials: credentialInfo(home, refs) })
+      return
+    }
+    // 本机桌面应用:凭据存在本机明文 YAML,读取回显供设置界面查看/编辑。
+    const credentialValueMatch = /^\/api\/credentials\/(.+)\/value$/.exec(pathname)
+    if (credentialValueMatch && method === 'GET') {
+      const ref = safeDecode(credentialValueMatch[1]!)
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref)) {
+        apiError(res, 400, 'credential/invalid', '凭据引用名非法')
+        return
+      }
+      const value = process.env[ref]?.trim() || loadCredentialRefs(home)[ref]?.trim() || ''
+      json(res, 200, { value })
       return
     }
     if (pathname.startsWith('/api/credentials/') && (method === 'PUT' || method === 'DELETE')) {
@@ -1136,18 +1232,17 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     // —— agent presets ——
     if (pathname === '/api/agent-presets' && method === 'GET') {
       json(res, 200, {
-        default: 'standard',
-        modeSelection: true,
+        ...presetSettings(home),
         root: path.join(home, 'agent-presets'),
-        tools: registry.names().sort(),
-        presets: builtinPresetRows(),
+        tools: describedToolNames(),
+        presets: presetRows(home),
       })
       return
     }
     const presetMatch = /^\/api\/agent-presets\/([^/]+)$/.exec(pathname)
     if (presetMatch && method === 'GET') {
       const id = safeDecode(presetMatch[1]!)
-      const preset = builtinPresetRows().find((entry) => entry.id === id)
+      const preset = presetRows(home).find((entry) => entry.id === id)
       if (!preset) {
         apiError(res, 404, 'preset/not-found', 'preset not found')
         return
@@ -1215,18 +1310,27 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     }
 
     // —— system prompt / rules ——
-    if (pathname === '/api/system-prompt' && method === 'GET') {
-      json(res, 200, {
-        text: buildSystemPrompt({
-          cwd: process.cwd(),
-          sandbox: true,
-          tools: registry.schemas(),
-          permission: stateFromLegacy(defaultPermissionMode),
-        }),
-        source: 'default',
-        path: '',
-      })
-      return
+    if (pathname === '/api/system-prompt') {
+      if (method === 'GET') {
+        json(res, 200, hostServices.systemPromptView())
+        return
+      }
+      if (method === 'PUT') {
+        const body = await readJson(req)
+        const text = typeof body.text === 'string' ? body.text : ''
+        if (Buffer.byteLength(text, 'utf8') > 1_048_576) {
+          apiError(res, 413, 'system-prompt/too-large', '系统提示词超过 1 MiB 上限')
+          return
+        }
+        hostServices.saveSystemPrompt(text)
+        json(res, 200, hostServices.systemPromptView())
+        return
+      }
+      if (method === 'DELETE') {
+        hostServices.resetSystemPrompt()
+        json(res, 200, hostServices.systemPromptView())
+        return
+      }
     }
     if (pathname === '/api/global-rules') {
       const file = path.join(home, 'AGENTS.md')
@@ -1674,7 +1778,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
             apiError(res, 404, 'subagent/profile-not-found', `未知的会话:${sessionId}`)
             return
           }
-          grant = parentGrant(registered, undefined, modeOfPermission(driver.permissionStateOf(sessionId)))
+          const preset = presetForSession(home, header, store.read(sessionId)?.events ?? [])
+          grant = parentGrant(registered, preset.tools, modeOfPermission(driver.permissionStateOf(sessionId)), preset.features)
         } else if (url.searchParams.get('cwd')) {
           scopeRoot(null, url.searchParams.get('cwd'))
         }
@@ -1962,6 +2067,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   })
   const address = server.address()
   const actualPort = typeof address === 'object' && address !== null ? address.port : port
+  instanceBase = `http://${host}:${actualPort}`
 
   return {
     server,
@@ -1976,6 +2082,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       sseClients.clear()
       subagents.close()
       await mcp.shutdownAll()
+      driver.dispose()
       for (const id of store.list().map((summary) => summary.id)) {
         store.flush(id)
       }
@@ -2145,50 +2252,32 @@ function consolePermissionMode(home: string): 'read-only' | 'auto-edit' | 'full'
 }
 
 function allFeatures(enabled: boolean) {
-  return {
-    agentsMd: enabled,
-    memory: enabled,
-    compaction: enabled,
-    goal: enabled,
-    taskLedger: enabled,
-    skills: enabled,
-    subagents: enabled,
-    jobs: enabled,
-    browser: enabled,
-    ask: enabled,
-    planMode: enabled,
-  }
+  return allPresetFeatures(enabled)
 }
 
 /** Shipped presets, mirroring `denia_core::preset::builtin_presets`. */
-function builtinPresetRows() {
+function builtinPresetRows(): AgentPresetRow[] {
   return [
     {
       id: 'standard',
-      trust: 'shipped' as const,
       name: '标准模式',
       description: '功能完整的编码 Agent:文件读写、Shell、检索、计划、目标、子代理与后台任务。',
       hasPersona: false,
-      writable: false,
       features: allFeatures(true),
     },
     {
       id: 'creator',
-      trust: 'shipped' as const,
       name: '创造模式',
       description: '让 Agent 帮你创建新预设:通过提问收集 persona、工具面与功能开关,直接落盘可用的 preset.yml。',
       hasPersona: true,
-      writable: false,
       features: allFeatures(true),
     },
     {
       id: 'minimal',
-      trust: 'shipped' as const,
       name: '极简模式',
       description: '只有持久 shell 的极简 Agent:系统提示一句话,无检索、记忆、计划与委派。',
       tools: ['bash'],
       hasPersona: true,
-      writable: false,
       features: allFeatures(false),
     },
   ]

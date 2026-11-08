@@ -50,6 +50,7 @@ import {
 import { availablePanels } from '../panelRegistry'
 import { SidePaneTabs, TabIcon, tabTypeLabel } from './SidePaneTabs'
 import { IconChevronDown, IconPlus } from './icons'
+import { PlanPreviewPanel } from './PlanPreviewPanel'
 import './SidePane.css'
 
 export interface SidePaneProps {
@@ -79,6 +80,8 @@ export interface SidePaneProps {
   renderTerminals?(tabs: SidePaneTab[], activeId: string, paneVisible: boolean): React.ReactNode
   /** 浏览器 tab 的渲染。 */
   renderBrowser?(tab: SidePaneTab, visible: boolean): React.ReactNode
+  /** 当前会话待审批的计划；只读预览，不承载审批操作。 */
+  planReview?: { title?: string; planText: string } | null
   /** 打开某个类型的面板(创建 tab + 展开)。 */
   onOpenPanel(type: SidePaneTabType): void
   /** 把文件打开到「文件读取」标签页(由 App 的 pane.openFile 透传)。 */
@@ -103,6 +106,7 @@ export function SidePane({
   onForgetClosed,
   renderTerminals,
   renderBrowser,
+  planReview,
   onOpenPanel,
   onOpenFile,
   onActivateFile,
@@ -466,6 +470,12 @@ export function SidePane({
                       data-visible={visible ? 'true' : undefined}
                       aria-hidden={visible ? undefined : true}
                     >
+                      {tab.type === 'plan' &&
+                        (planReview ? (
+                          <PlanPreviewPanel title={planReview.title} planText={planReview.planText} />
+                        ) : (
+                          <div className="pane-placeholder">{t('planReviewParseFailed')}</div>
+                        ))}
                       {tab.type === 'review' &&
                         (workspacePath ? (
                           <ReviewSlot

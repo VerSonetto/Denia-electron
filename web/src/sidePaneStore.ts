@@ -132,6 +132,7 @@ function isValidOpenedFile(value: unknown): value is OpenedFile {
 
 function isTabType(value: unknown): value is SidePaneTabType {
   return (
+    value === 'plan' ||
     value === 'review' ||
     value === 'terminal' ||
     value === 'browser' ||

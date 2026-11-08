@@ -14,6 +14,10 @@ await build({ stdin: { contents: `
 export { Transcript } from './components/transcript'
 export { ViewportRow } from './components/ViewportRow'
 export { foldEvents, applyEnvelope } from './fold'
+export {
+  normalizeConversationFoldMode,
+  setConversationFoldMode,
+} from './features/conversation/foldMode'
 `, resolveDir: join(webRoot, 'src'), loader: 'tsx' }, outfile: output,
   bundle: true, format: 'esm', platform: 'node', jsx: 'automatic', loader: { '.css': 'empty' },
   external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'], logLevel: 'silent' })
@@ -56,13 +60,18 @@ class MockResizeObserver {
 }
 globalThis.IntersectionObserver = MockIntersectionObserver
 globalThis.ResizeObserver = MockResizeObserver
-const { Transcript, ViewportRow, foldEvents, applyEnvelope } = await import(pathToFileURL(output).href)
+const {
+  Transcript, ViewportRow, foldEvents, applyEnvelope,
+  normalizeConversationFoldMode, setConversationFoldMode,
+} = await import(pathToFileURL(output).href)
 const container = document.getElementById('root')
 const root = createRoot(container)
+// 既有行级断言针对详细模式；三种模式的差异在末尾单独覆盖。
+await act(async () => setConversationFoldMode('detailed'))
 const element = React.createElement
 const marker = { kind: 'turn-start', turn: 1, time: Date.now() }
 const end = { kind: 'turn-end', turn: 1, time: marker.time + 1000, reason: { kind: 'completed' } }
-const tool = callId => ({ kind: 'tool', callId, name: 'grep', args: JSON.stringify({ pattern: callId }),
+const tool = (callId, name = 'grep') => ({ kind: 'tool', callId, name, args: JSON.stringify({ pattern: callId }),
   result: { content: 'ok', isError: false } })
 const assistant = (step, blocks = [], extra = {}) => ({ kind: 'assistant', turn: 1, step,
   streaming: false, interrupted: false, blocks, ...extra })
@@ -144,8 +153,8 @@ await check('eager rendering counts visible rows rather than hidden assistant no
   assert.equal(container.querySelectorAll('.tool-row').length, 2)
 })
 await check('row insertion, removal and streaming settle preserve existing row identity', async () => {
-  const first = tool('first')
-  const last = tool('last')
+  const first = tool('first', 'write_file')
+  const last = tool('last', 'edit')
   await render([marker, first, last])
   const lastRow = rows()[1]
   await act(async () => lastRow.querySelector('button').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
@@ -175,9 +184,11 @@ await check('closing a turn does not transfer row state to later turns', async (
   assert.ok(nextRow.querySelector('.disc-body'))
   const overview = container.querySelector('.process-group')
   assert.ok(overview)
+  // 没有可见回答的收尾轮次默认展开，避免只剩一行“已工作”。
+  assert.equal(overview.querySelectorAll('.tool-row').length, 1)
   await act(async () => overview.querySelector('button').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
   assert.equal(overview.querySelector('.msg-assistant'), null)
-  assert.equal(overview.querySelectorAll('.tool-row').length, 1)
+  assert.equal(overview.querySelectorAll('.tool-row').length, 0)
 })
 await check('measured zero height replaces the initial placeholder estimate', async () => {
   measuredHeight = 0
@@ -220,6 +231,202 @@ await check('unmeasured rows retain an estimate and measured rows preserve their
   assert.equal(row.style.height, '180px')
   await act(async () => intersectionObservers.at(-1).emit(new Set([row])))
   assert.match(row.textContent, /content/)
+})
+
+await check('adjacent same-family tool calls fold into one summary row', async () => {
+  await act(async () => setConversationFoldMode('tool-group'))
+  await render([
+    marker,
+    tool('read-1', 'read_file'),
+    tool('list-1', 'ls'),
+    tool('bash-1', 'bash'),
+    tool('bash-2', 'bash'),
+    tool('edit-1', 'edit'),
+  ])
+  const groups = [...container.querySelectorAll('.tool-group')]
+  assert.equal(groups.length, 2)
+  assert.match(groups[0].querySelector('.disc-head').textContent, /查阅.*1 个文件.*1 个列表/)
+  assert.match(groups[1].querySelector('.disc-head').textContent, /终端.*2 条命令/)
+  assert.equal(container.querySelectorAll('.disc-body').length, 0)
+  await act(async () => groups[1].querySelector('.disc-head').dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true })))
+  assert.equal(groups[1].querySelectorAll('.disc-body .tool-row').length, 2)
+  // 单项不额外套一层组。
+  await render([marker, tool('single', 'read_file')])
+  assert.equal(container.querySelector('.tool-group'), null)
+  assert.equal(container.querySelectorAll('.tool-row').length, 1)
+  // 中间夹思考或正文必须断开，不能跨过它们合并。
+  await render([
+    marker,
+    tool('read-a', 'read_file'),
+    assistant(1, [{ kind: 'reasoning', text: 'between tools' }]),
+    tool('read-b', 'ls'),
+  ])
+  assert.equal(container.querySelector('.tool-group'), null)
+  // 详细模式运行中不聚合。
+  await act(async () => setConversationFoldMode('detailed'))
+  await render([marker, tool('read-c', 'read_file'), tool('read-d', 'ls')])
+  assert.equal(container.querySelector('.tool-group'), null)
+  assert.equal(container.querySelectorAll('.tool-row').length, 2)
+})
+
+await check('finished reasoning shows elapsed time instead of its text summary', async () => {
+  const t0 = marker.time
+  const nodes = foldEvents([
+    { seq: 90, time: t0, type: 'turn-start', turn: 9 },
+    { seq: 91, time: t0 + 1, type: 'step-start', turn: 9, step: 1 },
+    { seq: 92, time: t0 + 10, type: 'assistant-chunk', turn: 9, step: 1,
+      chunk: { type: 'block-start', index: 0, block_type: 'reasoning' } },
+    { seq: 93, time: t0 + 20, type: 'assistant-chunk', turn: 9, step: 1,
+      chunk: { type: 'reasoning-delta', index: 0, text: 'private reasoning text' } },
+    { seq: 94, time: t0 + 510, type: 'assistant-chunk', turn: 9, step: 1,
+      chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'private reasoning text' } } },
+    { seq: 95, time: t0 + 600, type: 'assistant-message', turn: 9, step: 1,
+      blocks: [{ type: 'reasoning', text: 'private reasoning text' }] },
+  ])
+  assert.equal(nodes.find(node => node.kind === 'assistant')?.blocks[0]?.durationMs, 500)
+  await act(async () => setConversationFoldMode('tool-group'))
+  await render(nodes)
+  const think = container.querySelector('.disc-row:not(.tool-row)')
+  assert.ok(think)
+  assert.equal(think.querySelector('.think-content'), null)
+  assert.match(think.querySelector('.disc-head').textContent, /思考.*持续了 1 秒/)
+  assert.doesNotMatch(think.textContent, /private reasoning text/)
+})
+
+await check('finished process label uses the turn duration only', async () => {
+  await render([
+    marker,
+    assistant(1, [{ kind: 'reasoning', text: 'reasoning' }]),
+    tool('finished-tool'),
+    assistant(2, [{ kind: 'text', text: 'final answer' }]),
+    end,
+  ])
+  const overview = container.querySelector('.process-group')
+  assert.ok(overview)
+  assert.match(overview.textContent, /已工作 .*秒/)
+  assert.doesNotMatch(overview.textContent, /次工具调用|tool calls/)
+  assert.equal(overview.querySelectorAll('.tool-row').length, 0)
+  assert.match(container.textContent, /final answer/)
+})
+
+await check('mode values default to standard and migrate the legacy concise name', async () => {
+  assert.equal(normalizeConversationFoldMode(undefined), 'standard')
+  assert.equal(normalizeConversationFoldMode('concise'), 'tool-group')
+  assert.equal(normalizeConversationFoldMode('tool-group'), 'tool-group')
+  assert.equal(normalizeConversationFoldMode('detailed'), 'detailed')
+})
+
+await check('standard mode folds a whole running work section behind its live activity', async () => {
+  await act(async () => setConversationFoldMode('standard'))
+  const liveTool = {
+    kind: 'tool', callId: 'live-bash', name: 'bash',
+    args: JSON.stringify({ command: 'pnpm build' }),
+  }
+  await render([
+    marker,
+    assistant(1, [{ kind: 'reasoning', text: 'first line\nworking on it' }], { streaming: true }),
+    liveTool,
+  ])
+  const group = container.querySelector('.work-process-group')
+  assert.ok(group)
+  assert.equal(group.querySelector('.work-process-body'), null)
+  const head = group.querySelector('.process-head')
+  assert.match(head.textContent, /正在运行命令/)
+  assert.match(head.textContent, /pnpm build/)
+  assert.doesNotMatch(group.textContent, /working on it/)
+  await act(async () => head.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+  assert.ok(group.querySelector('.work-process-body'))
+  assert.equal(group.querySelectorAll('.work-process-body .tool-row').length, 1)
+
+  // 助手正文切断工作段；前一组结束后，后续工具另起一组。
+  await render([
+    marker,
+    assistant(1, [{ kind: 'reasoning', text: 'first stage' }], { streaming: false }),
+    assistant(2, [{ kind: 'text', text: 'intermediate answer' }]),
+    { ...liveTool, callId: 'next-bash' },
+  ])
+  assert.equal(container.querySelectorAll('.work-process-group').length, 2)
+  const answer = [...container.querySelectorAll('.prose')].find((node) => node.textContent?.includes('intermediate answer'))
+  assert.ok(answer)
+  assert.equal(answer.closest('.work-process-group'), null)
+})
+
+await check('completed turns nest one work group in standard mode and none in detailed', async () => {
+  const finished = [
+    marker,
+    assistant(1, [{ kind: 'reasoning', text: 'reasoning' }]),
+    tool('finished-read', 'read_file'),
+    tool('finished-list', 'ls'),
+    tool('finished-bash', 'bash'),
+    assistant(2, [
+      { kind: 'reasoning', text: 'final-stage reasoning' },
+      { kind: 'text', text: 'final answer' },
+    ]),
+    end,
+  ]
+  await act(async () => setConversationFoldMode('standard'))
+  await render(finished)
+  const overview = container.querySelector('.process-group')
+  assert.ok(overview)
+  assert.equal(container.querySelector('.work-process-group'), null)
+  await act(async () => overview.querySelector('.process-head').dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true })))
+  const work = container.querySelector('.work-process-group')
+  assert.ok(work)
+  assert.equal(work.querySelector('.work-process-body'), null)
+  assert.match(work.querySelector('.process-head').textContent, /已读取文件.*执行了命令/)
+  assert.match(container.textContent, /final answer/)
+  // 最终一步同时含推理与正文：推理进入工作步骤组，正文留在组外。
+  assert.equal([...container.querySelectorAll('.disc-row:not(.tool-row)')]
+    .filter((node) => !node.closest('.work-process-group')).length, 0)
+  await act(async () => work.querySelector('.process-head').dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true })))
+  const finalThink = [...work.querySelectorAll('.disc-row:not(.tool-row)')].at(-1)
+  assert.ok(finalThink)
+  assert.match(finalThink.querySelector('.disc-head').textContent, /思考.*final-stage reasoning/)
+  assert.doesNotMatch(finalThink.querySelector('.disc-head').textContent, /持续了/)
+  await act(async () => finalThink.querySelector('.disc-head').dispatchEvent(
+    new dom.window.MouseEvent('click', { bubbles: true })))
+  assert.match(work.textContent, /final-stage reasoning/)
+
+  await act(async () => setConversationFoldMode('tool-group'))
+  await render(finished)
+  assert.equal(container.querySelector('.work-process-group'), null)
+  assert.ok(container.querySelector('.tool-group'))
+
+  await act(async () => setConversationFoldMode('detailed'))
+  await render(finished)
+  assert.equal(container.querySelector('.work-process-group'), null)
+  assert.equal(container.querySelector('.tool-group'), null)
+  assert.equal(container.querySelectorAll('.tool-row').length, 3)
+})
+
+await check('tool-group mode keeps live tool and reasoning summaries in place', async () => {
+  const reasoning = assistant(1, [{ kind: 'reasoning', text: 'first line\nsecond line' }], { streaming: true })
+  await act(async () => setConversationFoldMode('tool-group'))
+  await render([marker, reasoning, tool('live-tool')])
+  const think = container.querySelector('.disc-row:not(.tool-row)')
+  const liveTool = container.querySelector('.tool-row')
+  assert.ok(think)
+  assert.ok(liveTool)
+  assert.equal(think.querySelector('.think-content'), null)
+  assert.equal(liveTool.querySelector('.disc-body'), null)
+  assert.match(think.textContent, /正在思考|Thinking/)
+  assert.match(think.textContent, /second line/)
+  await act(async () => think.querySelector('.disc-head').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+  assert.ok(think.querySelector('.think-content'), think.outerHTML)
+  // 手动展开优先于后续流式帧与完成态的自动折叠。
+  await render([marker, { ...reasoning, blocks: [{ kind: 'reasoning', text: 'first line\nsecond line\nthird line' }] }, tool('live-tool')])
+  assert.ok(think.querySelector('.think-content'))
+  await render([marker, { ...reasoning, streaming: false }, tool('live-tool')])
+  assert.ok(think.querySelector('.think-content'))
+  await render([marker, reasoning, tool('live-tool'), assistant(2, [{ kind: 'text', text: 'final answer' }]), end])
+  assert.ok(container.querySelector('.process-group'))
+  assert.match(container.textContent, /final answer/)
+  await act(async () => setConversationFoldMode('detailed'))
+  await render([marker, assistant(3, [{ kind: 'reasoning', text: 'detail' }], { streaming: true })])
+  assert.ok(container.querySelector('.think-content'))
 })
 
 await act(async () => root.unmount())
