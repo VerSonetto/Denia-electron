@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import type { ContextBreakdown, ContextPressure } from '../api'
+import type { ContextBreakdown, ContextPressure, ContextUsagePartKey } from '../api'
 import { markCompacting, useCompactingFor } from '../appStore'
-import { t } from '../i18n'
+import { getLocale, t } from '../i18n'
+import type { TranslationKey } from '../i18n'
 
 /** 从压力投影解析有界展示占用;分子或容量缺任一项即返回 null(不渲染)。
  * 分子取 `projectedTokens ?? pressureTokens`。 */
@@ -28,12 +29,85 @@ export function contextOccupancy(
  * (`45% of context used` / `上下文已用 45%`)。 */
 const READING_SLOT = '\u0000'
 
-/** 图例行,按分段条顺序;颜色类同时承担色块与分段着色。 */
-const ROWS = [
+/** 六段明细的展示元数据：颜色按来源固定。 */
+const PART_ROWS: Record<ContextUsagePartKey, { label: TranslationKey; color: string }> = {
+  systemPrompt: { label: 'contextSystem', color: 'cm-color-system' },
+  metaUserContext: { label: 'contextMetaUserContext', color: 'cm-color-meta-context' },
+  skills: { label: 'contextSkills', color: 'cm-color-skills' },
+  systemTools: { label: 'contextSystemTools', color: 'cm-color-tools' },
+  mcpTools: { label: 'contextMcpTools', color: 'cm-color-mcp-tools' },
+  messages: { label: 'contextMessages', color: 'cm-color-messages' },
+}
+
+/** 占比相同时的稳定顺序。 */
+const PART_ORDER: Record<ContextUsagePartKey, number> = {
+  systemPrompt: 0,
+  metaUserContext: 1,
+  skills: 2,
+  systemTools: 3,
+  mcpTools: 4,
+  messages: 5,
+}
+
+/** 兼容仅回三行聚合的响应。 */
+const LEGACY_ROWS = [
   { key: 'systemTokens', label: 'contextSystem', color: 'cm-color-system' },
   { key: 'toolsTokens', label: 'contextTools', color: 'cm-color-tools' },
   { key: 'messageTokens', label: 'contextMessages', color: 'cm-color-messages' },
 ] as const
+
+export interface ContextSlice {
+  key: string
+  label: TranslationKey
+  color: string
+  percent: number
+}
+
+/**
+ * 面板分片与百分比。百分比按 token 归一化，token 全为 0 时退回字符；
+ * 返回顺序按占比从大到小，占比相同保持固定顺序。
+ */
+export function buildContextUsageSlices(breakdown?: ContextBreakdown): ContextSlice[] {
+  if (breakdown === undefined) return []
+
+  if (breakdown.parts !== undefined && breakdown.parts.length > 0) {
+    const parts = breakdown.parts.filter(
+      (part) => PART_ROWS[part.key] !== undefined && (part.chars > 0 || part.tokens > 0),
+    )
+    if (parts.length === 0) return []
+    const tokenTotal = parts.reduce((sum, part) => sum + Math.max(part.tokens, 0), 0)
+    const charTotal = parts.reduce((sum, part) => sum + Math.max(part.chars, 0), 0)
+    const useChars = tokenTotal <= 0 && charTotal > 0
+    const total = useChars ? charTotal : tokenTotal
+    if (total <= 0) return []
+    return parts
+      .map((part) => ({
+        key: part.key,
+        label: PART_ROWS[part.key].label,
+        color: PART_ROWS[part.key].color,
+        percent: (useChars ? Math.max(part.chars, 0) : Math.max(part.tokens, 0)) / total,
+      }))
+      .sort(
+        (left, right) =>
+          right.percent - left.percent ||
+          PART_ORDER[left.key as ContextUsagePartKey] -
+            PART_ORDER[right.key as ContextUsagePartKey],
+      )
+  }
+
+  const legacy = LEGACY_ROWS.map((row) => ({
+    ...row,
+    value: Math.max(breakdown[row.key], 0),
+  }))
+  const total = legacy.reduce((sum, row) => sum + row.value, 0)
+  if (total <= 0) return []
+  return legacy.map((row) => ({
+    key: row.key,
+    label: row.label,
+    color: row.color,
+    percent: row.value / total,
+  }))
+}
 
 /** 紧凑 token 数:不足 1K 原样,其后 K / M;<100 保留一位小数。 */
 function formatTokens(value: number): string {
@@ -46,8 +120,9 @@ function formatTokens(value: number): string {
 
 /**
  * 输入框发送键旁的上下文占用圆环:
- * 14px 圆环显示 provider 口径占用百分比,点击弹出启发式拆分面板
- * (系统提示词 / 工具 / 对话消息)。provider 未报数或无路由容量时不渲染。
+ * 14px 圆环显示 provider 口径占用百分比,点击弹出六段拆分面板
+ * (系统提示词 / 运行时上下文 / 技能目录 / 内置工具 / MCP 工具 / 对话消息)。
+ * provider 未报数或无路由容量时不渲染。
  */
 export function ContextRing({
   pressure,
@@ -57,7 +132,7 @@ export function ContextRing({
 }: {
   /** 服务端 `contextPressure` 投影(锚点 + 表面增量 + 路由容量)。 */
   pressure?: ContextPressure
-  /** 服务端启发式拆分(系统提示词 / 工具 / 消息)。 */
+  /** 服务端启发式拆分(六段明细 + 三行聚合)。 */
   breakdown?: ContextBreakdown
   /** 会话 id:存在时才可手动压缩。 */
   sessionId?: string
@@ -123,30 +198,30 @@ export function ContextRing({
   const [headBefore = '', headAfter = ''] = t('contextAria', { percent: READING_SLOT })
     .split(READING_SLOT)
     .map((part) => part.trim())
+  const percentFormatter = new Intl.NumberFormat(getLocale() === 'en' ? 'en-US' : 'zh-CN', {
+    style: 'percent',
+    maximumFractionDigits: 1,
+  })
 
-  // 明细由服务端按 provider 锚点校准:三数之和 == 顶部的 projected 值。
-  // 只有手上数据真的对上了才宣称"已校准",避免旧数据源呈现误导性说明。
+  // 三行聚合之和与顶部 projected 值一致时才标记为已校准。
   const calibrated =
     breakdown !== undefined &&
     pressure?.projectedTokens !== undefined &&
     breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens ===
       pressure.projectedTokens
 
-  // 分段条总长保持 provider 精确百分比;启发式拆分只决定彩色部分的配比。
-  // 零宽段直接丢弃:.segment 的 min-width 会让 0% 占用也画出满条。
-  const breakdownTotal =
-    breakdown === undefined
-      ? 0
-      : breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens
-  const parts =
-    breakdown === undefined || breakdownTotal === 0
+  const slices = buildContextUsageSlices(breakdown)
+  // 分段条总长保持 provider 百分比；零宽段不渲染。
+  const segments =
+    slices.length === 0
       ? [{ key: 'total', color: undefined, width: percent }]
-      : ROWS.map((row) => ({
-          key: row.key,
-          color: row.color,
-          width: (percent * breakdown[row.key]) / breakdownTotal,
-        }))
-  const segments = parts.filter((part) => part.width > 0)
+      : slices
+          .map((slice) => ({
+            key: slice.key,
+            color: slice.color,
+            width: percent * slice.percent,
+          }))
+          .filter((segment) => segment.width > 0)
 
   // 圆环几何:14px viewBox,2px 描边。
   const radius = 5.5
@@ -200,17 +275,19 @@ export function ContextRing({
           </div>
           {breakdown !== undefined && (
             <>
-              <dl className="cm-rows">
-                {ROWS.map((row) => (
-                  <div key={row.key} className="cm-row">
-                    <dt>
-                      <span className={`cm-swatch ${row.color}`} aria-hidden />
-                      {t(row.label)}
-                    </dt>
-                    <dd>{`~${formatTokens(breakdown[row.key])}`}</dd>
-                  </div>
-                ))}
-              </dl>
+              {slices.length > 0 && (
+                <dl className="cm-rows">
+                  {slices.map((slice) => (
+                    <div key={slice.key} className="cm-row">
+                      <dt>
+                        <span className={`cm-swatch ${slice.color}`} aria-hidden />
+                        {t(slice.label)}
+                      </dt>
+                      <dd>{percentFormatter.format(slice.percent)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              )}
               <p className="cm-note">
                 {calibrated ? t('contextNoteAnchored') : t('contextNoteEstimated')}
               </p>

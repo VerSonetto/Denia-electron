@@ -97,9 +97,32 @@ test('session title, context breakdown and manual compaction', async () => {
     const breakdown = (await (
       await fetch(`${host.baseUrl}/api/sessions/${sessionId}/context-breakdown`)
     ).json()) as {
-      breakdown: { systemTokens: number; toolsTokens: number; messageTokens: number }
+      breakdown: {
+        systemTokens: number
+        toolsTokens: number
+        messageTokens: number
+        parts: { key: string; chars: number; tokens: number }[]
+      }
       usage: { outputTokens: number }
     }
+    const parts = breakdown.breakdown.parts
+    assert.equal(parts.length, 6)
+    assert.equal(
+      parts.reduce((sum, part) => sum + part.tokens, 0),
+      breakdown.breakdown.systemTokens +
+        breakdown.breakdown.toolsTokens +
+        breakdown.breakdown.messageTokens,
+    )
+    const tokensOf = (key: string) => parts.find((part) => part.key === key)?.tokens ?? 0
+    assert.equal(
+      breakdown.breakdown.systemTokens,
+      tokensOf('systemPrompt') + tokensOf('metaUserContext') + tokensOf('skills'),
+    )
+    assert.equal(
+      breakdown.breakdown.toolsTokens,
+      tokensOf('systemTools') + tokensOf('mcpTools'),
+    )
+    assert.equal(breakdown.breakdown.messageTokens, tokensOf('messages'))
     assert.ok(breakdown.breakdown.systemTokens > 0)
     assert.ok(breakdown.breakdown.toolsTokens > 0)
     assert.ok(breakdown.breakdown.messageTokens > 0)

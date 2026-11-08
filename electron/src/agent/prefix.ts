@@ -136,6 +136,8 @@ function messageTokens(item: SurfaceItem): number {
 }
 
 export interface PressureEstimate {
+  /** Provider-reported prompt size at the newest usage anchor. */
+  anchorTokens: number
   /** Last billed prompt plus everything appended after it. */
   projectedTokens: number
   /** 90% of the compaction threshold: cheap cleanup runs first. */
@@ -166,6 +168,7 @@ export function estimatePressure(
     if (item.seq > anchorSeq) trailing += messageTokens(item)
   }
   return {
+    anchorTokens: billed,
     projectedTokens: billed + trailing,
     thresholdTokens:
       contextWindow === undefined || contextWindow <= 0

@@ -68,6 +68,8 @@ import {
   SYSTEM_UPDATE_CHANNEL,
 } from './prefix.ts'
 import { buildSystemPrompt } from './system-prompt.ts'
+import { buildContextUsageSnapshot } from './context-usage.ts'
+import type { ContextUsageSnapshot } from './context-usage.ts'
 import { isValidSkillName } from '../skills/skills.ts'
 import type { JobManager } from '../jobs/manager.ts'
 
@@ -260,6 +262,62 @@ export class SessionDriver {
     return grants
   }
 
+  /**
+   * Current prompt composition for the context panel: the same inputs the
+   * next request will use (frozen system prefix, effective tool schemas and
+   * the model-visible surface), split by source. Pure estimate — the total
+   * meter still comes from provider usage.
+   */
+  contextUsage(sessionId: string): ContextUsageSnapshot | null {
+    const session = this.store.read(sessionId)
+    if (!session) return null
+    try {
+      let selection: ModelSelection | null = null
+      try {
+        const requested = this.selectionOf(sessionId) ?? undefined
+        selection = this.resolveSelection(this.getConfig(), requested).selection
+      } catch {
+        selection = null
+      }
+      let role: SubagentPromptContext | null = null
+      try {
+        role = this.services?.context?.(sessionId) ?? null
+      } catch {
+        role = null
+      }
+      const events = role?.legacy
+        ? (this.services?.historyFor?.(sessionId, session.events) ?? session.events)
+        : session.events
+      const surface = deriveSurface(events)
+      const permission = this.permissionStateOf(sessionId)
+      const schemas = this.schemasFor(permission, sessionId, session.header)
+      const framed = buildSystemPrompt({
+        cwd: session.header.cwd,
+        sandbox: session.header.sandbox,
+        tools: schemas,
+        permission,
+        ...(selection ? { model: selection.model, provider: selection.provider } : {}),
+        ...(this.services?.persona ? { persona: this.services.persona() } : {}),
+        ...(role ? { subagent: role } : {}),
+        ...(this.services?.promptSections
+          ? { extraSections: this.services.promptSections(sessionId, session.header) }
+          : {}),
+      })
+      // The wire keeps the frozen prefix; prompt changes travel as an injected
+      // update row and are counted with the baseline context.
+      const frozen = frozenSystem(framed, session.events, surface)
+      return buildContextUsageSnapshot({
+        system: frozen.system,
+        tools: schemas,
+        surface,
+        ...(frozen.update !== null ? { pendingSystemUpdate: frozen.update } : {}),
+      })
+    } catch {
+      return null
+    }
+  }
+
+  /** True while a turn owns this session. */
   isRunning(sessionId: string): boolean {
     return this.running.has(sessionId)
   }

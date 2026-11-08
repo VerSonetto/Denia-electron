@@ -116,8 +116,21 @@
   background: var(--ctx-system);
 }
 
+/* 同一色相的深浅阶:六段分片靠色相分组、靠明度区分,不新增三种主色。 */
+.cm-color-meta-context {
+  background: color-mix(in srgb, var(--ctx-system) 62%, var(--bg-layer-2));
+}
+
+.cm-color-skills {
+  background: color-mix(in srgb, var(--ctx-system) 34%, var(--bg-layer-2));
+}
+
 .cm-color-tools {
   background: var(--ctx-tools);
+}
+
+.cm-color-mcp-tools {
+  background: color-mix(in srgb, var(--ctx-tools) 55%, var(--bg-layer-2));
 }
 
 .cm-color-messages {

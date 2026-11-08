@@ -40,6 +40,7 @@ export function sameBreakdown(
     a.systemTokens === b.systemTokens &&
     a.toolsTokens === b.toolsTokens &&
     a.messageTokens === b.messageTokens &&
+    sameContextParts(a.parts, b.parts) &&
     pa.contextWindow === pb.contextWindow &&
     pa.pressureTokens === pb.pressureTokens &&
     pa.projectedTokens === pb.projectedTokens &&
@@ -48,6 +49,21 @@ export function sameBreakdown(
     ua.cacheReadTokens === ub.cacheReadTokens &&
     ua.cacheWriteTokens === ub.cacheWriteTokens &&
     ua.reasoningTokens === ub.reasoningTokens
+  )
+}
+
+/** 分项数组逐项比较:长度或任一段的 key/字符/token 变化都要刷新面板。 */
+function sameContextParts(
+  a: api.ContextUsagePart[] | undefined,
+  b: api.ContextUsagePart[] | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return (
+    a.length === b.length &&
+    a.every((part, index) => {
+      const other = b[index]!
+      return part.key === other.key && part.chars === other.chars && part.tokens === other.tokens
+    })
   )
 }
 /**

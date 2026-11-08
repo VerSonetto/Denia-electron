@@ -20,13 +20,15 @@ import type { ApprovalBridge } from '../agent/gate.ts'
 import type { ApprovalAnswer } from '../agent/gate.ts'
 import { createModelReviewer } from '../agent/reviewer.ts'
 import type { Reviewer } from '../agent/reviewer.ts'
-import { buildSystemPrompt } from '../agent/system-prompt.ts'
+import { deriveSurface } from '../agent/history.ts'
+import { estimatePressure } from '../agent/prefix.ts'
+import { summarizeContextUsage } from '../agent/context-usage.ts'
 import { allPresetFeatures, presetForSession, presetRows, presetSettings } from '../agent/presets.ts'
 import type { AgentPresetRow } from '../agent/presets.ts'
 import { scheduleSessionTitle } from '../agent/session-title.ts'
 import { Updater } from './update.ts'
 import { availableApps, iconFor, launchApp } from './open-in-app.ts'
-import { compactSession, estimateTokens } from '../agent/compact.ts'
+import { compactSession } from '../agent/compact.ts'
 import type { AppConfig } from '../config.ts'
 import {
   credentialInfo,
@@ -817,30 +819,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       }
       if (rest === '/context-breakdown' && method === 'GET') {
         const events = store.read(sessionId)?.events ?? []
-        const permission = driver.permissionStateOf(sessionId)
-        const tools = registry.schemas()
-        const system = buildSystemPrompt({
-          cwd: store.header(sessionId)?.cwd ?? '',
-          sandbox: store.header(sessionId)?.sandbox ?? false,
-          tools,
-          permission,
-          persona: hostServices.persona(),
-        })
-        const messageChars = events.reduce((sum, event) => {
-          if (event.type === 'user-message') return sum + event.text.length
-          if (event.type === 'assistant-message') {
-            return (
-              sum +
-              event.blocks.reduce(
-                (inner, block) =>
-                  inner + (block.type === 'text' ? block.text.length : block.type === 'tool-call' ? block.arguments.length : 0),
-                0,
-              )
-            )
-          }
-          if (event.type === 'tool-result') return sum + event.content.length
-          return sum
-        }, 0)
+        const surface = deriveSurface(events)
         let lastWindow: number | undefined
         for (let index = events.length - 1; index >= 0; index -= 1) {
           const event = events[index]!
@@ -849,6 +828,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
             break
           }
         }
+        const pressure = estimatePressure(events, surface, lastWindow)
         const usage = {
           uncachedInputTokens: 0,
           outputTokens: 0,
@@ -856,42 +836,28 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           cacheWriteTokens: 0,
           reasoningTokens: 0,
         }
-        let pressureTokens: number | undefined
-        let anchorIndex = -1
-        for (let index = 0; index < events.length; index += 1) {
-          const event = events[index]!
+        for (const event of events) {
           if (event.type !== 'assistant-message' || !event.usage) continue
           usage.uncachedInputTokens += event.usage.inputTokens ?? 0
           usage.outputTokens += event.usage.outputTokens ?? 0
           usage.cacheReadTokens += event.usage.cacheReadTokens ?? 0
           usage.reasoningTokens += event.usage.reasoningTokens ?? 0
-          pressureTokens = (event.usage.inputTokens ?? 0) + (event.usage.cacheReadTokens ?? 0)
-          anchorIndex = index
         }
-        let trailingChars = 0
-        for (let index = anchorIndex + 1; index < events.length; index += 1) {
-          const event = events[index]!
-          if (event.type === 'user-message') trailingChars += event.text.length
-          else if (event.type === 'tool-result') trailingChars += event.content.length
-          else if (event.type === 'assistant-message') {
-            trailingChars += event.blocks.reduce(
-              (inner, block) =>
-                inner + (block.type === 'text' ? block.text.length : block.type === 'tool-call' ? block.arguments.length : 0),
-              0,
-            )
-          }
-        }
+        // Total is provider usage; parts estimate the same request surface
+        // independently.
+        const parts = driver.contextUsage(sessionId)?.parts ?? []
         json(res, 200, {
           breakdown: {
-            systemTokens: estimateTokens(system),
-            toolsTokens: estimateTokens(JSON.stringify(tools)),
-            messageTokens: Math.ceil(messageChars / 4),
+            ...summarizeContextUsage(parts),
+            parts,
           },
           pressure: {
             ...(lastWindow ? { contextWindow: lastWindow } : {}),
-            ...(pressureTokens !== undefined ? { pressureTokens } : {}),
-            ...(pressureTokens !== undefined
-              ? { projectedTokens: pressureTokens + Math.ceil(trailingChars / 4) }
+            ...(pressure
+              ? {
+                  pressureTokens: pressure.anchorTokens,
+                  projectedTokens: pressure.projectedTokens,
+                }
               : {}),
           },
           usage,

@@ -218,7 +218,7 @@ function injectionChannelOf(event: Extract<Envelope, { type: 'user-message' }>):
 
 /** Baseline channels: only the newest occurrence is model-visible. */
 
-const BASELINE_CHANNELS = new Set([
+export const BASELINE_CHANNELS = new Set([
   'workspace-instructions',
   'capability',
   'skill-catalog',

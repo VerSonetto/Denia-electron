@@ -1037,10 +1037,27 @@ export function pickFiles(): Promise<{ paths: string[] }> {
 }
 
 /** 当前上下文 token 拆分(token-meter 服务端 fold)。 */
+/** 上下文分项:下一份请求里互不重叠的六段内容(服务端估算)。 */
+export type ContextUsagePartKey =
+  | 'systemPrompt'
+  | 'metaUserContext'
+  | 'skills'
+  | 'systemTools'
+  | 'mcpTools'
+  | 'messages'
+
+export interface ContextUsagePart {
+  key: ContextUsagePartKey
+  chars: number
+  tokens: number
+}
+
 export interface ContextBreakdown {
   systemTokens: number
   toolsTokens: number
   messageTokens: number
+  /** 六段明细;上面三行是它们的固定分组聚合。旧版本可能不返回。 */
+  parts?: ContextUsagePart[]
 }
 
 /** 上下文压力投影(字段各自 last-wins,可缺省)。 */
