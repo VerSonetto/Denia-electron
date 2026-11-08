@@ -105,7 +105,15 @@ jobs:
 
       - name: Install host dependencies
         working-directory: electron
-        run: npm ci --no-audit --no-fund
+        run: |
+          npm ci --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # package.json 的 allowScripts 只放行 esbuild，Electron 的 postinstall
+          # 会被跳过；没有 dist 时显式补下载（命中缓存时只是解压）。
+          if (-not (Test-Path 'node_modules/electron/dist/electron.exe')) {
+            node node_modules/electron/install.js
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Build host and NSIS installer
         working-directory: electron
