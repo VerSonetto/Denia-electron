@@ -172,16 +172,18 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 npm run dist
 ```
 
-产物：`electron/release/Denia-Electron-<version>-setup.exe`。
+产物：`electron/release/Denia-v<version>-windows-x64-setup.exe`。
 
 说明：
 
-- 应用身份是 `Denia Electron` / `dev.denia.electron`，与 Rust 版 `Denia` /
-  `dev.denia.desktop` 相互独立，不会覆盖旧安装。
+- 应用身份是 `Denia` / `dev.denia.app`，安装到 `%LOCALAPPDATA%\Programs\Denia`。
+  用户数据仍在 `~/.denia`，与旧版共用。
+- 更新检查指向本仓库的 Release（`VerSonetto/Denia-electron`）：拉最新版本、
+  校对 `SHA256SUMS.txt`，然后启动安装包。Rust 版已停止更新，0.6.0 是它的最后一版。
 - `pnpm build` 会先跑前端 QA 套件；本机 `check-follow` 在无联调环境时会失败，
   它不参与产物，直接跑上面三条构建命令即可。
 - 打包使用 `build/icon.ico`（由 `128x128@2x.png` 生成的 256×256 图标）。
-- 静默安装：`Denia-Electron-0.2.0-setup.exe /S`（默认按用户安装，无需管理员）。
+- 静默安装：`Denia-v0.6.1-windows-x64-setup.exe /S`（默认按用户安装，无需管理员）。
 
 ## 目录
 

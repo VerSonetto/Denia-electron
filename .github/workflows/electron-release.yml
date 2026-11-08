@@ -112,9 +112,7 @@ jobs:
         run: |
           node scripts/build.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node node_modules/electron-builder/cli.js --win nsis --publish never `
-            -c.electronDist=node_modules/electron/dist `
-            -c.win.signExecutable=false
+          node node_modules/electron-builder/cli.js --win nsis --publish never -c.electronDist=node_modules/electron/dist -c.win.signExecutable=false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Prepare release assets
