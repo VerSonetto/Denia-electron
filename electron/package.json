@@ -1,8 +1,8 @@
 {
-  "name": "@denia/electron",
+  "name": "denia",
   "private": true,
-  "version": "0.2.5",
-  "description": "Denia Electron host: TypeScript backend (agent loop, tools, HTTP/SSE) + existing web UI",
+  "version": "0.6.1",
+  "description": "Denia desktop host: TypeScript agent runtime with the shared web console",
   "author": "Denia",
   "type": "module",
   "main": "dist/main.js",
@@ -25,8 +25,9 @@
     "esbuild@0.24.2": true
   },
   "build": {
-    "appId": "dev.denia.electron",
-    "productName": "Denia Electron",
+    "appId": "dev.denia.app",
+    "productName": "Denia",
+    "npmRebuild": false,
     "copyright": "Denia",
     "directories": {
       "output": "release",
@@ -41,10 +42,15 @@
       {
         "from": "../web/dist",
         "to": "web"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
       }
     ],
     "win": {
       "icon": "build/icon.ico",
+      "executableName": "Denia",
       "target": [
         {
           "target": "nsis",
@@ -56,13 +62,14 @@
     },
     "nsis": {
       "oneClick": false,
+      "include": "build/installer.nsh",
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Denia Electron",
+      "shortcutName": "Denia",
       "runAfterFinish": false,
-      "artifactName": "Denia-Electron-${version}-setup.${ext}"
+      "artifactName": "Denia-v${version}-windows-x64-setup.${ext}"
     }
   },
   "dependencies": {

@@ -1,4 +1,5 @@
-// Electron main process: start the HTTP host, then point the window at it.
+// Electron main process: open a splash window first, start the HTTP host in
+// parallel, then point the window at it once the host is listening.
 //
 // The window loads `http://127.0.0.1:<port>` exactly like the old desktop
 // shell, so the reused web UI keeps using relative `/api` paths and SSE.
@@ -11,20 +12,42 @@ import type { WebContents } from 'electron'
 
 import { startHost } from './host/server.ts'
 
-const WINDOW_TITLE = 'Denia Electron'
+// Windows 按 AppUserModelID 归属窗口和任务栏图标。这个 ID 必须与安装器写进
+// 开始菜单快捷方式的那个一致,而且要在任何窗口创建之前设好,否则任务栏和
+// 任务管理器会继续按 Electron 的默认身份显示应用。
+app.setAppUserModelId('dev.denia.app')
+
+const WINDOW_TITLE = 'Denia'
 const WINDOW_SIZE = { width: 1280, height: 860 }
 const MIN_SIZE = { width: 720, height: 480 }
 /** The Electron build listens on its own port; the Rust instance owns 43654. */
 const DEFAULT_PORT = 43655
 const PRELOAD = path.join(import.meta.dirname, 'preload.cjs')
+/** 自然时长:书写动画约 1.1s + 墨点落款约 0.7s;host 更快时也要等它播完再导航。 */
+const SPLASH_ANIMATION_MS = 1800
 
 let mainWindow: BrowserWindow | null = null
 let closing = false
+
+function appIcon(): string {
+  // 打包后由 extraResources 放到 resources/icon.ico;开发模式直接用构建资源。
+  if (app.isPackaged) return path.join(process.resourcesPath, 'icon.ico')
+  return path.resolve(import.meta.dirname, '..', 'build', 'icon.ico')
+}
 
 function webDist(): string {
   if (app.isPackaged) return path.join(process.resourcesPath, 'web')
   // dist/main.js → electron/dist → repo root → web/dist
   return process.env.DENIA_WEB_DIR ?? path.resolve(import.meta.dirname, '..', '..', 'web', 'dist')
+}
+
+/**
+ * Splash page shown while the host starts up. The window opens on this local
+ * file immediately, plays the ink animation, then navigates to the real UI;
+ * a failed startup is injected into the same page instead of a blank window.
+ */
+function splashPath(): string {
+  return 'file://' + path.join(import.meta.dirname, 'splash.html').replaceAll('\\', '/')
 }
 
 /**
@@ -51,13 +74,27 @@ function registerWindowControls(): void {
   })
 }
 
-async function createWindow(url: string): Promise<BrowserWindow> {
+/** 把启动失败写进已经开着的窗口:用户看得见原因,而不是静默消失的进程。 */
+async function showFatal(window: BrowserWindow | null, message: string): Promise<void> {
+  if (!window || window.isDestroyed()) return
+  const script =
+    "document.body.dataset.fatal = '1';" +
+    `document.getElementById('fatal-message').textContent = ${JSON.stringify(message)};`
+  try {
+    await window.webContents.executeJavaScript(script)
+  } catch {
+    // 窗口可能正在关闭,没有别的可展示的地方了。
+  }
+}
+
+async function createWindow(url: string, onLoaded?: () => void): Promise<BrowserWindow> {
   const window = new BrowserWindow({
     width: WINDOW_SIZE.width,
     height: WINDOW_SIZE.height,
     minWidth: MIN_SIZE.width,
     minHeight: MIN_SIZE.height,
     title: WINDOW_TITLE,
+    icon: appIcon(),
     frame: false,
     backgroundColor: '#0b0b0c',
     show: false,
@@ -79,25 +116,45 @@ async function createWindow(url: string): Promise<BrowserWindow> {
     return { action: 'deny' }
   })
   await window.loadURL(url)
+  onLoaded?.()
   return window
 }
 
 async function main(): Promise<void> {
   registerWindowControls()
-  const host = await startHost({
+
+  // 窗口先行、host 并行:启动的几百毫秒里用户看到的是墨迹动画而不是"双击了
+  // 没反应",host 起不来时也有窗口可以承载错误信息。
+  let splashLoadedAt = 0
+  const windowPromise = createWindow(splashPath(), () => {
+    splashLoadedAt = Date.now()
+  })
+  const hostPromise = startHost({
     ...(process.env.DENIA_HOME ? { home: process.env.DENIA_HOME } : {}),
     webDir: webDist(),
+    version: app.getVersion(),
     ...(process.env.DENIA_HOST ? { host: process.env.DENIA_HOST } : {}),
     port: Number(process.env.DENIA_PORT ?? DEFAULT_PORT),
   })
-  console.log(`[denia] host listening at ${host.baseUrl} (home: ${host.home})`)
 
-  // Dev mode: the Vite server proxies /api to DENIA_API_URL (see web/vite.config.ts).
-  const uiUrl = process.env.DENIA_WEB_URL?.trim()
-  mainWindow = await createWindow(uiUrl || host.baseUrl)
+  mainWindow = await windowPromise
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  let host: Awaited<ReturnType<typeof startHost>>
+  try {
+    host = await hostPromise
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error)
+    console.error('[denia] startup failed:', message)
+    await showFatal(mainWindow, message)
+    if (process.env.DENIA_SMOKE_SHOT?.trim()) app.exit(1)
+    // 没有 host 就没有要收尾的资源;窗口留着承载错误,用户关闭即退出。
+    return
+  }
+  console.log(`[denia] host listening at ${host.baseUrl} (home: ${host.home})`)
+
   mainWindow.on('close', (event) => {
     if (closing) return
     event.preventDefault()
@@ -107,6 +164,25 @@ async function main(): Promise<void> {
       app.quit()
     })
   })
+
+  // 服务就绪 ≠ 启动页已画出来。按占位页加载完成的时刻起算,把动画的自然时长
+  // 放完再导航;host 比动画慢时这里已经播完,无需等待。
+  const elapsed = Date.now() - splashLoadedAt
+  if (splashLoadedAt > 0 && elapsed < SPLASH_ANIMATION_MS) {
+    await new Promise((resolve) => setTimeout(resolve, SPLASH_ANIMATION_MS - elapsed))
+  }
+
+  // Dev mode: the Vite server proxies /api to DENIA_API_URL (see web/vite.config.ts).
+  const uiUrl = process.env.DENIA_WEB_URL?.trim() || host.baseUrl
+  try {
+    await mainWindow.loadURL(uiUrl)
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? error.message : String(error)
+    console.error('[denia] failed to load console:', message)
+    await showFatal(mainWindow, `无法加载控制台:${message}`)
+    if (process.env.DENIA_SMOKE_SHOT?.trim()) app.exit(1)
+    return
+  }
 
   // Smoke mode: prove the real Electron renderer can load the UI, then exit.
   const shotPath = process.env.DENIA_SMOKE_SHOT?.trim()
@@ -122,7 +198,6 @@ async function main(): Promise<void> {
 }
 
 app.whenReady().then(() => {
-  app.setAppUserModelId('dev.denia.electron')
   main().catch((error: unknown) => {
     const message = error instanceof Error ? error.stack ?? error.message : String(error)
     console.error('[denia] startup failed:', message)

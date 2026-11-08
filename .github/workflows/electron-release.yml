@@ -1,0 +1,156 @@
+name: Denia release
+
+# 桌面版发布：构建 Windows x64 安装包并直接创建 GitHub Release。
+#
+# 两种触发方式：
+# - push 一个 v* 标签：全自动，发布说明用 GitHub 自动生成。
+# - 手动 dispatch：可指定标签和完整的发布说明。
+#
+# 速度上的取舍（一条流水线约 3 分钟）：
+# - 单 job 完成构建与发布，不走 artifact 中转，省掉一次几百 MB 的上传下载。
+# - 缓存 Electron 二进制与 electron-builder 的下载目录：这两处命中时省掉
+#   110MB 的 electron zip 下载，以及 nsis / winCodeSign 的拉取。
+# - 打包时显式传 electronDist（已解包好的 node_modules/electron/dist），
+#   避免 electron-builder 在 CI 上解压 zip 卡住。
+# - 跳过代码签名与原生模块重建（本项目没有原生依赖）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布标签（例如 v0.6.0）；留空使用 electron/package.json 的版本'
+        required: false
+        type: string
+      release_notes:
+        description: '本次更新日志（Markdown）；留空则自动生成'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: denia-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and publish Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAG_INPUT: ${{ inputs.tag }}
+      NOTES_INPUT: ${{ inputs.release_notes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and tag
+        id: release
+        run: |
+          $version = (Get-Content electron/package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+          } elseif ([string]::IsNullOrWhiteSpace($env:TAG_INPUT)) {
+            $tag = "v$version"
+          } else {
+            $tag = $env:TAG_INPUT.Trim()
+          }
+          if ($tag -ne "v$version") { throw "Tag $tag does not match electron/package.json version $version." }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+          key: electron-cache-${{ runner.os }}-${{ hashFiles('electron/package-lock.json') }}
+          restore-keys: |
+            electron-cache-${{ runner.os }}-
+
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Build web console
+        working-directory: web
+        run: |
+          pnpm exec vite build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/precompress.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path 'dist/index.html')) { throw 'Web build produced no index.html.' }
+
+      - name: Install host dependencies
+        working-directory: electron
+        run: npm ci --no-audit --no-fund
+
+      - name: Build host and NSIS installer
+        working-directory: electron
+        run: |
+          node scripts/build.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/electron-builder/cli.js --win nsis --publish never `
+            -c.electronDist=node_modules/electron/dist `
+            -c.win.signExecutable=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare release assets
+        id: assets
+        run: |
+          $tag = "${{ steps.release.outputs.tag }}"
+          $expected = "Denia-$tag-windows-x64-setup.exe"
+          $installer = Get-ChildItem electron/release/*.exe -File | Where-Object { $_.Name -like '*-setup.exe' }
+          if ($installer.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($installer.Count)." }
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item $installer[0].FullName "release/$expected"
+          $hash = (Get-FileHash "release/$expected" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $expected" | Set-Content 'release/SHA256SUMS.txt' -Encoding ascii
+          $size = [math]::Round((Get-Item "release/$expected").Length / 1MB, 1)
+          Write-Host "Installer $expected ($size MB)"
+          "installer=release/$expected" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = "${{ steps.release.outputs.tag }}"
+          $existing = gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existing) { throw "Release $tag already exists." }
+          $files = @(
+            (Resolve-Path "release/Denia-$tag-windows-x64-setup.exe").Path,
+            (Resolve-Path "release/SHA256SUMS.txt").Path
+          )
+          $arguments = @('release', 'create', $tag, '--title', "Denia $tag", '--target', $env:GITHUB_SHA)
+          if ([string]::IsNullOrWhiteSpace($env:NOTES_INPUT)) {
+            $arguments += '--generate-notes'
+          } else {
+            $notesPath = Join-Path $env:RUNNER_TEMP 'denia-release-notes.md'
+            [System.IO.File]::WriteAllText($notesPath, $env:NOTES_INPUT, [System.Text.UTF8Encoding]::new($false))
+            $arguments += @('--notes-file', $notesPath)
+          }
+          & gh @arguments @files
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

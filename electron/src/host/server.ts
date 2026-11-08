@@ -24,6 +24,7 @@ import { buildSystemPrompt } from '../agent/system-prompt.ts'
 import { allPresetFeatures, presetForSession, presetRows, presetSettings } from '../agent/presets.ts'
 import type { AgentPresetRow } from '../agent/presets.ts'
 import { scheduleSessionTitle } from '../agent/session-title.ts'
+import { Updater } from './update.ts'
 import { compactSession, estimateTokens } from '../agent/compact.ts'
 import type { AppConfig } from '../config.ts'
 import {
@@ -98,9 +99,14 @@ const POLL_MAX_SEC = 30
 const POLL_DEFAULT_SEC = 25
 const RING_LIMIT = 128
 
+/** 发布仓库；更新检查与安装包下载都指向它。 */
+const UPDATE_REPOSITORY = 'VerSonetto/Denia-electron'
+
 export interface HostOptions {
   home?: string
   webDir?: string
+  /** 应用版本，更新检查用它和发布版本比较；打包版由 main.ts 传入。 */
+  version?: string
   host?: string
   port?: number
   /** Test seam: substitute the approval channel. */
@@ -248,6 +254,11 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const home = options.home ?? resolveHome()
   fs.mkdirSync(home, { recursive: true })
   const webDir = options.webDir ?? path.resolve(import.meta.dirname, '..', '..', '..', 'web', 'dist')
+  const updater = new Updater({
+    currentVersion: options.version ?? '0.0.0',
+    repository: UPDATE_REPOSITORY,
+    downloadDir: path.join(home, 'updates'),
+  })
 
   let config = loadConfig(home)
   const store = new SessionStore(home)
@@ -1972,25 +1983,30 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       return
     }
     if (pathname === '/api/update/check' && method === 'GET') {
-      json(res, 200, {
-        currentVersion: '0.1.0',
-        latest: null,
-        updateAvailable: false,
-        canInstall: false,
-        checkedAt: Date.now(),
-        repositoryUrl: '',
-      })
+      const force = url.searchParams.get('force') === 'true'
+      try {
+        json(res, 200, await updater.check(force))
+      } catch (error) {
+        apiError(res, 502, 'update/check-failed', errorMessage(error))
+      }
       return
     }
     if (pathname === '/api/update/status' && method === 'GET') {
-      json(res, 200, {
-        phase: 'idle',
-        version: null,
-        downloadedBytes: 0,
-        totalBytes: null,
-        error: null,
-        source: null,
-      })
+      json(res, 200, updater.status())
+      return
+    }
+    if (pathname === '/api/update/install' && method === 'POST') {
+      const body = await readJson(req)
+      const version = typeof body.version === 'string' ? body.version : ''
+      if (!version) {
+        apiError(res, 400, 'update/bad-version', '缺少目标版本')
+        return
+      }
+      try {
+        json(res, 200, await updater.install(version))
+      } catch (error) {
+        apiError(res, 502, 'update/install-failed', errorMessage(error))
+      }
       return
     }
     if (pathname === '/api/git/status' && method === 'GET') {

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { build } from 'esbuild'
-import { mkdirSync } from 'node:fs'
+import { copyFileSync, mkdirSync } from 'node:fs'
 
 mkdirSync('dist', { recursive: true })
 
@@ -29,6 +29,9 @@ await build({
   external: ['electron'],
   logLevel: 'info',
 })
+
+// 启动占位页与 main.js 同目录,由 file:// 直接加载。
+copyFileSync('src/splash.html', 'dist/splash.html')
 
 const electron = process.platform === 'win32' ? 'node_modules/.bin/electron.cmd' : 'node_modules/.bin/electron'
 const child = spawn(electron, ['.'], {
