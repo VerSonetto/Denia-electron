@@ -56,6 +56,7 @@ export class McpTool implements Tool {
         ...(page.resultId ? { resultId: page.resultId } : {}),
         legacyResume: page.offsetExplicit && page.offset > 0 && !this.fields.nativeOffset,
         session: ctx.sessionId,
+        signal: ctx.cancel,
       })
       const text = renderPaged(
         result.text,
@@ -69,6 +70,9 @@ export class McpTool implements Tool {
       )
       return { content: text, isError: result.isError }
     } catch (error) {
+      if (ctx.cancel.aborted) {
+        return { content: '[工具错误] 命令被用户中断', isError: true }
+      }
       if (error instanceof PagedFailure) {
         return pagedErrorOutput(error)
       }

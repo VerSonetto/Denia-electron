@@ -18,6 +18,19 @@ import {
 
 const SKIP_DIRS = new Set(['.git', '.hg', '.svn', 'node_modules', '.denia'])
 
+/** Yield to the event loop so a stop request can flip the abort signal mid-walk. */
+function breathe(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
+}
+
+function cancelled(tool: string) {
+  return {
+    content: '[工具错误] 命令被用户中断',
+    isError: true,
+    errorIdentity: { name: tool, code: 'cancelled' },
+  }
+}
+
 interface WalkEntry {
   absolute: string
   relative: string
@@ -78,18 +91,21 @@ export const LsTool = {
       return toolError(`列出目录 ${raw} 失败:${error instanceof Error ? error.message : String(error)}`)
     }
     // `entries` is only read by the first level; recursion lists children directly.
-    const collect = (
+    const collect = async (
       base: string,
       prefix: string,
       level: number,
       currentEntries: fs.Dirent[],
       out: string[],
-    ): void => {
+    ): Promise<void> => {
       currentEntries.sort((a, b) => {
         if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1
         return a.name.localeCompare(b.name)
       })
+      let visited = 0
       for (const entry of currentEntries) {
+        if (ctx.cancel.aborted) return
+        if (++visited % 32 === 0) await breathe()
         const rel = prefix ? `${prefix}/${entry.name}` : entry.name
         out.push(entry.isDirectory() ? `${rel}/` : rel)
         if (entry.isDirectory() && level < depth && !SKIP_DIRS.has(entry.name)) {
@@ -99,12 +115,13 @@ export const LsTool = {
           } catch {
             continue
           }
-          collect(path.join(base, entry.name), rel, level + 1, childEntries, out)
+          await collect(path.join(base, entry.name), rel, level + 1, childEntries, out)
         }
       }
     }
     const lines: string[] = []
-    collect(dir, '', 1, entries, lines)
+    await collect(dir, '', 1, entries, lines)
+    if (ctx.cancel.aborted) return cancelled('ls')
     const window = lines.slice(skip, skip + maxResults)
     const header = `${raw} 下的条目（${window.length}/${lines.length}）:`
     const body = window.length > 0 ? window.join('\n') : '(空目录)'
@@ -180,7 +197,10 @@ export const GlobTool = {
     }
     const matcher = globToRegExp(pattern)
     const matches: { relative: string; mtimeMs: number }[] = []
+    let walked = 0
     for (const entry of walk(root)) {
+      if (ctx.cancel.aborted) return cancelled('glob')
+      if (++walked % 32 === 0) await breathe()
       if (entry.isDirectory) continue
       const target = pattern.includes('/') ? entry.relative : path.posix.basename(entry.relative)
       if (!matcher.test(target)) continue
@@ -246,8 +266,11 @@ export const GrepTool = {
       return toolError(error instanceof Error ? error.message : String(error))
     }
     const hits: string[] = []
+    let visited = 0
     let scanned = 0
-    const visit = (absolute: string, relative: string): void => {
+    const visit = async (absolute: string, relative: string): Promise<void> => {
+      if (ctx.cancel.aborted) return
+      if (++visited % 32 === 0) await breathe()
       if (hits.length >= skip + maxMatches) return
       let stat: fs.Stats
       try {
@@ -265,7 +288,7 @@ export const GrepTool = {
         }
         entries.sort((a, b) => a.name.localeCompare(b.name))
         for (const entry of entries) {
-          visit(path.join(absolute, entry.name), relative ? `${relative}/${entry.name}` : entry.name)
+          await visit(path.join(absolute, entry.name), relative ? `${relative}/${entry.name}` : entry.name)
           if (hits.length >= skip + maxMatches) return
         }
         return
@@ -274,7 +297,7 @@ export const GrepTool = {
       if (!matchesInclude(relative, include)) return
       let text: string
       try {
-        text = fs.readFileSync(absolute, 'utf8')
+        text = await fs.promises.readFile(absolute, 'utf8')
       } catch {
         return
       }
@@ -288,7 +311,8 @@ export const GrepTool = {
         }
       }
     }
-    visit(root, path.relative(root, root) || '.')
+    await visit(root, path.relative(root, root) || '.')
+    if (ctx.cancel.aborted) return cancelled('grep')
     const window = hits.slice(skip, skip + maxMatches)
     if (window.length === 0) return textOutput(`没有匹配 ${pattern} 的行(扫描 ${scanned} 个文件)。`)
     const more =

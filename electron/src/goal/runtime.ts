@@ -139,7 +139,9 @@ export class GoalRuntime {
     if (!goal || goal.status !== 'active') return goal
     const paused = this.settle(goal, null, 'paused')
     this.persist(sessionId, paused, 'paused')
-    // Stopping the goal also stops the turn that is currently pursuing it.
+    // Stopping the goal also stops the turn that is currently pursuing it,
+    // and any in-flight verification whose verdict would restart it.
+    this.controllers.get(sessionId)?.abort()
     this.options.cancel(sessionId)
     return paused
   }
@@ -256,7 +258,7 @@ export class GoalRuntime {
       if (verifyFirst) {
         const verification = await this.verify(sessionId, goal, selection)
         const latest = this.read(sessionId)
-        if (!latest || latest.targetId !== goal.targetId) return
+        if (!latest || latest.targetId !== goal.targetId || latest.status !== 'active') return
         recorded = {
           ...latest,
           verifications: [

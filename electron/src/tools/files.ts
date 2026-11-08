@@ -21,6 +21,14 @@ import {
 const DEFAULT_READ_LIMIT = 400
 const MAX_LINE_CHARS = 4000
 
+function cancelled(tool: string) {
+  return {
+    content: '[工具错误] 命令被用户中断',
+    isError: true,
+    errorIdentity: { name: tool, code: 'cancelled' },
+  }
+}
+
 function guardLine(line: string): string {
   if (line.length <= MAX_LINE_CHARS) return line
   return line.slice(0, MAX_LINE_CHARS) + '…[本行超长,已截断]'
@@ -59,6 +67,7 @@ export const ReadFileTool = {
   ),
   async execute(args: Record<string, unknown>, ctx: ToolContext) {
     const raw = expectString(args, 'path')
+    if (ctx.cancel.aborted) return cancelled('read_file')
     const offset = Math.max(1, Math.round(optionalNumber(args, 'offset') ?? 1))
     const limit = Math.max(1, Math.round(optionalNumber(args, 'limit') ?? DEFAULT_READ_LIMIT))
     let file: string
@@ -69,7 +78,7 @@ export const ReadFileTool = {
     }
     let text: string
     try {
-      text = fs.readFileSync(file, 'utf8')
+      text = await fs.promises.readFile(file, 'utf8')
     } catch (error) {
       return toolError(
         `读取 ${raw} 失败:${error instanceof Error ? error.message : String(error)}`,
@@ -106,6 +115,7 @@ export const WriteFileTool = {
   ),
   async execute(args: Record<string, unknown>, ctx: ToolContext) {
     const raw = expectString(args, 'path')
+    if (ctx.cancel.aborted) return cancelled('write_file')
     const content = expectString(args, 'content')
     let file: string
     try {
@@ -210,6 +220,7 @@ export const EditTool = {
   ),
   async execute(args: Record<string, unknown>, ctx: ToolContext) {
     const raw = expectString(args, 'path')
+    if (ctx.cancel.aborted) return cancelled('edit')
     let specs: EditSpec[]
     try {
       specs = parseEditSpecs(args)
@@ -228,7 +239,7 @@ export const EditTool = {
     }
     let text: string
     try {
-      text = fs.readFileSync(file, 'utf8')
+      text = await fs.promises.readFile(file, 'utf8')
     } catch (error) {
       return toolError(`读取 ${raw} 失败:${error instanceof Error ? error.message : String(error)}`)
     }

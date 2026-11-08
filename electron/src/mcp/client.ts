@@ -63,18 +63,19 @@ export class McpClient {
     return parseToolsList(result)
   }
 
-  async callTool(tool: string, args: Record<string, unknown>): Promise<McpCallResult> {
+  async callTool(tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult> {
     const result = await this.run(
       METHOD_TOOLS_CALL,
       { name: tool, arguments: args },
       this.callTimeoutMs,
+      signal,
     )
     return callResultFrom(result)
   }
 
-  private async run(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+  private async run(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     try {
-      return await this.transport.request(method, params, timeoutMs)
+      return await this.transport.request(method, params, timeoutMs, signal)
     } catch (error) {
       throw new Error(`MCP 服务器 ${this.name} 调用失败:${errorMessage(error)}`)
     }

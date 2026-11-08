@@ -116,6 +116,7 @@ export interface PageCall {
   limit: number
   resultId?: string
   legacyResume: boolean
+  signal?: AbortSignal
   session?: string
 }
 
@@ -218,7 +219,7 @@ export class McpManager {
     return this.reloadChain
   }
 
-  async call(qualified: string, args: Record<string, unknown>): Promise<McpCallResult> {
+  async call(qualified: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult> {
     const route = this.current.route(qualified)
     if (!route) throw new Error(`unknown tool: ${qualified}`)
     const [server, tool] = route
@@ -228,7 +229,7 @@ export class McpManager {
         `MCP 服务器 ${server} 当前未连接;到设置 → MCP 检查该服务器状态,或点"重新连接"后重试`,
       )
     }
-    return entry.client.callTool(tool, args)
+    return entry.client.callTool(tool, args, signal)
   }
 
   /**
@@ -253,7 +254,7 @@ export class McpManager {
       }
       return pageOf(found.text, found.isError, call, true, found.id)
     }
-    const result = await this.call(call.qualified, call.arguments).catch((error: unknown) => {
+    const result = await this.call(call.qualified, call.arguments, call.signal).catch((error: unknown) => {
       throw new PagedFailure('call', error instanceof Error ? error.message : String(error))
     })
     const resultId = this.storeCached(call.qualified, call.arguments, call.session, result)

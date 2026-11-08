@@ -25,7 +25,7 @@ import {
 import type { JsonRpcResponse } from './protocol.ts'
 
 export interface McpTransport {
-  request(method: string, params: unknown, timeoutMs: number): Promise<unknown>
+  request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown>
   notify(method: string, params?: unknown): Promise<void>
   shutdown(): Promise<void>
 }
@@ -33,6 +33,22 @@ export interface McpTransport {
 /** Serialize async sections (one request in flight per connection). */
 class Mutex {
   private tail: Promise<void> = Promise.resolve()
+
+  /** Queue like `run`, but drop the work if the turn was cancelled while queued. */
+  async runSignal<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+    const previous = this.tail
+    let release!: () => void
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await previous
+    try {
+      if (signal?.aborted) throw abortError()
+      return await fn()
+    } finally {
+      release()
+    }
+  }
 
   async run<T>(fn: () => Promise<T>): Promise<T> {
     const previous = this.tail
@@ -47,6 +63,26 @@ class Mutex {
       release()
     }
   }
+}
+
+/** A signal that aborts on timeout or when the caller cancels the turn. */
+function withCancel(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  timer.unref?.()
+  if (signal) {
+    const onAbort = () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }
+  return controller.signal
+}
+
+function abortError(): Error {
+  return new Error('请求已被取消')
 }
 
 function rpcError(error: { message: string; code: number }): Error {
@@ -67,6 +103,8 @@ export function decodeResponseValue(value: unknown): unknown {
 // ---------------------------------------------------------------------------
 
 interface PendingStdio {
+  signal?: AbortSignal
+  onAbort?: () => void
   resolve(value: unknown): void
   reject(error: Error): void
   timer: NodeJS.Timeout
@@ -146,6 +184,7 @@ class StdioTransport implements McpTransport {
     if (!waiter) return
     this.pending.delete(id)
     clearTimeout(waiter.timer)
+    if (waiter.onAbort && waiter.signal) waiter.signal.removeEventListener('abort', waiter.onAbort)
     waiter.resolve(value)
   }
 
@@ -165,8 +204,8 @@ class StdioTransport implements McpTransport {
     stdin.write(JSON.stringify(frame) + '\n')
   }
 
-  async request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
-    return this.mutex.run(async () => {
+  async request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    return this.mutex.runSignal(signal, async () => {
       if (this.closed) throw new Error(`MCP 服务器 ${this.name} 连接已断开`)
       const id = this.nextId
       this.nextId += 1
@@ -176,7 +215,20 @@ class StdioTransport implements McpTransport {
           reject(new Error(`MCP 请求超时(${method})`))
         }, timeoutMs)
         timer.unref?.()
-        this.pending.set(id, { resolve, reject, timer })
+        const waiter: PendingStdio = { resolve, reject, timer }
+        this.pending.set(id, waiter)
+        if (signal) {
+          const onAbort = () => {
+            if (this.pending.get(id) !== waiter) return
+            this.pending.delete(id)
+            clearTimeout(timer)
+            reject(abortError())
+          }
+          waiter.signal = signal
+          waiter.onAbort = onAbort
+          if (signal.aborted) onAbort()
+          else signal.addEventListener('abort', onAbort, { once: true })
+        }
       })
       try {
         this.write(requestFrame(id, method, params))
@@ -277,14 +329,14 @@ class HttpTransport implements McpTransport {
     }
   }
 
-  private async post(frame: unknown, timeoutMs: number, expectBody: boolean): Promise<unknown> {
+  private async post(frame: unknown, timeoutMs: number, expectBody: boolean, signal?: AbortSignal): Promise<unknown> {
     let response: Response
     try {
       response = await fetch(this.url, {
         method: 'POST',
         headers: this.requestHeaders(),
         body: JSON.stringify(frame),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: withCancel(timeoutMs, signal),
       })
     } catch (error) {
       throw new Error(`请求 ${this.url} 失败:${errorMessage(error)}`)
@@ -310,11 +362,11 @@ class HttpTransport implements McpTransport {
     }
   }
 
-  async request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
-    return this.mutex.run(async () => {
+  async request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    return this.mutex.runSignal(signal, async () => {
       const id = this.nextId
       this.nextId += 1
-      const raw = await this.post(requestFrame(id, method, params), timeoutMs, true)
+      const raw = await this.post(requestFrame(id, method, params), timeoutMs, true, signal)
       return decodeResponseValue(raw)
     })
   }
@@ -342,6 +394,8 @@ class HttpTransport implements McpTransport {
 // ---------------------------------------------------------------------------
 
 interface SseWaiter {
+  signal?: AbortSignal
+  onAbort?: () => void
   resolve(value: unknown): void
   reject(error: Error): void
   timer: NodeJS.Timeout
@@ -445,7 +499,7 @@ class SseTransport implements McpTransport {
     this.waiters.clear()
   }
 
-  private async post(frame: unknown, timeoutMs: number): Promise<void> {
+  private async post(frame: unknown, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     let response: Response
     try {
       response = await fetch(this.postUrl, {
@@ -457,7 +511,7 @@ class SseTransport implements McpTransport {
           ...this.headers,
         },
         body: JSON.stringify(frame),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: withCancel(timeoutMs, signal),
       })
     } catch (error) {
       throw new Error(`POST ${this.postUrl} 失败:${errorMessage(error)}`)
@@ -467,8 +521,8 @@ class SseTransport implements McpTransport {
     }
   }
 
-  async request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
-    return this.mutex.run(async () => {
+  async request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
+    return this.mutex.runSignal(signal, async () => {
       if (this.closed) throw new Error(`MCP 服务器 ${this.name} 连接已断开`)
       const id = this.nextId
       this.nextId += 1
@@ -478,10 +532,23 @@ class SseTransport implements McpTransport {
           reject(new Error(`MCP 请求超时(${method})`))
         }, timeoutMs)
         timer.unref?.()
-        this.waiters.set(id, { resolve, reject, timer })
+        const waiter: SseWaiter = { resolve, reject, timer }
+        this.waiters.set(id, waiter)
+        if (signal) {
+          const onAbort = () => {
+            if (this.waiters.get(id) !== waiter) return
+            this.waiters.delete(id)
+            clearTimeout(timer)
+            reject(abortError())
+          }
+          waiter.signal = signal
+          waiter.onAbort = onAbort
+          if (signal.aborted) onAbort()
+          else signal.addEventListener('abort', onAbort, { once: true })
+        }
       })
       try {
-        await this.post(requestFrame(id, method, params), timeoutMs)
+        await this.post(requestFrame(id, method, params), timeoutMs, signal)
       } catch (error) {
         const waiter = this.waiters.get(id)
         if (waiter) {

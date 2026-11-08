@@ -71,7 +71,8 @@ import { buildSystemPrompt } from './system-prompt.ts'
 import { isValidSkillName } from '../skills/skills.ts'
 import type { JobManager } from '../jobs/manager.ts'
 
-const MAX_STEPS = 100
+/** 单轮步骤默认不设上限:靠用户取消、循环检测与上下文预算收束。 */
+const MAX_STEPS = Number.POSITIVE_INFINITY
 const MAX_PARALLEL = 10
 const LOOP_THRESHOLD = 5
 /** One authoritative character budget for every tool result (mirrors Rust). */
@@ -323,6 +324,9 @@ export class SessionDriver {
     const controller = this.running.get(sessionId)
     if (!controller) return false
     controller.abort()
+    // Cache warming belongs to the cancelled turn: keep it from issuing a
+    // fresh provider request after the user pressed stop.
+    this.cacheWarmer.cancel(sessionId)
     return true
   }
 
@@ -716,6 +720,16 @@ export class SessionDriver {
         })
 
         const outputs = batch.outputs
+        if (batch.aborted) {
+          for (let index = 0; index < calls.length; index += 1) {
+            if (outputs[index]) continue
+            outputs[index] = {
+              content: '[工具错误] 命令被用户中断',
+              isError: true,
+              errorIdentity: { name: calls[index]!.name, code: 'cancelled' },
+            }
+          }
+        }
         for (let index = 0; index < calls.length; index += 1) {
           const call = calls[index]!
           const output = outputs[index] ?? {
@@ -916,6 +930,17 @@ export class SessionDriver {
     const inFlight = new Map<number, Promise<void>>()
     let next = 0
     let aborted = false
+    // Resolves the moment the user stops the turn. Every pool wait races it:
+    // a tool that cannot be interrupted must never keep the turn (and the UI's
+    // running state) alive after stop.
+    const stopSignal = new Promise<void>((resolve) => {
+      if (ctx.cancel.aborted) {
+        resolve()
+        return
+      }
+      const onAbort = () => resolve()
+      ctx.cancel.addEventListener('abort', onAbort, { once: true })
+    })
 
     const confinedFor = (state: PermissionState, call: ToolCallRef): boolean =>
       state.sandbox === 'read-only' && ctx.sandbox && !memoryAnchored(call, ctx.memoryRoot, ctx.cwd)
@@ -935,9 +960,17 @@ export class SessionDriver {
     }
 
     while (next < calls.length || inFlight.size > 0) {
+      if (ctx.cancel.aborted) {
+        aborted = true
+        break
+      }
       let started = false
       while (next < calls.length && inFlight.size < this.settings.maxParallel) {
         const state = this.permissionStateOf(ctx.sessionId)
+        if (ctx.cancel.aborted) {
+          aborted = true
+          break
+        }
         const call = calls[next]!
         const intercepted = this.services?.intercept?.(call, ctx.sessionId)
         if (intercepted) {
@@ -956,7 +989,15 @@ export class SessionDriver {
         if (gate.decision.kind === 'prompt' || gate.decision.kind === 'prompt-user') {
           // Interactive reviews are serial: drain the pool first.
           if (inFlight.size > 0) break
-          const outcome = await this.dispatchReviewed(call, gate, state, ctx, onSelectionChange)
+          const outcome = await Promise.race([
+            this.dispatchReviewed(call, gate, state, ctx, onSelectionChange),
+            stopSignal.then(() => null),
+          ])
+          if (outcome === null) {
+            aborted = true
+            next += 1
+            break
+          }
           outputs[next] = outcome.output
           if (outcome.abort) aborted = true
           next += 1
@@ -970,13 +1011,17 @@ export class SessionDriver {
         started = true
       }
       if (inFlight.size > 0) {
-        await Promise.race(inFlight.values())
+        await Promise.race([...inFlight.values(), stopSignal])
+        if (ctx.cancel.aborted) {
+          aborted = true
+          break
+        }
         continue
       }
       if (next >= calls.length) break
       if (!started) break
     }
-    return { outputs, aborted }
+    return { outputs, aborted: aborted || ctx.cancel.aborted }
   }
 
   /** Record the approval, resolve it (user or automatic reviewer), then act. */
