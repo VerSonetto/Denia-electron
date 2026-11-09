@@ -1,7 +1,7 @@
 {
   "name": "denia",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Denia desktop host: TypeScript agent runtime with the shared web console",
   "author": "Denia",
   "type": "module",
