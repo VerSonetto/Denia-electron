@@ -11,6 +11,13 @@ import { useSyncExternalStore } from 'react'
  */
 export type ConversationFoldMode = 'standard' | 'tool-group' | 'detailed'
 
+/** 可选的展示方式;设置页从这里渲染,不再另抄一份。 */
+export const CONVERSATION_FOLD_MODES: readonly ConversationFoldMode[] = [
+  'standard',
+  'tool-group',
+  'detailed',
+]
+
 const DEFAULT_MODE: ConversationFoldMode = 'standard'
 
 let current: ConversationFoldMode = DEFAULT_MODE

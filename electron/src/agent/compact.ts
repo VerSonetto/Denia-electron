@@ -25,6 +25,8 @@ export interface CompactOptions {
   config: AppConfig
   sessionId: string
   selection?: ModelSelection
+  /** Abort the summary request when the surrounding turn is cancelled. */
+  signal?: AbortSignal
   onFailed?: (message: string) => void
   onUpdated?: () => void
 }
@@ -35,20 +37,23 @@ interface MessageEvent {
   text: string
 }
 
+/** What one compaction pass did; callers use it for retry and messaging. */
+export type CompactOutcome = 'compacted' | 'nothing-to-compact' | 'failed'
+
 /** Fire and forget; returns the promise for tests. */
-export async function compactSession(options: CompactOptions): Promise<void> {
+export async function compactSession(options: CompactOptions): Promise<CompactOutcome> {
   const session = options.store.read(options.sessionId)
-  if (!session) return
+  if (!session) return 'nothing-to-compact'
   const turns = turnRanges(session.events)
   if (turns.length <= KEEP_TURNS) {
     options.onFailed?.('当前会话没有足够的可压缩历史')
-    return
+    return 'nothing-to-compact'
   }
   const summarizedTurns = turns.slice(0, -KEEP_TURNS)
   const summarized = summarizedTurns.flatMap((turn) => turn.messages)
   if (summarized.length < MIN_MESSAGES) {
     options.onFailed?.('当前会话没有足够的可压缩历史')
-    return
+    return 'nothing-to-compact'
   }
   const firstKept = turns[turns.length - KEEP_TURNS]!
   const replacesFrom = summarized[0]!.seq
@@ -71,7 +76,7 @@ export async function compactSession(options: CompactOptions): Promise<void> {
   const provider = findProvider(options.config, selection.provider) ?? options.config.providers[0]
   if (!provider) {
     options.onFailed?.('没有可用的模型提供商')
-    return
+    return 'failed'
   }
   const frozenSystem = header?.header.system
   const headerTools: ToolSchema[] = header?.header.tools ?? []
@@ -97,7 +102,10 @@ export async function compactSession(options: CompactOptions): Promise<void> {
   const system = cached ? cachedSystem! : SYSTEM_PROMPT
   const tools: ToolSchema[] = cached ? headerTools : []
   const transcript = messages.map((message) => message.content).join('\n\n')
+  if (options.signal?.aborted) return 'nothing-to-compact'
   const controller = new AbortController()
+  const abort = (): void => controller.abort()
+  options.signal?.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   timer.unref?.()
   try {
@@ -117,7 +125,7 @@ export async function compactSession(options: CompactOptions): Promise<void> {
     const summary = parts.join('').trim()
     if (summary === '') {
       options.onFailed?.('压缩摘要为空')
-      return
+      return 'failed'
     }
     const preTokens = estimateTokens(transcript)
     const postTokens = estimateTokens(summary)
@@ -135,7 +143,10 @@ export async function compactSession(options: CompactOptions): Promise<void> {
     } satisfies SessionEvent)
     options.store.flush(options.sessionId)
     options.onUpdated?.()
+    return 'compacted'
   } catch (error) {
+    // The surrounding turn's cancellation is not a compaction failure.
+    if (options.signal?.aborted) return 'nothing-to-compact'
     options.onFailed?.(
       controller.signal.aborted
         ? '压缩超时'
@@ -143,7 +154,9 @@ export async function compactSession(options: CompactOptions): Promise<void> {
           ? error.message
           : String(error),
     )
+    return 'failed'
   } finally {
+    options.signal?.removeEventListener('abort', abort)
     clearTimeout(timer)
   }
 }
@@ -178,19 +191,26 @@ function messageEventOf(event: Envelope): MessageEvent | null {
   return null
 }
 
-/** Split the log at turn boundaries so tool calls stay with their results. */
+/**
+ * Split the log at closed turns so tool calls stay with their results. A
+ * turn's prompt is logged just before its `turn-start` (it is the rewind
+ * point), so a range opens on the first message after the previous
+ * `turn-end` and closes on `turn-end`. The still-open turn at the end keeps
+ * its own range, which is what the keep window must protect.
+ */
 function turnRanges(events: Envelope[]): TurnRange[] {
   const out: TurnRange[] = []
   let current: TurnRange | null = null
   for (const event of events) {
-    if (event.type === 'turn-start') {
+    if (event.type === 'turn-end') {
       if (current) out.push(current)
-      current = { startSeq: event.seq, messages: [] }
+      current = null
       continue
     }
-    if (!current) current = { startSeq: 0, messages: [] }
     const message = messageEventOf(event)
-    if (message) current.messages.push(message)
+    if (!message) continue
+    if (!current) current = { startSeq: event.seq, messages: [] }
+    current.messages.push(message)
   }
   if (current) out.push(current)
   return out.filter((turn) => turn.messages.length > 0)

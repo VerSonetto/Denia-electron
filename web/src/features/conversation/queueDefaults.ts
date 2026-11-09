@@ -7,6 +7,9 @@
  */
 export type QueueDefaultAction = 'ask' | 'interject' | 'guide'
 
+/** 可选的默认处理方式;设置页从这里渲染,不再另抄一份。 */
+export const QUEUE_DEFAULT_ACTIONS: readonly QueueDefaultAction[] = ['ask', 'interject', 'guide']
+
 let current: QueueDefaultAction = 'ask'
 
 /** 宽松解析设置值；未知/缺省值一律回落到「每次询问」。 */

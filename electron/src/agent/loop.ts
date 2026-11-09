@@ -55,10 +55,12 @@ import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.
 import { deriveHistory, deriveSurface, hasOpenTurn, lastTurn } from './history.ts'
 import type { SurfaceItem } from './history.ts'
 import { CacheWarmer } from './cache-warm.ts'
+import { compactSession } from './compact.ts'
 import { loadConsoleCacheSettings } from './console-settings.ts'
 import { CLEARED_PLACEHOLDER, planMicrocompact, type MicrocompactSettings } from './microcompact.ts'
 import {
   buildRequestHeader,
+  compactionThresholdTokens,
   contextWindowOf,
   estimatePressure,
   frozenSystem,
@@ -77,6 +79,8 @@ import type { JobManager } from '../jobs/manager.ts'
 const MAX_STEPS = Number.POSITIVE_INFINITY
 const MAX_PARALLEL = 10
 const LOOP_THRESHOLD = 5
+/** Consecutive auto-summary failures before a session stops retrying. */
+const MAX_COMPACTION_FAILURES = 3
 /** One authoritative character budget for every tool result (mirrors Rust). */
 const OUTPUT_BUDGET_CHARS = 32_000
 
@@ -194,6 +198,8 @@ export class SessionDriver {
   /** Session-scoped "allow for this window" cache, keyed by normalized action. */
   private readonly grants = new Map<string, Set<string>>()
   private readonly cacheWarmer = new CacheWarmer()
+  /** Consecutive auto-compaction failures per session; reset on success. */
+  private readonly compactionFailures = new Map<string, number>()
   private services?: SessionServices
   readonly settings: DriverSettings
 
@@ -566,6 +572,9 @@ export class SessionDriver {
     turnOpen = true
 
     const signatures = new Map<string, number>()
+    // One summary attempt per turn: a second pass over the same turn would
+    // re-summarize history the user has not refilled yet.
+    let compactionAttempted = false
 
     try {
       if (roleError !== null) {
@@ -606,6 +615,22 @@ export class SessionDriver {
             cacheSettings.microcompact,
             cacheSettings.compactionRatio,
           )
+        }
+        if (!role?.legacy) {
+          compactionAttempted = await this.applyAutoCompact({
+            sessionId,
+            selection,
+            provider,
+            model: selection.model,
+            ratio: cacheSettings.compactionRatio,
+            header: session.header,
+            signal: controller.signal,
+            attempted: compactionAttempted,
+          })
+        }
+        if (controller.signal.aborted) {
+          closeTurn(abortedReason())
+          return
         }
         let events = this.store.read(sessionId)?.events ?? []
         let modelEvents = role?.legacy ? this.services?.historyFor?.(sessionId, events) ?? events : events
@@ -942,6 +967,81 @@ export class SessionDriver {
         replaces: seq,
       })
     }
+  }
+
+  /**
+   * Summarize older history once the projected prompt reaches the configured
+   * fraction of the window. This runs before each request, but it is a gate:
+   * below the threshold it returns without calling the model.
+   *
+   * The pressure number is a `usage` anchor from the provider plus whatever
+   * the log appended since, so it only ever trusts a real measurement. A
+   * summary appended after that anchor makes it stale — the next request will
+   * report a fresh size — and one attempt per turn keeps a long turn from
+   * re-summarizing the same window.
+   */
+  private async applyAutoCompact(options: {
+    sessionId: string
+    selection: ModelSelection
+    provider: ProviderConfig
+    model: string
+    ratio: number
+    header: SessionHeader
+    signal: AbortSignal
+    attempted: boolean
+  }): Promise<boolean> {
+    if (options.attempted || options.signal.aborted) return true
+    if ((this.compactionFailures.get(options.sessionId) ?? 0) >= MAX_COMPACTION_FAILURES) {
+      return false
+    }
+    const preset = this.services?.presetFor?.(options.sessionId, options.header)
+    if (preset && !preset.features.compaction) return false
+
+    const events = this.store.read(options.sessionId)?.events ?? []
+    if (events.length === 0) return false
+    const surface = deriveSurface(events)
+    if (surface.length === 0) return false
+    const window = contextWindowOf(options.provider, options.model)
+    const threshold = compactionThresholdTokens(window, options.ratio)
+    if (threshold === null || threshold <= 0) return false
+    const pressure = estimatePressure(events, surface, window, options.ratio)
+    if (!pressure || pressure.projectedTokens < threshold) return false
+
+    // A summary newer than the newest usage sample means the sample predates
+    // the rewrite: compacting again would act on a stale size.
+    let anchorSeq = -1
+    let compactionSeq = -1
+    for (const event of events) {
+      if (event.type === 'assistant-message' && event.usage) anchorSeq = event.seq
+      else if (event.type === 'compaction-summary') compactionSeq = event.seq
+    }
+    if (compactionSeq > anchorSeq) return false
+
+    let failure: string | null = null
+    const outcome = await compactSession({
+      store: this.store,
+      config: this.getConfig(),
+      sessionId: options.sessionId,
+      selection: options.selection,
+      signal: options.signal,
+      onFailed: (message) => {
+        failure = message
+      },
+    })
+    if (options.signal.aborted) return true
+    if (outcome === 'nothing-to-compact') return true
+    if (outcome === 'failed') {
+      this.compactionFailures.set(
+        options.sessionId,
+        (this.compactionFailures.get(options.sessionId) ?? 0) + 1,
+      )
+      console.warn('[denia] 自动压缩失败:', failure)
+      return true
+    }
+    this.compactionFailures.delete(options.sessionId)
+    // The summary rewrote the model surface; a cached replay is stale.
+    this.cacheWarmer.cancel(options.sessionId)
+    return true
   }
 
   /** Tool schemas visible under the current permission state. */

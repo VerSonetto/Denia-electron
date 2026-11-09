@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import { subscribeServerEvents } from '../serverEvents'
+import { DropdownField } from './ui/controls'
 import { useIsMobile } from '../hooks/useIsMobile'
 import type { Notify } from '../App'
 import {
@@ -18,14 +19,16 @@ import {
 import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsChannels, IconSettingsRuntime, IconSettingsAppearance } from './SettingsIcons'
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
-import { normalizePermissionMode, type PermissionMode } from '../types'
-import { PERMISSION_LEVELS, storePermission } from './PermissionSelector'
+import { normalizePermissionChoice, type PermissionChoice } from '../types'
+import { defaultPermissionLevels, storePermission } from './PermissionSelector'
 import {
+  QUEUE_DEFAULT_ACTIONS,
   normalizeQueueDefaultAction,
   setQueueDefaultAction,
   type QueueDefaultAction,
 } from '../features/conversation/queueDefaults'
 import {
+  CONVERSATION_FOLD_MODES,
   normalizeConversationFoldMode,
   setConversationFoldMode,
   type ConversationFoldMode,
@@ -56,41 +59,38 @@ const TABS: SettingsTab[] = [
   'appearance',
 ]
 
-/** 新建会话默认权限档位:计划模式只在会话内显式进入,不列为默认。 */
-const DEFAULT_PERMISSION_OPTIONS: {
-  id: PermissionMode
-  label: string
-  nameKey: Parameters<typeof t>[0]
-}[] = PERMISSION_LEVELS.filter((level) => level.level !== 'plan').map((level) => ({
-  id: level.level,
-  label: t(level.nameKey),
-  nameKey: level.nameKey,
-}))
+/** 队列处理方式的文案映射;可选项本身来自 QUEUE_DEFAULT_ACTIONS。 */
+const QUEUE_LABELS: Record<QueueDefaultAction, Parameters<typeof t>[0]> = {
+  ask: 'queueDefaultAsk',
+  interject: 'queueModeInterject',
+  guide: 'queueModeGuide',
+}
 
-/** 队列消息默认处理方式:每次询问 / 插话 / 引导。 */
-const QUEUE_DEFAULT_OPTIONS: {
-  id: QueueDefaultAction
-  nameKey: Parameters<typeof t>[0]
-}[] = [
-  { id: 'ask', nameKey: 'queueDefaultAsk' },
-  { id: 'interject', nameKey: 'queueModeInterject' },
-  { id: 'guide', nameKey: 'queueModeGuide' },
-]
+/** 折叠方式的文案映射;可选项本身来自 CONVERSATION_FOLD_MODES。 */
+const FOLD_LABELS: Record<
+  ConversationFoldMode,
+  { nameKey: Parameters<typeof t>[0]; hintKey: Parameters<typeof t>[0] }
+> = {
+  standard: { nameKey: 'conversationFoldStandard', hintKey: 'conversationFoldStandardHint' },
+  'tool-group': { nameKey: 'conversationFoldToolGroup', hintKey: 'conversationFoldToolGroupHint' },
+  detailed: { nameKey: 'conversationFoldDetailed', hintKey: 'conversationFoldDetailedHint' },
+}
 
-/** 工作步骤展示方式:标准按整段折叠,工具分组只合并连续同类工具,详细完整展开。 */
-const CONVERSATION_FOLD_OPTIONS: {
-  id: ConversationFoldMode
-  nameKey: Parameters<typeof t>[0]
-  hintKey: Parameters<typeof t>[0]
-}[] = [
-  { id: 'standard', nameKey: 'conversationFoldStandard', hintKey: 'conversationFoldStandardHint' },
-  { id: 'tool-group', nameKey: 'conversationFoldToolGroup', hintKey: 'conversationFoldToolGroupHint' },
-  { id: 'detailed', nameKey: 'conversationFoldDetailed', hintKey: 'conversationFoldDetailedHint' },
-]
-
-function normalizeDefaultPermission(raw: unknown): PermissionMode {
-  const mode = typeof raw === 'string' ? normalizePermissionMode(raw) : 'auto-edit'
+function normalizeDefaultPermission(raw: unknown): PermissionChoice {
+  const mode = typeof raw === 'string' ? normalizePermissionChoice(raw) : 'auto-edit'
   return mode === 'plan' ? 'auto-edit' : mode
+}
+
+/** Summarization threshold as a whole percent; the server stores a ratio. */
+function normalizeCompactionPercent(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 && raw <= 1
+    ? Math.min(100, Math.max(1, Math.round(raw * 100)))
+    : 90
+}
+
+function compactionPercentOf(value: unknown): number {
+  if (typeof value !== 'object' || value === null) return 90
+  return normalizeCompactionPercent((value as Record<string, unknown>).compactRatio)
 }
 
 function tabIcon(tab: SettingsTab, size = 16) {
@@ -222,10 +222,13 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
 
   const [theme, setTheme] = useState('system')
   const [locale, setLocaleState] = useState('zh')
-  const [defaultPermission, setDefaultPermission] = useState<PermissionMode>('auto-edit')
+  const [defaultPermission, setDefaultPermission] = useState<PermissionChoice>('auto-edit')
+  const [showApproveForMe, setShowApproveForMe] = useState(false)
   const [queueDefaultAction, setQueueDefaultActionState] = useState<QueueDefaultAction>('ask')
   const [conversationFoldMode, setConversationFoldModeState] =
     useState<ConversationFoldMode>('standard')
+  const [compactionPercent, setCompactionPercent] = useState('90')
+  const [savedCompactionPercent, setSavedCompactionPercent] = useState('90')
   const [consoleValue, setConsoleValue] = useState<Record<string, unknown>>({})
   const [consoleRevision, setConsoleRevision] = useState(0)
   const [promptText, setPromptText] = useState('')
@@ -243,11 +246,16 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
     // 弹窗开着的中途,一旦卸载用户正在填的表单就没了。
     if (!loadedOnceRef.current) setLoading(true)
     try {
-      const [nextDescribe, nextPrompt, nextRules] = await Promise.all([
+      const [nextDescribe, nextPrompt, nextRules, permissionCatalog] = await Promise.all([
         api.getSettings(),
         api.getSystemPrompt(),
         api.getGlobalRules(),
+        api.permissionCatalog(),
       ])
+      const supportsApproveForMe = Boolean(
+        permissionCatalog?.modes.includes('approve-for-me'),
+      )
+      setShowApproveForMe(supportsApproveForMe)
       setPromptText(nextPrompt.text)
       setPromptSource(nextPrompt.source)
       setRulesText(nextRules.text)
@@ -259,8 +267,13 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
         setConsoleValue(console.value)
         setTheme((console.value.theme as string) ?? 'system')
         setLocaleState((console.value.locale as string) ?? 'zh')
+        const storedPermission = normalizeDefaultPermission(
+          console.value.defaultPermissionMode,
+        )
         setDefaultPermission(
-          normalizeDefaultPermission(console.value.defaultPermissionMode),
+          storedPermission === 'approve-for-me' && !supportsApproveForMe
+            ? 'auto-edit'
+            : storedPermission,
         )
         setQueueDefaultActionState(
           normalizeQueueDefaultAction(console.value.queueDefaultAction),
@@ -268,6 +281,9 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
         setConversationFoldModeState(
           normalizeConversationFoldMode(console.value.conversationFoldMode),
         )
+        const percent = String(compactionPercentOf(console.value.compaction))
+        setCompactionPercent(percent)
+        setSavedCompactionPercent(percent)
         setConsoleRevision(console.revision)
       }
 
@@ -330,76 +346,73 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
     }
   }
 
-  /** 默认权限档位:写 console 设置,并同步本地草稿态档位记忆。 */
-  const saveDefaultPermission = async () => {
-    setSaving(true)
-    try {
-      const view = await api.replaceNamespace(
-        CONSOLE_NS,
-        { ...consoleValue, theme, locale, defaultPermissionMode: defaultPermission },
-        consoleRevision,
-      )
-      setConsoleRevision((view as { revision: number }).revision)
-      setConsoleValue((current) => ({
-        ...current,
-        defaultPermissionMode: defaultPermission,
-      }))
-      storePermission(defaultPermission)
-      notify('ok', t('defaultPermissionSaved'))
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-      void load()
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  /** 队列消息默认处理方式:写 console 设置,并同步发送路径的前端缓存。 */
-  const saveQueueDefaultAction = async () => {
+  /** 通用设置项:整份 console 命名空间替换,写成功后才更新本地快照。 */
+  const saveGeneral = async (
+    patch: Record<string, unknown>,
+    message: string,
+  ): Promise<boolean> => {
     setSaving(true)
     try {
       const next = {
         ...consoleValue,
-        theme,
-        locale,
-        defaultPermissionMode: defaultPermission,
-        queueDefaultAction,
-      }
-      const view = await api.replaceNamespace(CONSOLE_NS, next, consoleRevision)
-      setConsoleRevision((view as { revision: number }).revision)
-      setConsoleValue(next)
-      setQueueDefaultAction(queueDefaultAction)
-      notify('ok', t('queueDefaultSaved'))
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-      void load()
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  /** 对话流折叠方式:写 console 设置,并同步对话流的本地缓存。 */
-  const saveConversationFoldMode = async () => {
-    setSaving(true)
-    try {
-      const next = {
-        ...consoleValue,
-        theme,
-        locale,
         defaultPermissionMode: defaultPermission,
         queueDefaultAction,
         conversationFoldMode,
+        ...patch,
       }
       const view = await api.replaceNamespace(CONSOLE_NS, next, consoleRevision)
       setConsoleRevision((view as { revision: number }).revision)
       setConsoleValue(next)
-      setConversationFoldMode(conversationFoldMode)
-      notify('ok', t('conversationFoldSaved'))
+      notify('ok', message)
+      return true
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       void load()
+      return false
     } finally {
       setSaving(false)
+    }
+  }
+
+  /** 权限档位:选中即保存,并同步本地草稿态档位记忆。 */
+  const changeDefaultPermission = (next: PermissionChoice): void => {
+    setDefaultPermission(next)
+    storePermission(next)
+    void saveGeneral({ defaultPermissionMode: next }, t('defaultPermissionSaved'))
+  }
+
+  /** 队列消息默认处理:选中即保存,并同步发送路径的前端缓存。 */
+  const changeQueueDefaultAction = (next: QueueDefaultAction): void => {
+    setQueueDefaultActionState(next)
+    setQueueDefaultAction(next)
+    void saveGeneral({ queueDefaultAction: next }, t('queueDefaultSaved'))
+  }
+
+  /** 工作步骤展示:选中即保存,并同步对话流的本地缓存。 */
+  const changeConversationFoldMode = (next: ConversationFoldMode): void => {
+    setConversationFoldModeState(next)
+    setConversationFoldMode(next)
+    void saveGeneral({ conversationFoldMode: next }, t('conversationFoldSaved'))
+  }
+
+  /** 上下文压缩阈值:校验后写 console.compaction.compactRatio,下一轮生效。 */
+  const saveCompactionThreshold = async (): Promise<void> => {
+    const percent = Number(compactionPercent)
+    if (!Number.isInteger(percent) || percent < 1 || percent > 100) {
+      notify('err', t('compactionThresholdInvalid'))
+      return
+    }
+    const current =
+      typeof consoleValue.compaction === 'object' && consoleValue.compaction !== null
+        ? (consoleValue.compaction as Record<string, unknown>)
+        : {}
+    const saved = await saveGeneral(
+      { compaction: { ...current, compactRatio: percent / 100 } },
+      t('compactionThresholdSaved'),
+    )
+    if (saved) {
+      setCompactionPercent(String(percent))
+      setSavedCompactionPercent(String(percent))
     }
   }
 
@@ -465,6 +478,21 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
       setSaving(false)
     }
   }
+
+  const permissionOptions = defaultPermissionLevels(showApproveForMe).map((entry) => ({
+    id: entry.level,
+    label: t(entry.nameKey),
+    hint: t(entry.descKey),
+  }))
+  const queueOptions = QUEUE_DEFAULT_ACTIONS.map((id) => ({
+    id,
+    label: t(QUEUE_LABELS[id]),
+  }))
+  const foldOptions = CONVERSATION_FOLD_MODES.map((id) => ({
+    id,
+    label: t(FOLD_LABELS[id].nameKey),
+    hint: t(FOLD_LABELS[id].hintKey),
+  }))
 
   return (
     <div
@@ -570,81 +598,84 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
                 {tab === 'runtime' && <RuntimeSettings />}
                 {tab === 'subagents' && <SubagentSettings notify={notify} />}
                 {tab === 'general' && (
-                  <div className="setm-cards">
-                    <SetmCard
-                      title={t('defaultPermissionTitle')}
-                      hint={t('defaultPermissionHint')}
-                      summary={t(
-                        (DEFAULT_PERMISSION_OPTIONS.find((o) => o.id === defaultPermission) ??
-                          DEFAULT_PERMISSION_OPTIONS[1]).nameKey,
-                      )}
-                      open={openCard === 'permission'}
-                      onToggle={() => toggleCard('permission')}
-                    >
-                      <SetmTiles
-                        value={defaultPermission}
-                        options={DEFAULT_PERMISSION_OPTIONS}
-                        onChange={setDefaultPermission}
-                      />
-                      <SetmActions>
-                        <SetmBtn disabled={saving} onClick={() => void saveDefaultPermission()}>
-                          {t('save')}
-                        </SetmBtn>
-                      </SetmActions>
-                    </SetmCard>
+                  <div className="setm-general">
+                    <div className="setm-general-row">
+                      <div className="setm-general-copy">
+                        <div className="setm-general-title">{t('defaultPermissionTitle')}</div>
+                        <p className="setm-general-hint">{t('defaultPermissionHint')}</p>
+                      </div>
+                      <div className="setm-general-control">
+                        <DropdownField
+                          label=""
+                          value={defaultPermission}
+                          options={permissionOptions}
+                          onChange={changeDefaultPermission}
+                          disabled={saving}
+                        />
+                      </div>
+                    </div>
 
-                    <SetmCard
-                      title={t('queueDefaultActionTitle')}
-                      hint={t('queueDefaultActionHint')}
-                      summary={t(
-                        (QUEUE_DEFAULT_OPTIONS.find((o) => o.id === queueDefaultAction) ??
-                          QUEUE_DEFAULT_OPTIONS[0]).nameKey,
-                      )}
-                      open={openCard === 'queue-default'}
-                      onToggle={() => toggleCard('queue-default')}
-                    >
-                      <SetmTiles
-                        value={queueDefaultAction}
-                        options={QUEUE_DEFAULT_OPTIONS.map((option) => ({
-                          id: option.id,
-                          label: t(option.nameKey),
-                        }))}
-                        onChange={setQueueDefaultActionState}
-                      />
-                      <SetmActions>
-                        <SetmBtn disabled={saving} onClick={() => void saveQueueDefaultAction()}>
-                          {t('save')}
-                        </SetmBtn>
-                      </SetmActions>
-                    </SetmCard>
+                    <div className="setm-general-row">
+                      <div className="setm-general-copy">
+                        <div className="setm-general-title">{t('queueDefaultActionTitle')}</div>
+                        <p className="setm-general-hint">{t('queueDefaultActionHint')}</p>
+                      </div>
+                      <div className="setm-general-control">
+                        <DropdownField
+                          label=""
+                          value={queueDefaultAction}
+                          options={queueOptions}
+                          onChange={changeQueueDefaultAction}
+                          disabled={saving}
+                        />
+                      </div>
+                    </div>
 
-                    <SetmCard
-                      title={t('conversationFoldTitle')}
-                      hint={t(
-                        (CONVERSATION_FOLD_OPTIONS.find((o) => o.id === conversationFoldMode) ??
-                          CONVERSATION_FOLD_OPTIONS[0]).hintKey,
-                      )}
-                      summary={t(
-                        (CONVERSATION_FOLD_OPTIONS.find((o) => o.id === conversationFoldMode) ??
-                          CONVERSATION_FOLD_OPTIONS[0]).nameKey,
-                      )}
-                      open={openCard === 'conversation-fold'}
-                      onToggle={() => toggleCard('conversation-fold')}
-                    >
-                      <SetmTiles
-                        value={conversationFoldMode}
-                        options={CONVERSATION_FOLD_OPTIONS.map((option) => ({
-                          id: option.id,
-                          label: t(option.nameKey),
-                        }))}
-                        onChange={setConversationFoldModeState}
-                      />
-                      <SetmActions>
-                        <SetmBtn disabled={saving} onClick={() => void saveConversationFoldMode()}>
+                    <div className="setm-general-row">
+                      <div className="setm-general-copy">
+                        <div className="setm-general-title">{t('conversationFoldTitle')}</div>
+                        <p className="setm-general-hint">
+                          {t(FOLD_LABELS[conversationFoldMode].hintKey)}
+                        </p>
+                      </div>
+                      <div className="setm-general-control">
+                        <DropdownField
+                          label=""
+                          value={conversationFoldMode}
+                          options={foldOptions}
+                          onChange={changeConversationFoldMode}
+                          disabled={saving}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="setm-general-row">
+                      <div className="setm-general-copy">
+                        <div className="setm-general-title">{t('compactionThresholdTitle')}</div>
+                        <p className="setm-general-hint">{t('compactionThresholdHint')}</p>
+                      </div>
+                      <div className="setm-general-control setm-general-threshold">
+                        <input
+                          className="setm-input mono"
+                          type="text"
+                          inputMode="numeric"
+                          value={compactionPercent}
+                          aria-label={t('compactionThresholdLabel')}
+                          onChange={(event) => setCompactionPercent(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') void saveCompactionThreshold()
+                          }}
+                        />
+                        <span className="setm-general-unit">%</span>
+                        <SetmBtn
+                          small
+                          disabled={saving || compactionPercent === savedCompactionPercent}
+                          onClick={() => void saveCompactionThreshold()}
+                        >
                           {t('save')}
                         </SetmBtn>
-                      </SetmActions>
-                    </SetmCard>
+                      </div>
+                    </div>
                   </div>
                 )}
 

@@ -773,11 +773,12 @@ export default function SessionsPage({
     follow()
   }, [running, follow])
 
-  // 运行中的会话才需要 SSE follow 长连接;普通浏览走分页快照,
-  // 避免打开长会话就把完整历史加载进服务端 live cache。
+  // 运行中或正在压缩的会话才需要 SSE follow 长连接;普通浏览走分页快照,
+  // 避免打开长会话就把完整历史加载进服务端 live cache。压缩期间保持 follow
+  // 才能收到收尾的 compaction-summary 事件。
   useEffect(() => {
-    if (activeId && running) ensureFollowing(activeId)
-  }, [activeId, running])
+    if (activeId && (running || compactingAt !== null)) ensureFollowing(activeId)
+  }, [activeId, running, compactingAt])
 
   useEffect(() => {
     syncPromptHeight()

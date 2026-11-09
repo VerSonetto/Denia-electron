@@ -147,12 +147,12 @@ export function latestPermissionChoice(events: SessionEnvelope[]): PermissionCho
  * 设置里的"默认权限模式":无本地显式记忆时的输入框初始档位。
  * 计划模式不出现在设置里,取到也回落自动编辑(与后端校验一致)。
  */
-export async function consoleDefaultPermission(): Promise<PermissionMode> {
+export async function consoleDefaultPermission(): Promise<PermissionChoice> {
   try {
     const describe = await api.getSettings()
     const console = describe.namespaces.find((ns) => ns.ns === 'console')
     const raw = console?.value.defaultPermissionMode
-    const mode = typeof raw === 'string' ? normalizePermissionMode(raw) : 'auto-edit'
+    const mode = typeof raw === 'string' ? normalizePermissionChoice(raw) : 'auto-edit'
     return mode === 'plan' ? 'auto-edit' : mode
   } catch {
     return 'auto-edit'

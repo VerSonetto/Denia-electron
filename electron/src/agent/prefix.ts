@@ -135,6 +135,27 @@ function messageTokens(item: SurfaceItem): number {
   return roughTokens(item.message.content) + Math.ceil(calls / 4)
 }
 
+/**
+ * Token pressure at which LLM summarization runs: `window × compactRatio`.
+ * Null when the model has no known window.
+ */
+export function compactionThresholdTokens(
+  contextWindow: number | undefined,
+  compactRatio: number,
+): number | null {
+  if (contextWindow === undefined || contextWindow <= 0) return null
+  return Math.floor(contextWindow * compactRatio)
+}
+
+/** The cheap cleanup line sits 10% below summarization. */
+function microcompactThresholdTokens(
+  contextWindow: number | undefined,
+  compactRatio: number,
+): number | null {
+  const compactAt = compactionThresholdTokens(contextWindow, compactRatio)
+  return compactAt === null ? null : Math.floor(compactAt * 0.9)
+}
+
 export interface PressureEstimate {
   /** Provider-reported prompt size at the newest usage anchor. */
   anchorTokens: number
@@ -163,6 +184,7 @@ export function estimatePressure(
     anchorSeq = event.seq
   }
   if (anchorSeq === null) return null
+  const compactAt = compactionThresholdTokens(contextWindow, compactRatio)
   let trailing = 0
   for (const item of surface) {
     if (item.seq > anchorSeq) trailing += messageTokens(item)
@@ -171,9 +193,9 @@ export function estimatePressure(
     anchorTokens: billed,
     projectedTokens: billed + trailing,
     thresholdTokens:
-      contextWindow === undefined || contextWindow <= 0
+      compactAt === null
         ? null
-        : Math.floor(contextWindow * compactRatio * 0.9),
+        : Math.floor(compactAt * 0.9),
   }
 }
 

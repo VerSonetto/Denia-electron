@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import { clearCompacting } from '../appStore'
+import { clearCompacting, compactingAtOf } from '../appStore'
 import { applyEnvelopes, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
@@ -275,6 +275,17 @@ export function SessionView({
     }
     const unsubscribe = attach(id, {
       onSnapshot: (header, snapshot, meta) => {
+        // 压缩期间切走再回来:快照里已有摘要说明压缩早已收尾,标记不能
+        // 留到 TTL 过期,否则切回来会一直显示"正在压缩"。
+        const compactedAt = compactingAtOf(id)
+        if (
+          compactedAt !== null &&
+          snapshot.some(
+            (event) => event.type === 'compaction-summary' && event.time >= compactedAt,
+          )
+        ) {
+          clearCompacting(id)
+        }
         olderRequestRef.current?.abort()
         olderRequestRef.current = null
         setLoadingOlder(false)

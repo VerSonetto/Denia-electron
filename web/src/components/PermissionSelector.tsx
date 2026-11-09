@@ -73,6 +73,11 @@ function levelsFor(showApproveForMe: boolean): ReadonlyArray<{
   ]
 }
 
+/** 可作为默认档位的选项:计划模式只在会话内显式进入,不列为默认。 */
+export function defaultPermissionLevels(showApproveForMe: boolean) {
+  return levelsFor(showApproveForMe).filter((entry) => entry.level !== 'plan')
+}
+
 function levelMeta(level: PermissionChoice, levels: ReturnType<typeof levelsFor>) {
   return levels.find((entry) => entry.level === level) ?? levels[1] ?? PERMISSION_LEVELS[1]!
 }

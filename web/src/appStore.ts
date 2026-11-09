@@ -205,17 +205,9 @@ export function useCompactingFor(id: string | null): number | null {
   return useApp((s) => (id === null ? null : (s.compactingIds[id] ?? null)))
 }
 
-/** SSE 连接快照:running 已结束的会话,其压缩标记也一并清掉
- *  (刷新后服务端权威的 running 是 false,说明任务早已收尾)。 */
-export function pruneCompactingByRunning(runningIds: Record<string, boolean>) {
-  const ids = Object.keys(state.compactingIds)
-  if (ids.length === 0) return
-  const stale = ids.filter((id) => !runningIds[id])
-  if (stale.length === 0) return
-  const next = { ...state.compactingIds }
-  for (const id of stale) delete next[id]
-  writeCompacting(next)
-  setState({ compactingIds: next })
+/** 某会话压缩的发起时刻,未在压缩为 null(快照恢复时用它比对摘要时间)。 */
+export function compactingAtOf(id: string): number | null {
+  return state.compactingIds[id] ?? null
 }
 
 export function useRunningIds(): Record<string, boolean> {

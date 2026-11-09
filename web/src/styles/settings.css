@@ -1110,6 +1110,87 @@
   }
 }
 
+/* 常规页:偏好项按行排列,右侧直接给可操作的控件。 */
+.setm-general {
+  display: flex;
+  flex-direction: column;
+}
+
+.setm-general-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  gap: 20px;
+  align-items: center;
+  padding: 16px 2px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.setm-general-row:first-child {
+  padding-top: 6px;
+}
+
+.setm-general-row:last-child {
+  border-bottom: none;
+}
+
+.setm-general-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.setm-general-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.setm-general-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--label-tertiary);
+}
+
+.setm-general-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.setm-general-control .field {
+  width: 100%;
+}
+
+.setm-general-threshold {
+  justify-content: flex-end;
+}
+
+.setm-general-threshold .setm-input {
+  width: 72px;
+  flex: none;
+  text-align: center;
+}
+
+.setm-general-unit {
+  font-size: 12px;
+  color: var(--label-tertiary);
+}
+
+@media (max-width: 620px) {
+  .setm-general-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .setm-general-control {
+    justify-content: flex-start;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
