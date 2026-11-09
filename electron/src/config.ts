@@ -42,6 +42,14 @@ export interface ProviderConfig {
   defaultMaxTokens?: number
   headers?: Record<string, string>
   inlineThinkTags?: boolean
+  /** Replay assistant reasoning text back in `chat/completions` history.
+   *
+   * Off by default: most OpenAI-compatible gateways either ignore it or bill it
+   * again on every request, and the text is the largest part of a long coding
+   * transcript. Providers whose thinking mode has to see the previous turn's
+   * reasoning (interleaved tool calls) can turn it on. The Anthropic protocol
+   * keeps replaying signed thinking blocks either way. */
+  replayReasoning?: boolean
   /** Request the provider's long cache tier: Anthropic `ttl: "1h"` (with the
    * extended-cache-ttl beta) and OpenAI `prompt_cache_retention: "24h"`. */
   longCache?: boolean
@@ -232,6 +240,7 @@ function providerFromRaw(
     ...(typeof raw.defaultMaxTokens === 'number' ? { defaultMaxTokens: raw.defaultMaxTokens } : {}),
     ...(headersFromRaw(raw.headers) ? { headers: headersFromRaw(raw.headers) } : {}),
     ...(typeof raw.inlineThinkTags === 'boolean' ? { inlineThinkTags: raw.inlineThinkTags } : {}),
+    ...(raw.replayReasoning === true ? { replayReasoning: true } : {}),
     ...(raw.longCache === true ? { longCache: true } : {}),
     supportsPromptCacheKey: raw.supportsPromptCacheKey !== false,
   }

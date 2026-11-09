@@ -5,6 +5,7 @@ import { BashTool } from './bash.ts'
 import { fileTools } from './files.ts'
 import { ExitPlanTool } from './plan.ts'
 import { searchTools } from './search.ts'
+import { ReadToolOutputTool } from './output.ts'
 import { TodoWriteTool } from './todo.ts'
 import type { Tool } from './types.ts'
 
@@ -32,6 +33,13 @@ export class ToolRegistry {
   }
 
   static builtin(): ToolRegistry {
-    return new ToolRegistry([BashTool, ...fileTools, ...searchTools, TodoWriteTool, ExitPlanTool])
+    return new ToolRegistry([
+      BashTool,
+      ...fileTools,
+      ...searchTools,
+      ReadToolOutputTool,
+      TodoWriteTool,
+      ExitPlanTool,
+    ])
   }
 }

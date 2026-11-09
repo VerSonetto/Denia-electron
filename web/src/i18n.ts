@@ -719,6 +719,11 @@ const zh = {
   'llm.field.inlineThinkHint': '定向兼容:网关把推理内联进 content(以 </think> 收尾)而不是标准 reasoning_content 时,开启后把收尾标记之前的文本拆进推理块。只对确有该行为的网关开启,否则正常流式首字会被缓冲。',
   'llm.field.inlineThinkOff': '关闭',
   'llm.field.inlineThinkOn': '开启',
+  'llm.field.replayReasoningLabel': '回传思考',
+  'llm.field.replayReasoningHint':
+    '把历史 assistant 消息里的推理正文一起发给网关。默认关闭:多数 OpenAI 兼容网关不认这个字段,而它会让每一轮都重复计费上一轮的思考。只有当供应商的思考模式必须看到上一轮推理才能继续工具调用时再开启。Anthropic 协议的签名思考不受此开关影响。',
+  'llm.field.replayReasoningOff': '不回传',
+  'llm.field.replayReasoningOn': '回传',
   'llm.field.keyValueLabel': '密钥值',
   'llm.field.keyValueHint': '保存在本机凭据存储;可随时点右侧眼睛查看。',
   'llm.field.keyPasteOptional': '留空则仅保存引用(密钥应已存在于环境中)。',
@@ -2137,6 +2142,11 @@ const en: typeof zh = {
   'llm.field.inlineThinkHint': 'Targeted compatibility: for gateways that inline reasoning into content (closed by </think>) instead of the standard reasoning_content channel, splits the text before the marker into a reasoning block. Enable only for gateways that behave this way; otherwise normal streams are buffered before the first token.',
   'llm.field.inlineThinkOff': 'Off',
   'llm.field.inlineThinkOn': 'On',
+  'llm.field.replayReasoningLabel': 'Replay reasoning',
+  'llm.field.replayReasoningHint':
+    'Sends historical assistant reasoning text back to the gateway. Off by default: most OpenAI-compatible gateways ignore the field, and it re-bills every earlier turn on each request. Turn it on only when the provider needs the previous turn reasoning to continue tool calls. Signed thinking on the Anthropic protocol is unaffected.',
+  'llm.field.replayReasoningOff': 'Off',
+  'llm.field.replayReasoningOn': 'On',
   'llm.field.keyValueLabel': 'Key value',
   'llm.field.keyValueHint': 'Saved to the local credential store; use the eye button to view it anytime.',
   'llm.field.keyPasteOptional': 'Leave empty to keep the reference only (the key should already exist).',

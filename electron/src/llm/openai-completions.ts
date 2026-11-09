@@ -45,7 +45,11 @@ interface RawChunk {
   error?: { message?: string; code?: string; type?: string }
 }
 
-function toOpenAiMessages(system: string | undefined, messages: ChatMessage[]): unknown[] {
+export function toOpenAiMessages(
+  system: string | undefined,
+  messages: ChatMessage[],
+  replayReasoning: boolean,
+): unknown[] {
   const out: unknown[] = []
   if (system !== undefined && system.length > 0) {
     out.push({ role: 'system', content: system })
@@ -68,7 +72,12 @@ function toOpenAiMessages(system: string | undefined, messages: ChatMessage[]): 
         role: 'assistant',
         content: message.content || null,
       }
-      if (message.reasoningContent) entry.reasoning_content = message.reasoningContent
+      // Reasoning text stays in the log for the UI, but it is not part of the
+      // request unless the route explicitly needs it: replaying it re-bills
+      // every prior turn's thinking on each step and can overflow the window.
+      if (replayReasoning && message.reasoningContent) {
+        entry.reasoning_content = message.reasoningContent
+      }
       if (message.toolCalls && message.toolCalls.length > 0) {
         entry.tool_calls = message.toolCalls.map((call) => ({
           id: call.id,
@@ -104,7 +113,7 @@ export async function* streamOpenAi(request: GenerateRequest): AsyncGenerator<St
     model: request.model,
     stream: true,
     stream_options: { include_usage: true },
-    messages: toOpenAiMessages(request.system, request.messages),
+    messages: toOpenAiMessages(request.system, request.messages, provider.replayReasoning === true),
   }
   if (tools) body.tools = tools
   if (request.temperature !== undefined) body.temperature = request.temperature

@@ -191,6 +191,7 @@ export type SessionEvent =
       /** This result replaces the surface of an older event with that seq. */
       replaces?: number
     }
+  | { type: 'args-cleared'; turn: number; step: number; call_id: string; placeholder: string }
   | { type: 'tool-output-chunk'; call_id: string; stream: string; text: string }
   | { type: 'todo-write'; todos: TodoItem[] }
   | { type: 'permission-mode'; mode: PermissionMode }

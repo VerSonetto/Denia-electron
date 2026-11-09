@@ -71,6 +71,13 @@ export function deriveSurface(events: readonly Envelope[]): SurfaceItem[] {
   }
   const skipped = (seq: number): boolean =>
     compactions.some((item) => seq >= item.from && seq <= item.to)
+  // Archived calls: a write whose arguments were too large to keep in
+  // history leaves a one-line note instead, and neither the call nor its
+  // result reaches the model (the file itself is the durable copy).
+  const archived = new Set<string>()
+  for (const event of events) {
+    if (event.type === 'args-cleared') archived.add(event.call_id)
+  }
   // A newer compaction may cover an older summary; only the surviving ones
   // may be inserted, otherwise the model sees two contradictory summaries.
   const activeCompactions = compactions.filter(
@@ -138,14 +145,22 @@ export function deriveSurface(events: readonly Envelope[]): SurfaceItem[] {
         break
       }
       case 'assistant-message': {
-        const calls = toolCallsOf(event.blocks)
+        const calls = toolCallsOf(event.blocks).filter(
+          (call) => !archived.has(call.id),
+        )
         const reasoning = reasoningOf(event.blocks)
         const replay = reasoningReplayOf(event.blocks)
+        const text = textOf(event.blocks)
+        // An assistant turn whose only call was archived has nothing left
+        // to say; sending an empty message would just be dead weight.
+        if (text === '' && reasoning === undefined && replay.length === 0 && calls.length === 0) {
+          break
+        }
         surface.push({
           seq: event.seq,
           message: {
             role: 'assistant',
-            content: textOf(event.blocks),
+            content: text,
             ...(reasoning ? { reasoningContent: reasoning } : {}),
             ...(replay.length > 0 ? { reasoningReplay: replay } : {}),
             ...(calls.length > 0 ? { toolCalls: calls } : {}),
@@ -155,7 +170,18 @@ export function deriveSurface(events: readonly Envelope[]): SurfaceItem[] {
         })
         break
       }
+      case 'args-cleared': {
+        // Chronological position of the note: right after the result it replaces.
+        surface.push({
+          seq: event.seq,
+          message: { role: 'user', content: event.placeholder },
+          isError: false,
+          channel: null,
+        })
+        break
+      }
       case 'tool-result': {
+        if (archived.has(event.call_id)) break
         // A replacement keeps the original item (and its seq) and only swaps
         // the content: the model sees the cleared text where the result used
         // to be, in the same position, so no orphan tool message is created.

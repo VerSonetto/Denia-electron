@@ -97,6 +97,9 @@ const FILE_REFERENCE =
 
 const TOOL_READ = '- 读取前不声称已看过、不猜内容。同一分页未变更的重复读取只返回提示。'
 
+const TOOL_OUTPUT =
+  '- 工具结果过大时会被截断:预览末尾给出产物 id,用 read_tool_output(output_id, offset, limit) 分页回读全文,不要为了看完整输出重跑同一条命令。'
+
 const TOOL_WRITE =
   '- write_file 用于新建或整文件覆盖，覆盖前先读；已有文件本会话未读、或读取后被改动会拒写，按提示重读后再写，不原样重试。'
 
@@ -166,6 +169,7 @@ const SECTIONS: PromptSectionDef[] = [
   { name: 'tool:grep', order: 1030, text: TOOL_GREP, tools: ['grep'] },
   { name: 'context:file-reference', order: 1040, text: FILE_REFERENCE },
   { name: 'tool:read', order: 1050, text: TOOL_READ, tools: ['read_file'] },
+  { name: 'tool:output', order: 1055, text: TOOL_OUTPUT, tools: ['read_tool_output'] },
   { name: 'tool:write', order: 1060, text: TOOL_WRITE, tools: ['write_file', 'todo_write'] },
   { name: 'tool:edit', order: 1070, text: TOOL_EDIT, tools: ['edit'] },
   { name: 'tool:skill', order: 1100, text: TOOL_SKILL, tools: ['skill'] },

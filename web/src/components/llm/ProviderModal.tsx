@@ -129,6 +129,7 @@ export function ProviderModal({
     Object.entries(initial?.headers ?? {}).map(([name, value]) => ({ name, value })),
   )
   const [inlineThink, setInlineThink] = useState(initial?.inlineThinkTags ?? false)
+  const [replayReasoning, setReplayReasoning] = useState(initial?.replayReasoning === true)
   const [errors, setErrors] = useState<FormErrors>({})
   /** 新增时:路由 ID 失焦过 = 允许建网关。 */
   const [routeIdTouched, setRouteIdTouched] = useState(route !== null)
@@ -176,6 +177,7 @@ export function ProviderModal({
     if (headerEntries.length > 0) profile.headers = Object.fromEntries(headerEntries)
     // 关闭时省略该字段(等同后端默认 false),开启时显式写入;关闭一次即回写清除。
     if (inlineThink) profile.inlineThinkTags = true
+    if (replayReasoning) profile.replayReasoning = true
     // 缓存档没有表单控件,但必须原样带回:否则改一次模型列表就把手写的
     // longCache / supportsPromptCacheKey 冲掉。
     if (initial?.longCache === true) profile.longCache = true
@@ -193,6 +195,7 @@ export function ProviderModal({
     maxTokens,
     headers,
     inlineThink,
+    replayReasoning,
     initial?.longCache,
     initial?.supportsPromptCacheKey,
   ])
@@ -584,6 +587,20 @@ export function ProviderModal({
                     + {t('llm.field.headersAdd')}
                   </button>
                 </div>
+              </Field>
+              <Field
+                label={t('llm.field.replayReasoningLabel')}
+                hint={t('llm.field.replayReasoningHint')}
+              >
+                <ChipRadio
+                  value={replayReasoning ? 'on' : 'off'}
+                  ariaLabel={t('llm.field.replayReasoningLabel')}
+                  options={[
+                    { id: 'off', label: t('llm.field.replayReasoningOff') },
+                    { id: 'on', label: t('llm.field.replayReasoningOn') },
+                  ]}
+                  onChange={(value) => setReplayReasoning(value === 'on')}
+                />
               </Field>
               <Field label={t('llm.field.inlineThinkLabel')} hint={t('llm.field.inlineThinkHint')}>
                 <ChipRadio

@@ -8,6 +8,7 @@ import path from 'node:path'
 
 import type { ToolContext } from './types.ts'
 import type { ToolOutput } from '../core/wire.ts'
+import { readViewKey } from './read-state.ts'
 import {
   expectString,
   optionalBoolean,
@@ -76,6 +77,21 @@ export const ReadFileTool = {
     } catch (error) {
       return toolError(error instanceof Error ? error.message : String(error), '相对路径锚定会话工作区')
     }
+    // A repeat read of an unchanged view is a wasted call: the earlier result is
+    // still on the model surface, so only a pointer to it is worth the tokens.
+    let stamp: { mtimeMs: number; size: number } | null = null
+    try {
+      const stat = await fs.promises.stat(file)
+      stamp = { mtimeMs: stat.mtimeMs, size: stat.size }
+    } catch {
+      // No stat → no de-dup; the read below reports the real failure.
+    }
+    const viewKey = readViewKey(file, offset, limit)
+    if (stamp !== null && ctx.readState?.isUnchanged(viewKey, stamp) === true) {
+      return textOutput(
+        `${raw} 第 ${offset} 行起（limit=${limit}）自上次读取以来未变更,内容同上一条读取结果,无需重复读取。若确实需要重看,请先改 offset/limit,或改动文件后重试。`,
+      )
+    }
     let text: string
     try {
       text = await fs.promises.readFile(file, 'utf8')
@@ -96,7 +112,10 @@ export const ReadFileTool = {
     } else {
       content += `\n\n(已达 limit=${limit};文件可能还有更多行,用 offset=${end + 1} 继续读取)`
     }
-    return textOutput(content)
+    return textOutput(
+      content,
+      stamp === null ? undefined : { readStamp: { key: viewKey, ...stamp } },
+    )
   },
 }
 
@@ -134,6 +153,8 @@ export const WriteFileTool = {
     } catch (error) {
       return toolError(`写入 ${raw} 失败:${error instanceof Error ? error.message : String(error)}`)
     }
+    // The bytes changed: every cached view of this path is stale.
+    ctx.readState?.forgetPath(file)
     return textOutput(`已写入 ${raw}（${Buffer.byteLength(content, 'utf8')} 字节）。`)
   },
 }
@@ -275,6 +296,7 @@ export const EditTool = {
     } catch (error) {
       return toolError(`写入 ${raw} 失败:${error instanceof Error ? error.message : String(error)}`)
     }
+    ctx.readState?.forgetPath(file)
     return textOutput(`已在 ${raw} 应用 ${specs.length} 处替换(首次替换发生在第 ${firstLine ?? 1} 行)。`)
   },
 }

@@ -38,6 +38,14 @@ import type { SessionStore } from '../session/store.ts'
 import type { ToolRegistry } from '../tools/index.ts'
 import type { ToolContext, FileHistoryBackend } from '../tools/types.ts'
 import { toolError } from '../tools/types.ts'
+import { ReadStateStore } from '../tools/read-state.ts'
+import { applyMediaBudget } from './media-budget.ts'
+import {
+  SessionOutputStore,
+  budgetFor,
+  renderPreview,
+  withOutputArtifact,
+} from './tool-output.ts'
 import type { PromptExtraSection, SubagentPromptContext } from './system-prompt.ts'
 import type {
   ApprovalAnswer,
@@ -81,8 +89,12 @@ const MAX_PARALLEL = 10
 const LOOP_THRESHOLD = 5
 /** Consecutive auto-summary failures before a session stops retrying. */
 const MAX_COMPACTION_FAILURES = 3
-/** One authoritative character budget for every tool result (mirrors Rust). */
-const OUTPUT_BUDGET_CHARS = 32_000
+/**
+ * Arguments at or above this size are archived once a write succeeds: the file
+ * content now lives on disk, and keeping a second copy in history bills every
+ * later request for it. Mirrors the Rust `ARGS_STUB_THRESHOLD_CHARS`.
+ */
+const ARGS_STUB_THRESHOLD_CHARS = 8_192
 
 export interface StartTurnOptions {
   selection?: ModelSelection
@@ -161,13 +173,29 @@ export interface DriverPermissions {
   policy: ExecPolicy
 }
 
-function budgetOf(content: string): [string, { total_chars: number; shown_chars: number } | null] {
-  const total = Array.from(content).length
-  if (total <= OUTPUT_BUDGET_CHARS) return [content, null]
-  const marker = `\n\n…[输出已截断:共 ${total} 字符,仅显示前 ${OUTPUT_BUDGET_CHARS} 字符。请缩小范围(更精确的 pattern/path),或用 offset/limit 分页获取剩余内容]`
-  const shownChars = OUTPUT_BUDGET_CHARS - Array.from(marker).length
-  const shown = Array.from(content).slice(0, Math.max(0, shownChars)).join('')
-  return [shown + marker, { total_chars: total, shown_chars: Math.max(0, shownChars) }]
+/** Read de-dup stamp the read tool attaches to its result meta. */
+function readStampOf(meta: unknown): { key: string; mtimeMs: number; size: number } | null {
+  if (typeof meta !== 'object' || meta === null) return null
+  const stamp = (meta as { readStamp?: unknown }).readStamp
+  if (typeof stamp !== 'object' || stamp === null) return null
+  const { key, mtimeMs, size } = stamp as { key?: unknown; mtimeMs?: unknown; size?: unknown }
+  if (typeof key !== 'string' || typeof mtimeMs !== 'number' || typeof size !== 'number') return null
+  return { key, mtimeMs, size }
+}
+
+/** Note left where an archived write call used to be (path only). */
+function archivedCallNote(call: ToolCallRef): string {
+  let target = ''
+  try {
+    const parsed = JSON.parse(call.arguments) as unknown
+    if (typeof parsed === 'object' && parsed !== null) {
+      const value = (parsed as { path?: unknown }).path
+      if (typeof value === 'string') target = value
+    }
+  } catch {
+    target = ''
+  }
+  return `[工具调用归档] ${target || '写入'} 已成功写入;调用参数与结果因体积过大已移出上下文,文件内容以磁盘为准,需要时用 read_file 回读。`
 }
 
 function abortedReason(): TurnEndReason {
@@ -200,6 +228,10 @@ export class SessionDriver {
   private readonly cacheWarmer = new CacheWarmer()
   /** Consecutive auto-compaction failures per session; reset on success. */
   private readonly compactionFailures = new Map<string, number>()
+  /** Per-session read de-dup stamps (dropped when their result leaves the surface). */
+  private readonly readStates = new Map<string, ReadStateStore>()
+  /** Full text of oversized tool results, pageable by the model. */
+  private readonly outputStore: SessionOutputStore
   private services?: SessionServices
   readonly settings: DriverSettings
 
@@ -212,6 +244,7 @@ export class SessionDriver {
     permissions?: DriverPermissions,
   ) {
     this.store = store
+    this.outputStore = new SessionOutputStore(store)
     this.registry = registry
     this.getConfig = getConfig
     this.onRunningChange = onRunningChange ?? (() => {})
@@ -222,6 +255,37 @@ export class SessionDriver {
       maxSteps: settings?.maxSteps ?? MAX_STEPS,
       maxParallel: Math.max(1, settings?.maxParallel ?? MAX_PARALLEL),
     }
+  }
+
+  /**
+   * Commit one tool result inside the tool's own budget. Over budget, the full
+   * text is saved as a session artifact and the model gets a bounded preview
+   * plus the artifact id it can page through with `read_tool_output`.
+   */
+  private commitToolOutput(sessionId: string, call: ToolCallRef, output: ToolOutput): ToolOutput {
+    const budget = budgetFor(call.name)
+    const total = Array.from(output.content).length
+    if (total <= budget.max) return output
+    const artifactId = this.outputStore.save(sessionId, call.id, output.content)
+    const preview = renderPreview(output.content, budget, artifactId)
+    return {
+      ...output,
+      content: preview.content,
+      truncation: { total_chars: total, shown_chars: preview.shownChars },
+      ...(artifactId === null
+        ? {}
+        : { meta: withOutputArtifact(output.meta, { output_id: artifactId, chars: total }) }),
+    }
+  }
+
+  /** Read de-dup state for one session (created on first use). */
+  private readStateFor(sessionId: string): ReadStateStore {
+    let state = this.readStates.get(sessionId)
+    if (state === undefined) {
+      state = new ReadStateStore()
+      this.readStates.set(sessionId, state)
+    }
+    return state
   }
 
   /** Install host services after both runtimes exist (breaks the cycle). */
@@ -720,7 +784,8 @@ export class SessionDriver {
         const request = {
           provider,
           model: selection.model,
-          messages,
+          // Cap the aggregate image payload before it becomes a request.
+          messages: applyMediaBudget(messages).messages,
           system,
           tools: schemas,
           ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
@@ -791,6 +856,8 @@ export class SessionDriver {
           selection,
           permission,
           memoryRoot: this.services?.memoryRoot?.(sessionId, session.header) ?? null,
+          readState: this.readStateFor(sessionId),
+          outputStore: this.outputStore,
           ...(this.services?.jobs ? { jobs: this.services.jobs } : {}),
           ...(this.services?.fileHistory
             ? { fileHistory: this.services.fileHistory(sessionId, session.header.cwd) }
@@ -819,7 +886,7 @@ export class SessionDriver {
             content: '[工具错误] 工具没有返回结果',
             isError: true,
           }
-          append({
+          const appended = append({
             type: 'tool-result',
             turn,
             step,
@@ -830,6 +897,31 @@ export class SessionDriver {
             ...(output.meta !== undefined ? { meta: output.meta } : {}),
             ...(output.truncation ? { truncation: output.truncation } : {}),
           })
+          // Remember what this read saw, so an identical repeat can answer
+          // with a pointer instead of re-sending the content.
+          const stamp = output.isError ? null : readStampOf(output.meta)
+          if (appended && stamp) {
+            this.readStateFor(sessionId).remember(stamp.key, {
+              callId: call.id,
+              seq: appended.seq,
+              stamp: { mtimeMs: stamp.mtimeMs, size: stamp.size },
+            })
+          }
+          // Once the file exists, the write arguments are dead weight: archive
+          // the call and its result so later requests stop paying for them.
+          if (
+            !output.isError &&
+            (call.name === 'write_file' || call.name === 'edit') &&
+            call.arguments.length >= ARGS_STUB_THRESHOLD_CHARS
+          ) {
+            append({
+              type: 'args-cleared',
+              turn,
+              step,
+              call_id: call.id,
+              placeholder: archivedCallNote(call),
+            })
+          }
         }
 
         // A user who cancels an approval interrupts the whole turn.
@@ -943,6 +1035,8 @@ export class SessionDriver {
       pressure?.thresholdTokens ?? undefined,
     )
     if (decision.kind !== 'applied') return
+    // A cleared result is gone from the model surface, so no stub may point at it.
+    this.readStateFor(sessionId).forgetCalls(decision.clearedToolCallIds)
     const originals = new Map(
       events
         .filter((event): event is Extract<Envelope, { type: 'tool-result' }> => event.type === 'tool-result')
@@ -1039,6 +1133,18 @@ export class SessionDriver {
       return true
     }
     this.compactionFailures.delete(options.sessionId)
+    // The summary moved a range out of the model surface; stamps that pointed
+    // into it would send the model to content it can no longer see.
+    let compactedFrom = -1
+    let compactedTo = -1
+    for (const event of this.store.read(options.sessionId)?.events ?? []) {
+      if (event.type !== 'compaction-summary') continue
+      compactedFrom = event.replaces_from
+      compactedTo = event.replaces_to
+    }
+    if (compactedFrom >= 0) {
+      this.readStateFor(options.sessionId).forgetSeqRange(compactedFrom, compactedTo)
+    }
     // The summary rewrote the model surface; a cached replay is stale.
     this.cacheWarmer.cancel(options.sessionId)
     return true
@@ -1424,12 +1530,7 @@ export class SessionDriver {
           errorIdentity: { name: call.name, code: 'unknown-tool' },
         }
       }
-      const [content, truncation] = budgetOf(output.content)
-      return {
-        ...output,
-        content,
-        ...(truncation ? { truncation } : {}),
-      }
+      return this.commitToolOutput(ctx.sessionId, call, output)
     } catch (error) {
       if (ctx.cancel.aborted) {
         return { content: '[工具错误] 命令被用户中断', isError: true, errorIdentity: { name: call.name, code: 'cancelled' } }

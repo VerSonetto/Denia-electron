@@ -167,6 +167,8 @@ export interface OpenAiProfile {
   headers?: Record<string, string>
   /** 定向兼容:网关把推理内联进 content(以 `</think>` 收尾)时,开启后拆成推理块。默认关闭。 */
   inlineThinkTags?: boolean
+  /** 把历史推理正文回传给 chat/completions。默认关闭:多数网关不认,且每次请求都重新计费。 */
+  replayReasoning?: boolean
   /** 请求提供方的长缓存档:Anthropic `ttl: "1h"`、OpenAI 24h retention。 */
   longCache?: boolean
   /** 路由是否接受 OpenAI 的 `prompt_cache_key`;严格网关可关闭。默认开启。 */

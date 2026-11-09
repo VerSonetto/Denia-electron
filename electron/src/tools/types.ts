@@ -4,6 +4,8 @@ import path from 'node:path'
 
 import type { ModelSelection, SessionEvent, ToolOutput, ToolSchema } from '../core/wire.ts'
 import type { PermissionState } from '../core/permission.ts'
+import type { ReadStateStore } from './read-state.ts'
+import type { OutputStore } from '../agent/tool-output.ts'
 
 /** The slice of the job manager the `bash` tool needs for background runs. */
 export interface BackgroundJobs {
@@ -45,6 +47,10 @@ export interface ToolContext {
   fileHistory?: FileHistoryBackend
   /** Log-only event sink (todo snapshots, live bash output). */
   emit(event: SessionEvent): void
+  /** Session-wide read de-duplication state (absent in tests without a driver). */
+  readState?: ReadStateStore
+  /** Artifacts of oversized tool output, pageable with `read_tool_output`. */
+  outputStore?: OutputStore
 }
 
 export interface Tool {
