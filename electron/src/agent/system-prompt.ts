@@ -109,6 +109,13 @@ const TOOL_EDIT =
 const TOOL_SKILL =
   '- 开工先核对 <available_skills>：与任务匹配则先 skill load，不匹配直接处理，不为用技能而调用技能。load 已返回 SKILL.md 全文，只加载一次、不另读；其余参考资料用 resource，路径相对返回的 resourceBase。技能不授予额外权限。'
 
+const TOOL_BROWSER = `- browser 控制本机 Chrome/Edge:默认无窗口后台运行,画面只在控制台侧栏;交互命令按需拉起,list/shutdownBrowser 在未运行时原地返回,getState 会拉起实例(收尾时不要用它确认)。
+- 操作页面:先 navigate,必要时 newTab/selectPage/frames/selectFrame;元素用 snapshot 的 [ref=eN](同一标签页最近一次快照有效,导航后失效)或 CSS 选择器。clickElement 只在当前选中 frame 内严格匹配,必须 confirm=true;命中多个必须给 index。弹窗会挂起页面,发现后必须 getDialog/handleDialog 处置。
+- 分析请求:networkList 看索引,pending 请求先 resume 断点再等 response;networkDetail/networkGetBody 取头与体;websocketMessages 看连接与帧;initiator 依赖 CDP Network 域(首次调用才启用),要看调用栈就在重新触发请求前先开一次。
+- 分析脚本:listScripts/searchInSources 定位,setBreakpointOnText 在压缩代码里按文本下断点;暂停后 getPausedInfo 拿调用栈与作用域,evaluate 带 callFrameId 在调用帧求值(默认隔离世界,读页面全局变量要 mainWorld=true),step 单步,pauseOrResume 恢复。脚本/断点只覆盖当前页/当前帧,首次启用 Debugger 域是侵入动作,只在确实需要动态分析时用。
+- 收尾:只 close 标签页不算收尾,实例占住 profile 目录锁会让下次启动失败;确认不再使用后逐个 close 自己打开的 tab(用户原有的 tab 保留),并显式调 shutdownBrowser。
+- 仅在用户明确要求观看时设 visualMode:true,其余保持后台。`
+
 const GROUP_PROGRESS = '## 进度、协作与目标'
 
 const TOOL_TODO =
@@ -173,6 +180,7 @@ const SECTIONS: PromptSectionDef[] = [
   { name: 'tool:write', order: 1060, text: TOOL_WRITE, tools: ['write_file', 'todo_write'] },
   { name: 'tool:edit', order: 1070, text: TOOL_EDIT, tools: ['edit'] },
   { name: 'tool:skill', order: 1100, text: TOOL_SKILL, tools: ['skill'] },
+  { name: 'tool:browser', order: 1120, text: TOOL_BROWSER, tools: ['browser'] },
   // MCP discipline is runtime-owned: its catalog depends on connected servers.
   { name: 'tool:mcp', order: 1130, text: '' },
   { name: 'harness:group-progress', order: 1200, text: GROUP_PROGRESS },

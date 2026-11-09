@@ -76,6 +76,10 @@ test('tool-owned sections follow the tool surface', () => {
   assert.ok(full.includes('- bash 只跑构建'), 'bash discipline appears with bash')
   assert.ok(full.includes('有目标时以达成目标为先'), 'goal discipline appears with goal_read')
 
+  const withBrowser = prompt({ tools: [...BASE_TOOL_NAMES, 'browser'].map(tool) })
+  assert.ok(withBrowser.includes('- browser 控制本机 Chrome/Edge'), 'browser discipline appears with browser')
+  assert.ok(withBrowser.includes('shutdownBrowser'), 'the shutdown contract ships with the tool')
+
   const withoutBash = prompt({ tools: BASE_TOOL_NAMES.filter((name) => name !== 'bash').map(tool) })
   assert.ok(!withoutBash.includes('- bash 只跑构建'), 'no bash discipline without bash')
   assert.ok(withoutBash.includes('## 工具准则'), 'the group heading survives a removed tool')

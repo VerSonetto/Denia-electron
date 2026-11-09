@@ -534,6 +534,8 @@ function effectNote(name: string, capability: ToolCapability): string {
       return '向直接父/子代理发送消息，进入对方收件箱。'
     case 'ask':
       return '阻塞等待用户作答（有超时与明确结局）。'
+    case 'browser':
+      return '操控本机浏览器：可导航、改页面状态、读写页面数据并访问网络；任务结束需回收进程。'
     default:
       switch (capability) {
         case 'read':

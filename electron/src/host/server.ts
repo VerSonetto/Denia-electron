@@ -15,6 +15,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+import { BrowserManager } from '../browser/manager.ts'
+import { createBrowserTool } from '../tools/browser.ts'
 import { SessionDriver } from '../agent/loop.ts'
 import type { ApprovalBridge } from '../agent/gate.ts'
 import type { ApprovalAnswer } from '../agent/gate.ts'
@@ -118,6 +120,8 @@ export interface HostOptions {
   reviewer?: Reviewer
   /** Test seam: substitute the command rule engine. */
   policy?: ExecPolicy
+  /** Test seam: substitute the browser hub (null = no browser tool). */
+  browser?: BrowserManager | null
 }
 
 export interface Host {
@@ -270,6 +274,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const fileHistory = new FileHistoryStore(home)
   const registry = ToolRegistry.builtin()
   registry.register(new SkillTool(home))
+  const browser = options.browser === undefined ? new BrowserManager({ home }) : options.browser
+  if (browser) registry.register(createBrowserTool(browser))
   const workspaces = loadWorkspaces(home)
   const defaultPermissionMode = consolePermissionMode(home)
   const policy = options.policy ?? ExecPolicy.load(path.join(home, 'execpolicy.json'))
@@ -1988,7 +1994,49 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       return
     }
     if (pathname === '/api/browser/state' && method === 'GET') {
-      json(res, 200, { running: false, activeTabId: null, tabs: [] })
+      if (!browser) {
+        json(res, 200, { running: false, activeTabId: null, tabs: [] })
+        return
+      }
+      json(res, 200, await browser.state())
+      return
+    }
+    if (pathname === '/api/browser/command' && method === 'POST') {
+      if (!browser) {
+        json(res, 200, {
+          ok: false,
+          error: { code: 'unavailable', message: '当前部署没有启用浏览器' },
+          elapsedMs: 0,
+        })
+        return
+      }
+      const body = await readJson(req)
+      const command = isRecord(body) ? body.command : undefined
+      if (!isRecord(command)) {
+        json(res, 200, {
+          ok: false,
+          error: { code: 'invalid-argument', message: '请求体需要 { command: { method } }' },
+          elapsedMs: 0,
+        })
+        return
+      }
+      json(res, 200, await browser.execute(command))
+      return
+    }
+    if (pathname === '/api/browser/stream' && method === 'GET') {
+      if (!browser) {
+        apiError(res, 503, 'browser/unavailable', '当前部署没有启用浏览器')
+        return
+      }
+      res.writeHead(200, sseHeaders())
+      res.write('retry: 1000\n\n')
+      const unsubscribe = browser.subscribe((event) => writeSse(res, event))
+      const heartbeat = setInterval(() => writeSse(res, { type: 'hb' }), HEARTBEAT_MS)
+      heartbeat.unref?.()
+      req.on('close', () => {
+        clearInterval(heartbeat)
+        unsubscribe()
+      })
       return
     }
     if (pathname === '/api/channels/weixin' && method === 'GET') {
@@ -2113,6 +2161,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       clearInterval(heartbeatTimer)
       for (const client of sseClients) client.end()
       sseClients.clear()
+      await browser?.dispose()
       subagents.close()
       await mcp.shutdownAll()
       driver.dispose()
