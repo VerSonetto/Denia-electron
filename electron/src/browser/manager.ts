@@ -24,10 +24,19 @@ import type {
 } from '@zhizhuodemao/patchright'
 
 import * as ax from './ax.ts'
-import { detectBrowserExecutable, launchSpec, type BrowserLaunchSpec } from './chrome.ts'
+import { detectBrowserExecutable, launchSpec, probeUserAgent, type BrowserLaunchSpec } from './chrome.ts'
 import { ConsoleLog } from './console.ts'
 import { TabDebugger } from './debugger.ts'
+import { keyGap, scrollStepDelay, scrollSteps } from './humanize.ts'
 import { NetworkRecorder, SocketRecorder, initiatorFrames } from './network.ts'
+import {
+  auditFingerprint,
+  buildProfile,
+  COLLECT_FINGERPRINT,
+  stealthArgs,
+  stealthScript,
+  type StealthProfile,
+} from './stealth.ts'
 import type { NetworkEntry } from './network.ts'
 import {
   bool,
@@ -101,6 +110,9 @@ export class BrowserManager {
   readonly #tabs = new Map<string, Tab>()
   readonly #order: string[] = []
   readonly #pendingPages = new WeakMap<Page, Promise<void>>()
+  readonly #stealthEnabled: boolean
+  readonly #humanize: boolean
+  #stealth: StealthProfile | null = null
   #context: BrowserContext | null = null
   #launching: Promise<BrowserContext> | null = null
   #activeTabId: string | null = null
@@ -113,6 +125,10 @@ export class BrowserManager {
 
   constructor(options: BrowserManagerOptions) {
     this.#home = options.home
+    // 默认开启:既然要驱动真实浏览器,就没有理由再把自己标成自动化。
+    // `DENIA_BROWSER_STEALTH=0` / `DENIA_BROWSER_HUMANIZE=0` 可关掉做对照。
+    this.#humanize = process.env.DENIA_BROWSER_HUMANIZE?.trim() !== '0'
+    this.#stealthEnabled = process.env.DENIA_BROWSER_STEALTH?.trim() !== '0'
   }
 
   subscribe(listener: (event: BrowserEvent) => void): () => void {
@@ -196,6 +212,27 @@ export class BrowserManager {
     return launchSpec(this.#home)
   }
 
+  /**
+   * 按当前浏览器探一次真实 UA,再据此构造伪装档位。
+   *
+   * 不能用写死的版本号:浏览器升级后 UA 字符串与 `userAgentData.brands`
+   * 会互相矛盾,那比保留无头标记更容易被判定为伪造。探测失败时退回
+   * 保守配置,不阻断启动。
+   */
+  async #buildStealth(spec: BrowserLaunchSpec): Promise<StealthProfile> {
+    let userAgent = ''
+    try {
+      userAgent = (await probeUserAgent(spec.executable)) ?? ''
+    } catch {
+      userAgent = ''
+    }
+    // 探测失败时保留浏览器默认 UA:与其编一个,不如不加标记地沿用。
+    return buildProfile({
+      userAgent,
+      viewport: spec.viewport,
+    })
+  }
+
   async #ensureContext(): Promise<BrowserContext> {
     if (this.#context) return this.#context
     if (this.#launching) return this.#launching
@@ -220,20 +257,34 @@ export class BrowserManager {
     const spec = this.#spec()
     fs.mkdirSync(spec.profileDir, { recursive: true })
     fs.mkdirSync(spec.artifactsDir, { recursive: true })
+    const stealth = this.#stealthEnabled ? await this.#buildStealth(spec) : null
+    this.#stealth = stealth
     const context = await chromium.launchPersistentContext(spec.profileDir, {
       executablePath: spec.executable,
-      headless: spec.headless,
-      viewport: spec.headless ? spec.viewport : null,
+      // stealth 模式固定用 `--headless=new`(而不是 Playwright 的 headless
+      // 开关):后者会让窗口/屏幕信息整体退化。有头模式则走真实窗口。
+      headless: stealth ? false : spec.headless,
+      viewport: stealth ? spec.viewport : spec.headless ? spec.viewport : null,
       ignoreHTTPSErrors: true,
       chromiumSandbox: true,
-      deviceScaleFactor: 1,
-      args: [
-        '--test-type',
-        '--hide-crash-restore-bubble',
-        '--no-first-run',
-        '--no-default-browser-check',
-        `--window-size=${spec.viewport.width},${spec.viewport.height}`,
-      ],
+      ...(stealth
+        ? {
+            deviceScaleFactor: stealth.deviceScaleFactor,
+            locale: stealth.locale,
+            // Playwright 会把 UA 与 UA-CH 一起改;直接给 `--user-agent`
+            // 不会同步 UA-CH,两者对不上反而更可疑。
+            userAgent: stealth.userAgent,
+          }
+        : { deviceScaleFactor: 1 }),
+      args: stealth
+        ? stealthArgs(stealth)
+        : [
+            '--test-type',
+            '--hide-crash-restore-bubble',
+            '--no-first-run',
+            '--no-default-browser-check',
+            `--window-size=${spec.viewport.width},${spec.viewport.height}`,
+          ],
     })
     // 先落引用再注册初始页面:attachPage 依赖它,持久 profile 恢复的 tab
     // 也要登记,否则面板与模型都看不到这些页面。
@@ -315,6 +366,9 @@ export class BrowserManager {
       fail('tab-limit', `标签页数量已达上限(${TAB_LIMIT})`)
     }
     const session = await context.newCDPSession(page)
+    // 注入必须在这一页第一个导航之前挂上:页级 CDP 的新文档脚本对
+    // 「已经开始的导航」不生效,而持久 profile 恢复的标签页往往已经加载过。
+    await this.#injectStealth(session)
     const tabId = `t${this.#nextTabId++}`
     const tab: Tab = {
       tabId,
@@ -339,6 +393,25 @@ export class BrowserManager {
     if (this.#activeTabId === null) this.#activeTabId = tabId
     this.#wirePage(tab)
     this.#emit({ type: 'tabs-changed' })
+  }
+
+  /**
+   * 挂上页级新文档脚本。
+   *
+   * 为什么不用 `context.addInitScript`:Patchright 会把它丢弃 —— 实测在
+   * 主世界完全看不到影子。页级 CDP 才是我们自己的通道。
+   */
+  async #injectStealth(session: CDPSession): Promise<void> {
+    const stealth = this.#stealth
+    if (!stealth) return
+    try {
+      await session.send('Page.enable')
+      await session.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: stealthScript(stealth),
+      })
+    } catch {
+      // 注入失败不应该拦住页面注册;最坏情况只是回到无伪装状态。
+    }
   }
 
   #unregister(tab: Tab): void {
@@ -590,6 +663,8 @@ export class BrowserManager {
         return this.#step(command)
       case 'clearSiteData':
         return this.#clearSiteData(command)
+      case 'fingerprint':
+        return this.#fingerprint(command)
       default:
         fail('invalid-argument', `未知浏览器命令:${method}`)
     }
@@ -878,6 +953,7 @@ export class BrowserManager {
     const tab = await this.#tabOf(command)
     const button = str(command, 'button') === 'right' ? 'right' : str(command, 'button') === 'middle' ? 'middle' : 'left'
     const doubleClick = bool(command, 'doubleClick') === true
+    const humanize = this.#humanizeFor(command)
     if (method === 'clickElement') {
       if (bool(command, 'confirm') !== true) {
         fail('confirmation-required', 'clickElement 需要 confirm=true:点击可能提交数据、触发导航或外部副作用')
@@ -906,7 +982,21 @@ export class BrowserManager {
         }
       })
       try {
-        await handle.click({ button, clickCount: doubleClick ? 2 : 1, timeout: DEFAULT_ACTION_TIMEOUT })
+        if (humanize) {
+          // 走坐标点击而不是 handle.click:后者是一次到位,页面只会看到
+          // 一对 mousedown/mouseup,没有移动过程。
+          const box = await handle.boundingBox()
+          if (box) {
+            await ax.clickPoint(tab.session, box.x + box.width / 2, box.y + box.height / 2, {
+              button,
+              clickCount: doubleClick ? 2 : 1,
+            })
+          } else {
+            await handle.click({ button, clickCount: doubleClick ? 2 : 1, timeout: DEFAULT_ACTION_TIMEOUT })
+          }
+        } else {
+          await handle.click({ button, clickCount: doubleClick ? 2 : 1, timeout: DEFAULT_ACTION_TIMEOUT })
+        }
       } finally {
         await Promise.allSettled(handles.map((entry) => entry.dispose()))
       }
@@ -916,14 +1006,23 @@ export class BrowserManager {
     if (ref) {
       const backend = tab.refs.get(ax.normalizeRef(ref))
       if (backend === undefined) fail('not-found', `元素引用 ${ref} 不存在或已失效(页面导航后需重新 snapshot)`)
-      await ax.clickBackend(tab.session, backend, { button, clickCount: doubleClick ? 2 : 1 })
+      await ax.clickBackend(tab.session, backend, { button, clickCount: doubleClick ? 2 : 1, humanize })
       return { value: { clicked: ref } }
     }
     const x = num(command, 'x')
     const y = num(command, 'y')
     if (x === undefined || y === undefined) fail('invalid-argument', 'click 需要 ref 或 x/y')
-    await tab.page.mouse.click(x, y, { button, clickCount: doubleClick ? 2 : 1 })
+    if (humanize) {
+      await ax.clickPoint(tab.session, x, y, { button, clickCount: doubleClick ? 2 : 1 })
+    } else {
+      await tab.page.mouse.click(x, y, { button, clickCount: doubleClick ? 2 : 1 })
+    }
     return { value: { clicked: { x, y } } }
+  }
+
+  /** 单次命令可覆盖全局开关,只影响这一次调用。 */
+  #humanizeFor(command: Command): boolean {
+    return bool(command, 'humanize') ?? this.#humanize
   }
 
   async #resolveBackend(tab: Tab, command: Command): Promise<number | undefined> {
@@ -955,7 +1054,16 @@ export class BrowserManager {
     if (backend !== undefined) await ax.focusBackend(tab.session, backend)
     const selector = str(command, 'selector')?.trim()
     if (selector) await this.#selectedFrame(tab).locator(`css=${selector}`).focus({ timeout: DEFAULT_ACTION_TIMEOUT })
-    await tab.page.keyboard.type(text)
+    if (this.#humanizeFor(command) === false) {
+      await tab.page.keyboard.type(text)
+      return { value: { typed: text.length } }
+    }
+    // 逐字符键入:每次按键有自己的按住时长,字符之间按内容决定间隔,
+    // 一次性 insertText 会让 keydown/keyup 缺失,是最明显的合成痕迹。
+    for (const char of text) {
+      await tab.page.keyboard.type(char)
+      await new Promise((resolve) => setTimeout(resolve, keyGap(char)))
+    }
     return { value: { typed: text.length } }
   }
 
@@ -982,8 +1090,18 @@ export class BrowserManager {
       y = center.y
     }
     const viewport = tab.page.viewportSize() ?? this.#spec().viewport
-    await tab.page.mouse.move(x ?? viewport.width / 2, y ?? viewport.height / 2)
-    await tab.page.mouse.wheel(deltaX, deltaY)
+    const at = { x: x ?? viewport.width / 2, y: y ?? viewport.height / 2 }
+    const humanize = this.#humanizeFor(command)
+    await ax.hoverPoint(tab.session, at.x, at.y, { humanize })
+    if (humanize === false) {
+      await tab.page.mouse.wheel(deltaX, deltaY)
+      return { value: { scrolled: { deltaX, deltaY } } }
+    }
+    // 滚动拆成若干衰减增量:一次 wheel 到位没有惯性,是脚本最容易被量化的特征。
+    for (const step of scrollSteps(deltaY)) {
+      await tab.page.mouse.wheel(deltaX === 0 ? 0 : Math.round(deltaX / 4), step)
+      await new Promise((resolve) => setTimeout(resolve, scrollStepDelay()))
+    }
     return { value: { scrolled: { deltaX, deltaY } } }
   }
 
@@ -992,13 +1110,13 @@ export class BrowserManager {
     const backend = await this.#resolveBackend(tab, command)
     if (backend !== undefined) {
       const center = await ax.elementCenter(tab.session, backend)
-      await tab.page.mouse.move(center.x, center.y)
+      await ax.hoverPoint(tab.session, center.x, center.y, { humanize: this.#humanizeFor(command) })
       return { value: { hovered: str(command, 'ref') } }
     }
     const x = num(command, 'x')
     const y = num(command, 'y')
     if (x === undefined || y === undefined) fail('invalid-argument', 'hover 需要 ref 或 x/y')
-    await tab.page.mouse.move(x, y)
+    await ax.hoverPoint(tab.session, x, y, { humanize: this.#humanizeFor(command) })
     return { value: { hovered: { x, y } } }
   }
 
@@ -1050,9 +1168,15 @@ export class BrowserManager {
       if (backend === undefined) fail('not-found', `元素引用 ${toRef} 不存在或已失效`)
       to = await ax.elementCenter(tab.session, backend)
     }
-    await tab.page.mouse.move(from.x, from.y)
+    const humanize = this.#humanizeFor(command)
+    await ax.hoverPoint(tab.session, from.x, from.y, { humanize })
     await tab.page.mouse.down()
-    await tab.page.mouse.move(to.x, to.y, { steps: 10 })
+    if (humanize === false) {
+      await tab.page.mouse.move(to.x, to.y, { steps: 10 })
+    } else {
+      // 拖拽期间保持按键按下,轨迹要连续且不能有瞬移。
+      await ax.movePointerTo(tab.session, to)
+    }
     await tab.page.mouse.up()
     return { value: { from, to } }
   }
@@ -1557,6 +1681,30 @@ export class BrowserManager {
     const paused = await tab.debugger.step(mode)
     if (!paused) fail('failed', '单步后没有等到暂停事件(可能已恢复执行)')
     return { value: { paused: true, text: tab.debugger.formatPaused(paused), callFrames: paused.callFrames } }
+  }
+
+  /* ---------------- 指纹自检 ---------------- */
+
+  /**
+   * 在主世界采一份指纹,并逐项对照当前伪装档位。
+   *
+   * 必须走 `Runtime.evaluate`:Playwright 的 `page.evaluate` 跑在隔离世界,
+   * 读到的 `window.chrome` 是副本,会把正常浏览器误报成缺 `app`。
+   * 输出只否定「明显异常」,不做“像不像人”的玄学评分。
+   */
+  async #fingerprint(command: Command): Promise<CommandResult> {
+    const tab = await this.#tabOf(command)
+    const subject = (await tab.session.send('Runtime.evaluate', {
+      expression: `${COLLECT_FINGERPRINT}`,
+      returnByValue: true,
+    })) as { result?: { value?: unknown; description?: string }; exceptionDetails?: { text?: string } }
+    if (subject.exceptionDetails) {
+      fail('evaluate-failed', subject.exceptionDetails.text ?? '指纹采集失败')
+    }
+    const raw = subject.result?.value
+    if (typeof raw !== 'string') fail('evaluate-failed', '指纹采集返回了非字符串结果')
+    const facts = JSON.parse(raw) as Record<string, unknown>
+    return { value: { subject: facts, checks: auditFingerprint(facts, this.#stealth, this.#humanize) } }
   }
 
   /* ---------------- 站点数据 ---------------- */

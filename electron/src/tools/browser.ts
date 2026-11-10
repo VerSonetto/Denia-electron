@@ -64,6 +64,7 @@ const METHODS = [
   'pauseOrResume',
   'step',
   'clearSiteData',
+  'fingerprint',
   'shutdownBrowser',
 ] as const
 
@@ -99,9 +100,10 @@ const DESCRIPTION = `控制本机浏览器(Chrome/Edge,持久 profile,默认无�
 
 状态与收尾:
 - clearSiteData{origin?, cache?} 清理当前站点 cookies/storage(以及缓存)
+- fingerprint{} 在主世界采一份指纹(UA、窗口/屏幕、webdriver、chrome 对象、WebGL),并逐项对照当前伪装档位报告异常。怀疑被识别成自动化时先跑它
 - shutdownBrowser{} 结束浏览器进程、释放 profile 锁。任务结束必须显式调用:只 close 标签页不算收尾,浏览器实例会占住 profile 目录锁,残留会让下次启动失败
 
-注意事项:交互命令会按需拉起浏览器;list/shutdownBrowser 在未运行时原地返回。网络/Console 采集只覆盖当前标签页且只保留最近 200 条。`
+注意事项:交互命令会按需拉起浏览器;list/shutdownBrowser 在未运行时原地返回。网络/Console 采集只覆盖当前标签页且只保留最近 200 条。click/clickElement/type/scroll/hover/drag 默认走人类化轨迹(贝塞尔移动、逐字符键入、衰减滚动),需要一次到位时传 humanize=false。`
 
 function renderValue(value: unknown): string {
   if (value === undefined || value === null) return ''
@@ -222,6 +224,7 @@ export function createBrowserTool(backend: BrowserBackend): Tool {
           kind: { type: 'string', enum: ['over', 'into', 'out'], description: 'step' },
           origin: { type: 'string', description: 'clearSiteData:目标 origin' },
           cache: { type: 'boolean', description: 'clearSiteData:是否清理全局 HTTP 缓存(缺省 true)' },
+          humanize: { type: 'boolean', description: 'click/clickElement/type/scroll/hover/drag:是否走人类化轨迹(缺省 true;传 false 一次到位)' },
           visualMode: { type: 'boolean', description: '展开控制台浏览器侧栏,让用户实时看到画面' },
           maxHeight: { type: 'integer' },
         },

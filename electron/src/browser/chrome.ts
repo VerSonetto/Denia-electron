@@ -4,7 +4,9 @@
 // 也不下载任何二进制。profile 落在 `$DENIA_HOME/browser/profile`。
 
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 
 export interface BrowserLaunchSpec {
   executable: string
@@ -97,4 +99,70 @@ export function launchSpec(home: string): BrowserLaunchSpec {
     headless: process.env.DENIA_BROWSER_HEADFUL?.trim() !== '1',
     viewport: { width: 1440, height: 900 },
   }
+}
+
+/**
+ * 问一次浏览器自己报的 UA。
+ *
+ * 用一次性 profile 以 `--remote-debugging-port=0` 起一个后台实例,从
+ * stderr 拿 DevTools 端点,读 `/json/version` 的 UA 后立即结束。
+ * 版本号必须来自这里:写死的版本在浏览器升级后会和 `userAgentData.brands`
+ * 冲突,那是比无头标记更明显的伪造痕迹。
+ */
+export function probeUserAgent(executable: string, timeoutMs = 15_000): Promise<string | null> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'denia-ua-'))
+  const child = spawn(executable, [
+    `--user-data-dir=${dir}`,
+    '--remote-debugging-port=0',
+    '--headless=new',
+    '--no-first-run',
+    '--no-default-browser-check',
+    'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+
+  return new Promise((resolve) => {
+    let settled = false
+    let buffer = ''
+    const finish = (value: string | null): void => {
+      if (settled) return
+      settled = true
+      child.kill()
+      try {
+        fs.rmSync(dir, { recursive: true, force: true })
+      } catch {
+        /* 临时目录可能仍被占用,留给系统清理 */
+      }
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    timer.unref?.()
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      buffer += String(chunk)
+      const endpoint = /DevTools listening on (ws:\/\/\S+)/.exec(buffer)?.[1]
+      if (!endpoint) return
+      // ws://127.0.0.1:<port>/devtools/browser/<id> → http://127.0.0.1:<port>/json/version
+      const port = /:(\d+)\//.exec(endpoint)?.[1]
+      if (!port) {
+        clearTimeout(timer)
+        finish(null)
+        return
+      }
+      fetch(`http://127.0.0.1:${port}/json/version`)
+        .then((response) => (response.ok ? response.json() : null))
+        .then((body: unknown) => {
+          clearTimeout(timer)
+          const ua = (body as { 'User-Agent'?: unknown } | null)?.['User-Agent']
+          finish(typeof ua === 'string' ? ua : null)
+        })
+        .catch(() => {
+          clearTimeout(timer)
+          finish(null)
+        })
+    })
+    child.on('error', () => {
+      clearTimeout(timer)
+      finish(null)
+    })
+  })
 }

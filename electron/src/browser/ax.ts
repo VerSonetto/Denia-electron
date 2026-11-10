@@ -6,6 +6,8 @@
 
 import type { CDPSession } from '@zhizhuodemao/patchright'
 
+import { hoverDelay, keyPressDelay, mousePath, mouseStepDelay, type Point } from './humanize.ts'
+
 export interface SnapshotResult {
   text: string
   refs: Map<string, number>
@@ -155,12 +157,57 @@ export async function elementCenter(
 interface MouseOptions {
   button?: 'left' | 'right' | 'middle'
   clickCount?: number
+  /** 是否把指针沿轨迹移过去;关掉时保持一次到位(默认开启)。 */
+  humanize?: boolean
 }
 
 function buttonMask(button: 'left' | 'right' | 'middle'): number {
   if (button === 'right') return 2
   if (button === 'middle') return 4
   return 1
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 指针当前位置:轨迹起点从这里接续,避免每次都从原点出发。 */
+let pointer: Point = { x: 0, y: 0 }
+
+export function pointerPosition(): Point {
+  return { ...pointer }
+}
+
+export function resetPointer(): void {
+  pointer = { x: 0, y: 0 }
+}
+
+/**
+ * 把指针沿人类轨迹移到目标点。
+ *
+ * 派发的是 CDP `Input.dispatchMouseEvent`:它生成的是可信事件,页面
+ * `isTrusted` 为真,与 Playwright 的 `mouse.move` 走同一条通道,但这里
+ * 可以自己控制轨迹与节奏。
+ */
+export async function movePointerTo(
+  session: CDPSession,
+  to: Point,
+  options: { humanize?: boolean } = {},
+): Promise<void> {
+  if (options.humanize === false) {
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: to.x, y: to.y })
+    pointer = { ...to }
+    return
+  }
+  const path = mousePath(pointer, to)
+  let previous = pointer
+  for (const point of path) {
+    const distance = Math.hypot(point.x - previous.x, point.y - previous.y)
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y })
+    await sleep(mouseStepDelay(distance))
+    previous = point
+  }
+  pointer = { ...to }
 }
 
 export async function clickPoint(
@@ -172,17 +219,29 @@ export async function clickPoint(
   const button = options.button ?? 'left'
   const clickCount = options.clickCount ?? 1
   const base = { x, y, button, clickCount }
-  await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base })
+  if (options.humanize === false) {
+    await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...base })
+  } else {
+    await movePointerTo(session, { x, y })
+    // 落点前的短暂停顿:真人的命中不会紧贴移动最后一个采样点。
+    await sleep(hoverDelay())
+  }
   await session.send('Input.dispatchMouseEvent', {
     type: 'mousePressed',
     ...base,
     buttons: buttonMask(button),
   })
+  if (options.humanize !== false) await sleep(keyPressDelay() / 2)
   await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
 }
 
-export async function hoverPoint(session: CDPSession, x: number, y: number): Promise<void> {
-  await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+export async function hoverPoint(
+  session: CDPSession,
+  x: number,
+  y: number,
+  options: { humanize?: boolean } = {},
+): Promise<void> {
+  await movePointerTo(session, { x, y }, options)
 }
 
 /** 带可操作性重试的引用点击:元素刚出现/布局未稳定时滚动后重取坐标。 */
