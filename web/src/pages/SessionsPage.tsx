@@ -1565,6 +1565,8 @@ export default function SessionsPage({
     />
   )
 
+  const placeholderText = inert ? t('placeholderWorkspace') : t('chatPlaceholder')
+
   const composerCard = (
     <div
       className={`prompt-panel${inert ? ' pick-target' : ''}${optimizing ? ' optimizing' : ''}`}
@@ -1633,7 +1635,7 @@ export default function SessionsPage({
           ))}
         </div>
       )}
-      <div className="prompt-scroll" ref={promptScrollRef}>
+      <div className="prompt-scroll" ref={promptScrollRef} data-placeholder={placeholderText}>
         <div
           ref={promptRef}
           className="prompt-editor"
@@ -1646,11 +1648,6 @@ export default function SessionsPage({
           aria-activedescendant={mentionOpen && !mentionLoading && mentionItems.length > 0 ? `file-mention-option-${mentionActive}` : undefined}
           aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
           aria-readonly={inert || optimizing || !composerReady}
-          data-placeholder={
-            inert
-              ? t('placeholderWorkspace')
-              : t('chatPlaceholder')
-          }
           spellCheck={false}
           onInput={() => {
             // DOM 是草稿事实源:同步 prompt 镜像 + 触发检测(IME 组词期间

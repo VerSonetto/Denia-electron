@@ -148,6 +148,10 @@
 }
 
 .prompt-scroll {
+  /* 编辑器和占位提示叠在同一个网格单元里:占位不进入 contenteditable 的
+     文本流(否则 ::before 会占住行首,删空后光标停在提示文本末尾),但它
+     仍参与行高计算,窄屏下提示换行时能把输入区撑开。 */
+  display: grid;
   max-height: 336px;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -158,7 +162,8 @@
  * contenteditable=false 的原子内联元素。排版基线必须与面板一致。
  */
 
-/* 空态占位(编辑器无法用 ::placeholder,借 :empty + data-placeholder)。 */
+/* 空态占位(编辑器无法用 ::placeholder;由 .prompt-scroll 的 ::before 渲染,
+   显隐借 :empty / data-empty 判断,样式见 responsive.css)。 */
 
 .prompt-panel.pick-target .prompt-editor {
   color: var(--label-tertiary);
