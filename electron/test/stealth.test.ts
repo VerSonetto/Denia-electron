@@ -70,6 +70,8 @@ test('stealthArgs never lets the headless flag leak into the UA', () => {
   // 窗口比视口大,才能给出真实的 outer - inner。
   assert.ok(args.includes(`--window-size=${1440 + WINDOW_CHROME.x},${900 + WINDOW_CHROME.y}`))
   assert.ok(args.includes('--lang=zh-CN'))
+  // 只给 `--lang` 时 Worker 仍读 profile 里存的语言偏好,会与主线程对不上。
+  assert.ok(args.includes('--accept-lang=zh-CN'), 'Worker 与 Accept-Language 头必须一起对齐')
 })
 
 test('the stealth script only patches values that look wrong', () => {
@@ -167,6 +169,7 @@ test('auditFingerprint flags the headless markers and passes a clean sample', ()
   const profile = buildProfile({ userAgent: EDGE_UA, viewport })
   const clean = {
     userAgent: profile.userAgent,
+    languages: ['zh-CN'],
     webdriver: false,
     chrome: ['loadTimes', 'csi', 'app'],
     window: {
@@ -178,6 +181,7 @@ test('auditFingerprint flags the headless markers and passes a clean sample', ()
     },
     screen: { width: profile.screen.width, height: profile.screen.height },
     webgl: { vendor: 'Google Inc. (NVIDIA)', renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU)' },
+    worker: { language: 'zh-CN', languages: ['zh-CN'] },
   }
   const passing = auditFingerprint(clean, profile, true)
   assert.ok(passing.every((check) => check.ok), `unexpected failures: ${JSON.stringify(passing.filter((c) => !c.ok))}`)
@@ -199,4 +203,42 @@ test('auditFingerprint flags the headless markers and passes a clean sample', ()
   for (const expected of ['userAgent', 'windowFrame', 'screen', 'webdriver', 'chromeObject', 'webgl', 'humanize']) {
     assert.ok(failing.has(expected), `missing failure: ${expected}`)
   }
+})
+
+test('auditFingerprint catches a Worker that disagrees with the main thread', () => {
+  const viewport = { width: 1440, height: 900 }
+  const profile = buildProfile({ userAgent: EDGE_UA, viewport })
+  const base = {
+    userAgent: profile.userAgent,
+    languages: ['zh-CN'],
+    webdriver: false,
+    chrome: ['loadTimes', 'csi', 'app'],
+    window: {
+      outerWidth: viewport.width + WINDOW_CHROME.x,
+      outerHeight: viewport.height + WINDOW_CHROME.y,
+      innerWidth: viewport.width,
+      innerHeight: viewport.height,
+      devicePixelRatio: profile.deviceScaleFactor,
+    },
+    screen: { width: profile.screen.width, height: profile.screen.height },
+    webgl: { vendor: 'Google Inc. (NVIDIA)', renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU)' },
+  }
+
+  // 持久 profile 存的是 en-US,主线程被 locale 覆盖成 zh-CN:这正是被
+  // DeviceAndBrowserInfo 判成 isBot 的那一项。
+  const split = auditFingerprint(
+    { ...base, worker: { language: 'en-US', languages: ['en-US', 'en'] } },
+    profile,
+    true,
+  )
+  const workerCheck = split.find((check) => check.name === 'workerLanguages')
+  assert.ok(workerCheck, 'the worker language check is reported')
+  assert.equal(workerCheck.ok, false, 'a split brain must fail the audit')
+
+  const aligned = auditFingerprint({ ...base, worker: { language: 'zh-CN', languages: ['zh-CN'] } }, profile, true)
+  assert.equal(aligned.find((check) => check.name === 'workerLanguages')?.ok, true)
+
+  // Worker 采样失败不能被当成「一致」放过去。
+  const failed = auditFingerprint({ ...base, worker: { error: 'timeout' } }, profile, true)
+  assert.equal(failed.find((check) => check.name === 'workerLanguages')?.ok, false)
 })

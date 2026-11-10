@@ -17,6 +17,13 @@
 // - 注入走页级 CDP:Patchright 会丢弃 `context.addInitScript` 与页面的
 //   新文档脚本,只有自己发出的 `Page.addScriptToEvaluateOnNewDocument`
 //   才会在页面脚本之前执行。
+//
+// 语言必须走启动参数而不是页面覆盖:持久 profile 的 `intl.accept_languages`
+// 会按 profile 首次创建时的系统语言写死(实测为 `en-US,en`),Worker 读的是
+// 这份偏好,而 Playwright 的 `locale` 只改主世界。于是同一页面上主线程报
+// `zh-CN`、Worker 报 `en-US`,这是最容易被交叉验证抓住的矛盾 —— 实测
+// DeviceAndBrowserInfo 仅凭此项就判 `isBot: true`。`--accept-lang` 同时
+// 决定 Worker 与 Accept-Language 头,是唯一能一次对齐两处的开关。
 
 /** 一份伪装档位:数值应当与浏览器真实环境一致。 */
 export interface StealthProfile {
@@ -77,6 +84,9 @@ export function stealthArgs(profile: StealthProfile): string[] {
     `--user-agent=${profile.userAgent}`,
     `--window-size=${profile.viewport.width + WINDOW_CHROME.x},${profile.viewport.height + WINDOW_CHROME.y}`,
     `--lang=${profile.locale}`,
+    // 必须同时给 `--accept-lang`:只给 `--lang` 时 Worker 仍读 profile 里
+    // 存的偏好语言,与主世界的 `navigator.language` 对不上。
+    `--accept-lang=${profile.locale}`,
     '--force-color-profile=srgb',
     '--no-first-run',
     '--no-default-browser-check',
@@ -149,7 +159,7 @@ export function stealthScript(profile: StealthProfile): string {
  * 主世界指纹采集脚本。结果以 JSON 字符串返回,避免返回值里出现不可序列化
  * 的对象。采集项只保留检测方最常交叉验证的那些。
  */
-export const COLLECT_FINGERPRINT = `(() => {
+export const COLLECT_FINGERPRINT = `(async () => {
   const out = {}
   const n = navigator
   out.userAgent = n.userAgent
@@ -185,6 +195,24 @@ export const COLLECT_FINGERPRINT = `(() => {
   out.notification = typeof Notification === 'undefined' ? null : Notification.permission
   out.visibility = document.visibilityState
   out.hasFocus = document.hasFocus()
+  // Worker 有自己的 navigator,读的是 profile 的语言偏好而不是主世界的覆盖值。
+  // 检测方普遍用「主线程 vs Worker」交叉验证,所以这里必须一起采。
+  // Worker 消息是异步的,整个采集因此返回 Promise,调用方需开 awaitPromise。
+  const probeWorker = () => new Promise((resolve) => {
+    let settled = false
+    const done = (value) => { if (!settled) { settled = true; resolve(value) } }
+    const timer = setTimeout(() => done({ error: 'timeout' }), 2000)
+    try {
+      const src = 'self.onmessage=function(){postMessage({language:navigator.language,languages:[].slice.call(navigator.languages||[])})}'
+      const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })))
+      worker.onmessage = (event) => { clearTimeout(timer); worker.terminate(); done(event.data) }
+      worker.onerror = (event) => { clearTimeout(timer); worker.terminate(); done({ error: String(event.message || 'worker-error') }) }
+      worker.postMessage(0)
+    } catch (error) {
+      clearTimeout(timer)
+      done({ error: String(error && error.message ? error.message : error) })
+    }
+  })
   try {
     const gl = document.createElement('canvas').getContext('webgl')
     const ext = gl.getExtension('WEBGL_debug_renderer_info')
@@ -194,6 +222,7 @@ export const COLLECT_FINGERPRINT = `(() => {
   } catch (error) {
     out.webgl = null
   }
+  out.worker = await probeWorker()
   return JSON.stringify(out)
 })()`
 
@@ -284,6 +313,29 @@ export function auditFingerprint(
     name: 'webgl',
     ok: !/SwiftShader|llvmpipe|Software/i.test(renderer),
     detail: /SwiftShader|llvmpipe|Software/i.test(renderer) ? `软件渲染:${renderer}` : renderer || '拿不到 WebGL 渲染器',
+  })
+
+  // 主线程与 Worker 的语言必须一致。检测方普遍拿这两处交叉验证,而不一致
+  // 几乎只可能来自自动化:真实浏览器的 Worker 与主线程读同一份 profile 偏好。
+  const worker = isRecord(facts.worker) ? facts.worker : null
+  const mainLanguages = Array.isArray(facts.languages) ? facts.languages.map(String) : []
+  const workerLanguages = worker && Array.isArray(worker.languages) ? worker.languages.map(String) : null
+  // 任一侧没采到就不能判「一致」:缺失不是吻合,放过去等于自检失效。
+  const languagesMatch =
+    workerLanguages !== null &&
+    mainLanguages.length > 0 &&
+    JSON.stringify(mainLanguages) === JSON.stringify(workerLanguages)
+  checks.push({
+    name: 'workerLanguages',
+    ok: languagesMatch,
+    detail:
+      mainLanguages.length === 0
+        ? '主线程语言未采到,无法与 Worker 对照'
+        : workerLanguages === null
+          ? `Worker 语言采样失败:${worker && typeof worker.error === 'string' ? worker.error : '无结果'}`
+          : languagesMatch
+            ? `Worker 与主线程一致:${mainLanguages.join(',')}`
+            : `主线程 ${mainLanguages.join(',')} 但 Worker ${workerLanguages.join(',')}:Worker 读的是 profile 语言偏好,需要用 --accept-lang 对齐`,
   })
 
   if (expected) {

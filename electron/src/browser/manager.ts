@@ -400,17 +400,25 @@ export class BrowserManager {
    *
    * 为什么不用 `context.addInitScript`:Patchright 会把它丢弃 —— 实测在
    * 主世界完全看不到影子。页级 CDP 才是我们自己的通道。
+   *
+   * 新文档脚本只对「注入之后开始的导航」生效,而持久 profile 恢复的标签页
+   * 往往已经加载完了。这里再补一次即时求值,让已存在的文档也拿到补丁;
+   * 补丁自身逐项比较现值,重复执行是幂等的。
    */
   async #injectStealth(session: CDPSession): Promise<void> {
     const stealth = this.#stealth
     if (!stealth) return
+    const source = stealthScript(stealth)
     try {
       await session.send('Page.enable')
-      await session.send('Page.addScriptToEvaluateOnNewDocument', {
-        source: stealthScript(stealth),
-      })
+      await session.send('Page.addScriptToEvaluateOnNewDocument', { source })
     } catch {
       // 注入失败不应该拦住页面注册;最坏情况只是回到无伪装状态。
+    }
+    try {
+      await session.send('Runtime.evaluate', { expression: source })
+    } catch {
+      // about:blank 等还没有可求值上下文的情况,交给新文档脚本处理。
     }
   }
 
@@ -1697,6 +1705,8 @@ export class BrowserManager {
     const subject = (await tab.session.send('Runtime.evaluate', {
       expression: `${COLLECT_FINGERPRINT}`,
       returnByValue: true,
+      // 采集脚本要等 Worker 回消息才返回,不开 awaitPromise 会拿到未决的 Promise。
+      awaitPromise: true,
     })) as { result?: { value?: unknown; description?: string }; exceptionDetails?: { text?: string } }
     if (subject.exceptionDetails) {
       fail('evaluate-failed', subject.exceptionDetails.text ?? '指纹采集失败')
