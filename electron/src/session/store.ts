@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events'
 
 import type {
   Envelope,
+  ModelSelection,
   SessionEvent,
   SessionHeader,
   SessionPage,
@@ -21,6 +22,23 @@ import { newSessionId } from '../core/util.ts'
 
 const SESSION_FORMAT_VERSION = 0
 const EXCERPT_CHARS = 160
+
+/** 高频流式帧：只服务实时观感，不进历史分页窗口。 */
+function isTransientEvent(event: Envelope): boolean {
+  return event.type === 'assistant-chunk' || event.type === 'tool-output-chunk'
+}
+
+/**
+ * 分页节点：用户自己的消息，以及父代理投递给子会话的任务/来信（子会话
+ * 界面同样按用户气泡展示，是一轮工作的起点）。注入消息、系统提醒不是
+ * 对话节点，不能作为页首。
+ */
+function isPageBoundary(event: Envelope, parentSessionId?: string): boolean {
+  if (event.type === 'user-message') return !(event as { injected?: boolean }).injected
+  return event.type === 'agent-delivery' &&
+    parentSessionId !== undefined &&
+    event.source === `agent:${parentSessionId}`
+}
 
 interface SummaryCache {
   mtimeMs: number
@@ -268,23 +286,51 @@ export class SessionStore {
     return { toSeq, toMessage: target.text, removedEvents }
   }
 
+  /**
+   * 读取一页展示事件：`before` 是排他 seq 上界。分页节点是用户消息（子
+   * 会话还包括父代理投递），`limit` 是每轮工作量的参考值：页首选在参考
+   * 边界附近最近的分页节点上，因此一页会覆盖若干完整轮次；单轮本身超过
+   * `limit` 时整轮作为一页，不再切在半截回答里。
+   */
   readPage(id: string, before?: number, limit = 500): SessionPage | null {
     const session = this.load(id)
     if (!session) return null
     const all = session.events
-    const end = before === undefined ? all.length : Math.max(0, Math.min(all.length, before - 1))
-    const start = Math.max(0, end - limit)
-    const events = all.slice(start, end)
-    const anchors = all
+    // 分页按“展示事件”计数：流式 chunk 只服务实时观感，不能占历史窗口，
+    // 否则一次长回答就能把 200 条额度吃光，用户打开会话只看得到半段正文。
+    const display = all.filter((event) => !isTransientEvent(event))
+    const anchors = display
       .filter((event) => event.type === 'user-message' && !(event as { injected?: boolean }).injected)
       .map((event) => ({ seq: event.seq, text: (event as { text: string }).text.slice(0, 120) }))
+    const eligible = before === undefined
+      ? display
+      : display.filter((event) => event.seq < before)
+    // `start` 先按事件数划出参考边界，再移到分页节点上：选离参考边界
+    // 最近的用户消息，让一页的工作量接近 `limit`，同时不切在轮次中间。
+    // 边界前后都没有节点时才退回按事件数切。
+    let start = Math.max(0, eligible.length - limit)
+    if (start > 0) {
+      let nearest = -1
+      let distance = Infinity
+      for (let index = 0; index < eligible.length; index += 1) {
+        if (!isPageBoundary(eligible[index]!, session.header.parent_session)) continue
+        const candidate = Math.abs(index - start)
+        if (candidate < distance) {
+          nearest = index
+          distance = candidate
+        }
+      }
+      if (nearest >= 0) start = nearest
+    }
+    const lastSelection = lastSelectionOf(all)
     return {
       header: session.header,
-      events,
-      total: all.length,
+      events: eligible.slice(start),
+      total: display.length,
       hasMoreBefore: start > 0,
       anchors,
       totals: computeTotals(all),
+      ...(lastSelection ? { last_selection: lastSelection } : {}),
     }
   }
 
@@ -377,6 +423,7 @@ export class SessionStore {
     const excerpt = header.subagent?.label ?? firstUserText(events)
     const title = lastTitle(events)
     const preset = lastAgentPreset(events)
+    const lastSelection = lastSelectionOf(events)
     const summary: SessionSummary = {
       id,
       created_at: header.created_at,
@@ -389,6 +436,7 @@ export class SessionStore {
       ...(header.parent_session ? { parent_session: header.parent_session } : {}),
       ...(header.subagent ? { subagent: header.subagent } : {}),
       ...(header.agent_preset || preset ? { agent_preset: preset ?? header.agent_preset } : {}),
+      ...(lastSelection ? { last_selection: lastSelection } : {}),
     }
     this.cache.set(id, { mtimeMs: stat.mtimeMs, size: stat.size, summary })
     return summary
@@ -518,6 +566,32 @@ function lastTitle(events: Envelope[]): string | null {
     if (event?.type === 'session-title') return (event as { title: string }).title
   }
   return null
+}
+
+/**
+ * The model this session last asked with, folded from the whole log.
+ *
+ * `request-header` is the only record carrying the reasoning effort, and it is
+ * written only when the request shape changes — so a session whose model never
+ * changed keeps a single header at its very beginning, far outside any page
+ * window. Folding here is what lets the console restore the right model per
+ * session instead of carrying the previous session's choice over.
+ */
+function lastSelectionOf(events: Envelope[]): ModelSelection | null {
+  let fallback: ModelSelection | null = null
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.type === 'request-header') {
+      const { provider, model, reasoningEffort } = event.header.config
+      if (!provider || !model) return fallback
+      return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) }
+    }
+    if (event.type === 'request-context' && fallback === null) {
+      if (!event.provider || !event.model) continue
+      fallback = { provider: event.provider, model: event.model }
+    }
+  }
+  return fallback
 }
 
 function lastAgentPreset(events: Envelope[]): string | null {

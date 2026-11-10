@@ -232,7 +232,12 @@ test('agent loop runs a tool-calling turn and streams UI-visible events', async 
     const page = (await (
       await fetch(`${host.baseUrl}/api/sessions/${session.id}/events?limit=50`)
     ).json()) as { events: Envelope[]; total: number }
-    assert.ok(page.total >= events.length)
+    // Paging counts display events: stream-only frames are not part of the window.
+    const displayCount = events.filter(
+      (event) => event.type !== 'assistant-chunk' && event.type !== 'tool-output-chunk',
+    ).length
+    assert.equal(page.total, displayCount)
+    assert.ok(page.events.length <= page.total)
   } finally {
     await host.close()
     await mock.close()

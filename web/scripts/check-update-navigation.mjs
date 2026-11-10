@@ -9,7 +9,9 @@ assert.ok(logo.indexOf('<UpdateBadge />') > logo.indexOf('<DeniaWordmark />'), '
 const rail = app.slice(app.indexOf('{railMounted && ('), app.indexOf('</aside>', app.indexOf('{railMounted && (')))
 assert.ok(rail.indexOf('<UpdateBadge collapsed />') > rail.indexOf('<IconSessionSearch size={16} />'), '收起侧栏的更新入口必须位于搜索下方')
 assert.ok(rail.indexOf('<UpdateBadge collapsed />') < rail.indexOf('rail-spacer'), '更新提示不能沉到侧栏底部')
-assert.ok(app.includes('if (!gateActive) ensureStartupUpdateCheck()'), '冷启动静默检查不能在票据登录页抢跑')
+// Electron 宿主没有远程票据登录页:消费该守卫的 `if (!gateActive)` 已随远程访问移除。
+assert.ok(!app.includes('gateActive'), '远程票据登录页已删除,不应再残留它的守卫')
+assert.ok(app.includes('ensureStartupUpdateCheck()'), '冷启动仍需静默检查一次更新')
 assert.ok(app.includes("versionOpen ? '#version'"), '版本界面必须有独立路由')
 assert.ok(app.includes('if (version) {\n        setExtensionTab(null)\n        return\n      }'), '打开版本路由不应清除当前会话')
 assert.ok(app.includes('!isMobile && !extensionTab && !versionOpen'), '版本界面不应被会话侧面板挤占')

@@ -3,32 +3,11 @@ import { t } from '../i18n'
 import { useClampedPopover } from '../hooks/useClampedPopover'
 import { IconCheck, IconChevronDown } from './icons'
 import { IconPermissionRead, IconPermissionEdit, IconPermissionPlan, IconPermissionFull, IconPermissionApprove } from './SettingsIcons'
-import { normalizePermissionChoice } from '../types'
 import type { PermissionChoice, PermissionMode } from '../types'
 import type { ComponentType } from 'react'
 
 /** i18n 文案键类型(zh 为源键集)。 */
 type MessageKey = Parameters<typeof t>[0]
-
-const PERMISSION_KEY = 'denia.permission'
-/** 占位期默认 full 迁移标记:只把旧默认清一次,之后用户显式选 full 保留。 */
-const PERMISSION_MIGRATED_KEY = 'denia.permission.migrated'
-
-function loadPermission(): PermissionChoice {
-  const raw = window.localStorage.getItem(PERMISSION_KEY)
-  if (raw === 'full' && !window.localStorage.getItem(PERMISSION_MIGRATED_KEY)) {
-    // 占位期默认 full 且无实际约束;迁移到默认自动编辑。
-    try {
-      window.localStorage.setItem(PERMISSION_MIGRATED_KEY, '1')
-      window.localStorage.setItem(PERMISSION_KEY, 'auto-edit')
-    } catch {
-      /* storage unavailable */
-    }
-    return 'auto-edit'
-  }
-  // 三档时代的 workspace-write 是 auto-edit 的旧名,直接映射。
-  return raw ? normalizePermissionChoice(raw) : 'auto-edit'
-}
 
 /** 四档权限的展示元数据:名称与描述均走 i18n。 */
 export const PERMISSION_LEVELS: ReadonlyArray<{
@@ -183,23 +162,3 @@ export function PermissionSelector({
     </div>
   )
 }
-
-/** 是否已由用户显式选过权限档位(决定控制台默认值能否覆盖)。 */
-export function hasStoredPermission(): boolean {
-  return window.localStorage.getItem(PERMISSION_KEY) !== null
-}
-
-/**
- * 落盘权限档位:设置里的默认档位保存后同步写入,让新草稿态的输入框
- * 立刻跟随新默认值(会话内仍以会话日志里的档位为准)。
- */
-export function storePermission(level: PermissionChoice): void {
-  try {
-    window.localStorage.setItem(PERMISSION_KEY, level)
-    if (level === 'full') window.localStorage.setItem(PERMISSION_MIGRATED_KEY, '1')
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-export { loadPermission }

@@ -76,6 +76,7 @@ const stubs = new Map([
       return { groups: [{ id: 'mock-provider', label: 'Mock', models: [{ id: 'mock-model', name: 'Mock', inputModalities: ['text', 'image'] }] }] };
     }
     export async function getSettings() { b.record('getSettings', []); return { namespaces: [] }; }
+    export async function permissionCatalog() { b.record('permissionCatalog', []); return { modes: ['read-only', 'auto-edit', 'plan', 'full'] }; }
     export async function listAgentPresets() { b.record('listAgentPresets', []); return { modeSelection: false, default: null, presets: [] }; }
     export function subscribeEvents(...args) { b.record('subscribeEvents', args); return () => {}; }
     export async function listSkills(...args) { b.record('listSkills', args); return { skills: [] }; }

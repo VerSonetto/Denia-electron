@@ -1,5 +1,6 @@
 import type { SessionEnvelope } from './types'
 
+/** 单个历史窗口的事件预算：分页参考页大小，也是实时窗口回收后保留的尾部大小。 */
 export const SESSION_PAGE_LIMIT = 200
 export const LIVE_EVENT_LIMIT = 600
 

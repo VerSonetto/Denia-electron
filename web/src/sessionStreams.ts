@@ -1,6 +1,6 @@
 import * as api from './api'
 import type { SessionAnchor } from './api'
-import type { SessionEnvelope, SessionHeader, SessionTotals } from './types'
+import type { ModelSelection, SessionEnvelope, SessionHeader, SessionTotals } from './types'
 import { isPushDead, setPushDead } from './pushChannel'
 import { POLL_HOLD_SEC, pollSessionFollow } from './pushTransport'
 import { SESSION_PAGE_LIMIT } from './sessionMemory'
@@ -52,6 +52,11 @@ export interface SessionPageMeta {
    * 状态栏的累计值必须以它为基准,再叠加后续实时帧。
    */
   totals: SessionTotals
+  /**
+   * 全会话最后使用的模型。`request-header` 只在请求形态变化时落盘,尾部窗口
+   * 里可能一条都没有 —— 用它恢复会话模型,不靠扫描窗口。
+   */
+  lastSelection?: ModelSelection
 }
 
 export interface SessionStreamListener {
@@ -169,11 +174,12 @@ function reconnect(id: string, state: StreamState) {
       state.retryDelayMs = 300
       state.cursor = data.events.length ? data.events[data.events.length - 1].seq : 0
       state.lastFrameAt = now()
-      const meta = {
+      const meta: SessionPageMeta = {
         total: data.total,
         hasMoreBefore: data.hasMoreBefore,
         anchors: data.anchors ?? [],
         totals: totalsFromPage(data.totals),
+        ...(data.last_selection ? { lastSelection: data.last_selection } : {}),
       }
       for (const listener of state.listeners) {
         listener.onSnapshot(data.header, data.events, meta)

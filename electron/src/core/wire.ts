@@ -283,6 +283,11 @@ export interface SessionSummary {
   parent_session?: string
   subagent?: SubagentDescriptor
   agent_preset?: string
+  /**
+   * 会话最后实际使用的模型（全会话折叠得出）。切换会话时输入框恢复到它，
+   * 而不是沿用上一个会话的模型。缺省 = 该会话从未发过请求。
+   */
+  last_selection?: ModelSelection
 }
 
 export interface SessionTotals {
@@ -299,10 +304,19 @@ export interface SessionTotals {
 export interface SessionPage {
   header: SessionHeader
   events: Envelope[]
+  /** 展示事件总数：流式增量不计入分页窗口。 */
   total: number
   hasMoreBefore: boolean
   anchors: { seq: number; text: string }[]
   totals: SessionTotals
+  /**
+   * 会话最后实际使用的模型（全会话投影，与分页窗口无关）。
+   *
+   * 只能由服务端给出：request-header 仅在请求形态变化时落盘，长会话的尾部
+   * 窗口里可能一条都没有，前端只扫描窗口时恢复不出模型与思考强度，切换会话
+   * 就会退回上一个会话的选择。
+   */
+  last_selection?: ModelSelection
 }
 
 export interface ToolOutput {

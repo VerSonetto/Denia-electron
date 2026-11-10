@@ -38,6 +38,7 @@ const stubs = new Map([
   ['api', `${prelude}
     export async function getCatalog() { return { groups: [{ id: 'mock-provider', label: 'Mock', models: [{ id: 'mock-model', name: 'Mock', inputModalities: ['text'] }] }] }; }
     export async function getSettings() { return { namespaces: [] }; }
+    export async function permissionCatalog() { return { modes: ['read-only', 'auto-edit', 'plan', 'full'] }; }
     export async function listAgentPresets() { return { modeSelection: false, default: null, presets: [] }; }
     export function subscribeEvents() { return () => {}; }
     export async function listSkills() { return { skills: [] }; }

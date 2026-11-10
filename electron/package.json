@@ -1,7 +1,7 @@
 {
   "name": "denia",
   "private": true,
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Denia desktop host: TypeScript agent runtime with the shared web console",
   "author": "Denia",
   "type": "module",
@@ -9,7 +9,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/loop.test.ts test/cancel.test.ts test/open-in-app.test.ts test/adapters.test.ts test/shared-home.test.ts test/permission.test.ts test/approval.test.ts test/mcp.test.ts test/subagent.test.ts test/context.test.ts test/context-usage.test.ts test/context-trimming.test.ts test/session.test.ts test/rewind.test.ts test/jobs.test.ts test/skill-invocation.test.ts test/completion-delivery.test.ts test/auto-compact.test.ts test/browser.test.ts test/stealth.test.ts",
+    "test": "node --test test/loop.test.ts test/cancel.test.ts test/open-in-app.test.ts test/adapters.test.ts test/shared-home.test.ts test/permission.test.ts test/approval.test.ts test/mcp.test.ts test/subagent.test.ts test/context.test.ts test/context-usage.test.ts test/context-trimming.test.ts test/session.test.ts test/session-defaults.test.ts test/session-paging.test.ts test/rewind.test.ts test/jobs.test.ts test/skill-invocation.test.ts test/completion-delivery.test.ts test/auto-compact.test.ts test/browser.test.ts test/stealth.test.ts",
     "start": "node scripts/build.mjs && electron .",
     "dev": "node scripts/dev.mjs",
     "dist": "node scripts/build.mjs && electron-builder --win nsis --publish never"

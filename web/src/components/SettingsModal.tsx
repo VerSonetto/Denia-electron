@@ -20,7 +20,7 @@ import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSetti
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
 import { normalizePermissionChoice, type PermissionChoice } from '../types'
-import { defaultPermissionLevels, storePermission } from './PermissionSelector'
+import { defaultPermissionLevels } from './PermissionSelector'
 import {
   QUEUE_DEFAULT_ACTIONS,
   normalizeQueueDefaultAction,
@@ -374,10 +374,9 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
     }
   }
 
-  /** 权限档位:选中即保存,并同步本地草稿态档位记忆。 */
+  /** 权限档位:选中即保存。新草稿态在下次拉设置时自动跟随这个值。 */
   const changeDefaultPermission = (next: PermissionChoice): void => {
     setDefaultPermission(next)
-    storePermission(next)
     void saveGeneral({ defaultPermissionMode: next }, t('defaultPermissionSaved'))
   }
 

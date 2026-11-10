@@ -48,6 +48,7 @@ import {
 } from '../config.ts'
 import { ExecPolicy } from '../core/exec-policy.ts'
 import { legacyModeOf, presetState, stateFromLegacy } from '../core/permission.ts'
+import type { PermissionState } from '../core/permission.ts'
 import { streamFor } from '../llm/index.ts'
 import type { Envelope, ImageData, ModelSelection, SessionEvent, ToolCallRef } from '../core/wire.ts'
 import { errorMessage, isRecord } from '../core/util.ts'
@@ -277,7 +278,6 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const browser = options.browser === undefined ? new BrowserManager({ home }) : options.browser
   if (browser) registry.register(createBrowserTool(browser))
   const workspaces = loadWorkspaces(home)
-  const defaultPermissionMode = consolePermissionMode(home)
   const policy = options.policy ?? ExecPolicy.load(path.join(home, 'execpolicy.json'))
   const bridge = options.bridge ?? new ServerApprovalBridge()
   // Only the built-in channel knows how to settle requests from HTTP.
@@ -517,9 +517,11 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         const preset = typeof body.agentPreset === 'string' && body.agentPreset.trim()
           ? body.agentPreset.trim()
           : presetSettings(home).default
+        // 每次创建都重新读设置:进程启动后才改的默认档位必须对这个会话生效,
+        // 不能沿用启动时的快照。
+        const initial = permissionPresetState(consolePermissionMode(home))
         const header = store.create(cwd, { sandbox: true })
-        const initial = stateFromLegacy(defaultPermissionMode)
-        store.append(header.id, { type: 'permission-mode', mode: defaultPermissionMode })
+        store.append(header.id, { type: 'permission-mode', mode: legacyModeOf(initial) })
         store.append(header.id, {
           type: 'permission-selection',
           sandbox: initial.sandbox,
@@ -2328,13 +2330,29 @@ function approvalAnswerOf(body: Record<string, unknown>): ApprovalAnswer | null 
   }
 }
 
-function consolePermissionMode(home: string): 'read-only' | 'auto-edit' | 'full' {
+/** 新建会话可用的默认档位。计划模式只在会话内显式进入,不能作默认值。 */
+type DefaultPermission = 'read-only' | 'auto-edit' | 'approve-for-me' | 'full'
+
+/**
+ * 设置里的默认权限档位,建会话时读。
+ *
+ * 只认目录里的四个档位:计划模式必须逐会话显式进入,非法值回落自动编辑
+ * (与 Rust 宿主的 console_default_permission_mode 同一判据)。
+ */
+function consolePermissionMode(home: string): DefaultPermission {
   const document = loadSettings(home)
   const section = document && isRecord(document.console) ? document.console : null
   const mode = section && typeof section.defaultPermissionMode === 'string'
     ? section.defaultPermissionMode
     : ''
-  return mode === 'read-only' || mode === 'full' || mode === 'auto-edit' ? mode : 'auto-edit'
+  if (mode === 'read-only' || mode === 'full' || mode === 'auto-edit') return mode
+  if (mode === 'approve-for-me') return mode
+  return 'auto-edit'
+}
+
+/** 默认档位 → 完整权限状态;自动审批是独立预设,不能走四档的 legacy 映射。 */
+function permissionPresetState(choice: DefaultPermission): PermissionState {
+  return choice === 'approve-for-me' ? presetState('approve-for-me') : stateFromLegacy(choice)
 }
 
 function allFeatures(enabled: boolean) {

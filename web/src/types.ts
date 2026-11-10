@@ -276,6 +276,11 @@ export interface SessionSummary {
   parent_session?: string
   /** 会话运行的 agent preset(id);创建时写入,缺省表示后端未提供。 */
   agent_preset?: string
+  /**
+   * 会话最后实际使用的模型(服务端对整份日志的投影)。
+   * 切换会话时输入框恢复到它;缺省表示该会话还没发过请求。
+   */
+  last_selection?: ModelSelection
 }
 
 /**

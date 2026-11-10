@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import * as api from './api'
 import type { SessionSummary, WorkspaceRecord } from './types'
 import { dropSession } from './sessionStreams'
+import { forgetSessionModel } from './features/conversation/sessionModelMemory'
 
 /**
  * 全局应用 store(自写,不引状态库):唯一数据源。
@@ -314,6 +315,8 @@ export function addSessionLocal(summary: SessionSummary, workspaceId?: string) {
 export async function deleteSessionAction(id: string): Promise<void> {
   await api.deleteSession(id)
   dropSession(id)
+  // 会话连同它的模型记忆一起回收,不在 localStorage 里留孤儿条目。
+  forgetSessionModel(id)
   const localBlankIds = { ...state.localBlankIds }
   delete localBlankIds[id]
   setState({

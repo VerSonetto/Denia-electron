@@ -60,12 +60,12 @@ assert.ok(route.includes('/steer'), '会话路由暴露引导接口')
 
 const settings = web('components/SettingsModal.tsx')
 assert.ok(settings.includes('queueDefaultActionTitle'), '常规设置提供队列默认处理配置')
+// 选项清单只有一份来源(queueDefaults.ts),设置页必须从它渲染而不是另抄一份。
+const queueDefaults = web('features/conversation/queueDefaults.ts')
 assert.ok(
-  settings.includes('QUEUE_DEFAULT_OPTIONS') &&
-    settings.includes("id: 'ask'") &&
-    settings.includes("id: 'interject'") &&
-    settings.includes("id: 'guide'"),
-  '队列默认处理必须提供「每次询问 / 插话 / 引导」三个选项',
+  queueDefaults.includes("['ask', 'interject', 'guide']") &&
+    settings.includes('QUEUE_DEFAULT_ACTIONS.map'),
+  '队列默认处理必须提供「每次询问 / 插话 / 引导」三个选项,且设置页从唯一来源渲染',
 )
 assert.ok(page.includes('peekQueueDefaultAction'), '运行中发送读取队列默认处理方式')
 assert.ok(

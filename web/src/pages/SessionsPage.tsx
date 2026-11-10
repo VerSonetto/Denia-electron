@@ -5,6 +5,7 @@ import { useSessionContext } from '../features/conversation/useSessionContext'
 import { useComposerMentions } from '../features/conversation/useComposerMentions';
 import { useComposerSlash } from '../features/conversation/useComposerSlash';
 import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, latestRequestSelection, queuedPayload, type OutgoingPayload } from '../features/conversation/sessionState';
+import { readSessionModel, rememberSessionModel } from '../features/conversation/sessionModelMemory';
 import { usePermissions } from '../features/conversation/usePermissions';
 import { usePromptOptimize } from '../features/conversation/usePromptOptimize';
 import { useMessageQueue, type PostMessageFn } from '../features/conversation/useMessageQueue';
@@ -97,6 +98,11 @@ export default function SessionsPage({
   const activeSession: SessionSummary | null = activeId
     ? (sessions.find((s) => s.id === activeId) ?? null)
     : null
+  // 会话摘要的镜像:模型恢复在 React 效果里读它,避免把 activeSession 放进
+  // 依赖 —— 列表刷新(标题/时间变化)会让摘要对象整个换新,进了依赖就会
+  // 反复触发恢复,把用户手动换的模型顶回摘要里的旧值。
+  const activeSessionRef = useRef<SessionSummary | null>(activeSession)
+  activeSessionRef.current = activeSession
   // 子代理身份摘要（定义、冻结工具数、权限上限、仅项目级指令、不能派遣）：
   // 只读运行快照的事实，子会话页与父侧面板共用同一份纯函数。
   const descriptorText = useMemo(
@@ -428,6 +434,13 @@ export default function SessionsPage({
     }
   }
 
+  /**
+   * 草稿态(还没有会话)的初始模型:上一次用过的模型(localStorage 全局记忆),
+   * 没有则目录里第一个可用模型。
+   *
+   * 只服务草稿态 —— 一旦进入某个会话,模型由那个会话决定(见下方的会话模型
+   * 恢复效应),两者不共用来源,否则所有会话会退化成共用一个模型。
+   */
   useEffect(() => {
     if (!catalog || selection) return
     const initial = loadLastModel(catalog) ?? firstAvailableSelection(catalog)
@@ -445,6 +458,20 @@ export default function SessionsPage({
     }
   }, [catalog, selection])
 
+  // 当前会话 id 的镜像:applySelection 写会话记忆时要用最新值。
+  const activeIdRef = useRef(activeId)
+  activeIdRef.current = activeId
+  // 已经恢复过模型的会话 id。同一会话只恢复一次,之后的重放快照与列表刷新
+  // 都不得把用户手动换的选择顶回去。
+  const restoredSelectionRef = useRef<string | null>(null)
+
+  /**
+   * 用户显式换了模型:写全局记忆(下一个新草稿的起点),并记进当前会话。
+   *
+   * 会话记忆必须在这里写:会话"刚选完模型但还没发消息"的那一段,日志里
+   * 还是上一次请求的模型,切走再切回来会被恢复成旧值 —— 用户看到的就是
+   * "切换会话把模型改掉了"。
+   */
   const applySelection = (next: ModelSelection) => {
     if (!catalog) return
     const normalized = normalizeSelection(catalog, next)
@@ -454,6 +481,9 @@ export default function SessionsPage({
     } catch {
       /* storage unavailable */
     }
+    rememberSessionModel(activeIdRef.current, normalized)
+    // 手动选择本身就是这个会话的正确状态,后续快照不该再改它。
+    restoredSelectionRef.current = activeIdRef.current
   }
 
   // 把当前模型选择同步给右侧面板的「AI 生成提交信息」(见 modelSelectionStore):
@@ -609,35 +639,66 @@ export default function SessionsPage({
     closeSlash()
   }
 
-  // 模型选择恢复:切换会话时,把编辑器上的模型切到该会话日志里最后一次
-  // 实际使用的模型(request-header 快照),而不是沿用上一会话/localStorage
-  // 的记忆;只在切换后的第一次快照恢复,之后的重放快照不覆盖手动选择。
+  // 模型选择恢复:切换会话时把编辑器上的模型切到**这个会话自己的**模型,
+  // 而不是沿用上一会话的选择。
+  //
+  // 取值优先级:
+  //   1. 会话里刚选过但还没发消息的那一次(本地记忆,见 sessionModelMemory);
+  //   2. 会话日志投影出的最后模型(服务端 last_selection,覆盖全部历史);
+  //   3. 会话摘要里带的同一份投影(列表接口,快照还没到时的兜底);
+  //   4. 都没有 → 保持当前值(空会话沿用你在别处选好的模型)。
+  //
+  // 恢复只对每个会话做一次,之后的重放快照与列表刷新都不覆盖手动选择。
   // (权限模式同步与审批监听的那一半订阅在 usePermissions 里。)
-  const restoredSelectionRef = useRef<string | null>(null)
+
+  /** 把一份候选选择落到编辑器;目录里已没有该模型时返回 false(交给上层兜底)。 */
+  const restoreSelection = useCallback((candidate: ModelSelection | null | undefined): boolean => {
+    const current = catalogRef.current
+    if (!candidate || !current) return false
+    const usable = current.groups.some(
+      (group) => group.id === candidate.provider && group.models.some((m) => m.id === candidate.model),
+    )
+    if (!usable) return false
+    setSelection(normalizeSelection(current, candidate))
+    return true
+  }, [])
+
+  // 会话切换:先用本地记忆/摘要投影立刻落一次,不必等快照往返 ——
+  // 否则切换瞬间编辑器会短暂显示上一个会话的模型。
+  //
+  // 守卫按会话 id 判等而不是"初始化为 null":效果执行顺序、目录刷新时机都
+  // 不影响正确性 —— 同一个会话只落一次,换会话自然重新落。
+  useEffect(() => {
+    if (!activeId || !catalog) return
+    if (restoredSelectionRef.current === activeId) return
+    // 摘要只在这里读一次(切换时的那一份);列表刷新(标题/时间变化)不进
+    // 依赖,否则会把用户刚换的模型顶回摘要里的旧值。
+    const remembered = readSessionModel(activeId) ?? activeSessionRef.current?.last_selection
+    if (restoreSelection(remembered)) restoredSelectionRef.current = activeId
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, catalog, restoreSelection])
+
   useEffect(() => {
     if (!activeId) return
-    restoredSelectionRef.current = null
     const unsubscribe = attach(activeId, {
       onSnapshot: (_header, events, meta) => {
         // 累计统计以服务端全会话投影为基准(分页窗口里没有早期轮次),
         // 未闭合轮次表用页面事件重建;之后的重连重快照同样以新基准校正。
         totalsRef.current = resetTotals(totalsFromPage(meta?.totals), events)
         setSessionTotals({ ...totalsRef.current.totals })
-        if (restoredSelectionRef.current === null) {
-          const logged = latestRequestSelection(events)
-          const current = catalogRef.current
+        if (restoredSelectionRef.current !== activeId) {
           // 目录未就绪时不消耗恢复机会,等后续自愈快照重试。
-          if (current) {
-            restoredSelectionRef.current = activeId
-            if (
-              logged &&
-              current.groups.some(
-                (g) => g.id === logged.provider && g.models.some((m) => m.id === logged.model),
-              )
-            ) {
-              setSelection(normalizeSelection(current, logged))
-            }
+          if (!catalogRef.current) return
+          const remembered = readSessionModel(activeId)
+          if (remembered) {
+            // 本地记忆更新(用户刚选过):它比日志新,快照不得覆盖。
+            if (restoreSelection(remembered)) restoredSelectionRef.current = activeId
+            return
           }
+          // 快照里的 last_selection 是全会话投影;老后端没有这个字段时
+          // 退回扫描窗口里的 request-header(仅 request-context 兜底)。
+          const logged = meta?.lastSelection ?? latestRequestSelection(events)
+          if (restoreSelection(logged)) restoredSelectionRef.current = activeId
         }
       },
       onEnvelope: (event) => {

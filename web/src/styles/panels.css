@@ -255,30 +255,22 @@
 /* ---------- 长会话性能:有限窗口 + 浏览器跳过屏外渲染 ---------- */
 
 .load-older-row {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  right: 0;
+  z-index: 3;
   display: flex;
   justify-content: center;
-  padding: 4px 0;
+  pointer-events: none;
 }
 
-.load-older-btn {
-  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+.load-older-hint {
+  padding: 2px 10px;
   border-radius: 999px;
-  background: var(--bg-elevated, rgba(128, 128, 128, 0.08));
-  color: var(--label-secondary, #666);
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.9));
+  color: var(--label-tertiary, #999);
   font-size: 12px;
-  padding: 5px 14px;
-  cursor: pointer;
-  transition: background 80ms ease, color 80ms ease;
-}
-
-.load-older-btn:hover {
-  background: var(--hover-fill, rgba(128, 128, 128, 0.14));
-  color: var(--label-primary, #222);
-}
-
-.load-older-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 /* 历史消息行交给浏览器按需渲染;大面积长会话首屏/滚动不再全部布局。 */

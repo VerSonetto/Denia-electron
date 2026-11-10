@@ -14,7 +14,7 @@ await build({
   format: 'esm',
   target: 'node22',
   outfile: 'dist/main.js',
-  external: ['electron'],
+  external: ['electron', '@zhizhuodemao/patchright'],
   sourcemap: true,
   logLevel: 'info',
   banner: {
@@ -40,7 +40,8 @@ copyFileSync('src/splash.html', 'dist/splash.html')
 // `shell: true` a forward-slash relative path is parsed as `node_modules` by
 // cmd on Windows.
 const electron = require('electron')
-const child = spawn(electron, ['.'], {
+const userDataDir = process.env.DENIA_USER_DATA_DIR?.trim()
+const child = spawn(electron, userDataDir ? ['.', `--user-data-dir=${userDataDir}`] : ['.'], {
   stdio: 'inherit',
   env: process.env,
 })

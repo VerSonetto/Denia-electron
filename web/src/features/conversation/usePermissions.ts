@@ -5,7 +5,6 @@ import { notify } from '../../appStore';
 import { attach } from '../../sessionStreams';
 import { consoleDefaultPermission, latestPendingApproval, latestPermissionChoice } from './sessionState';
 import type { ApprovalDecision, ApprovalRequest } from '../../components/ApprovalDialog';
-import { hasStoredPermission, loadPermission } from '../../components/PermissionSelector';
 import { normalizePermissionChoice, type PermissionChoice, type ModelSelection, type SessionSummary } from '../../types';
 
 /** 权限档位与审批:本地三态、后端写入口、审批弹窗与计划审批的完整簇。 */
@@ -20,30 +19,33 @@ export function usePermissions({
   catalogTick: number
   applySelection: (next: ModelSelection) => void
 }) {
-  // 用户显式选过档位 → 用本地记忆;否则跟随设置里的"默认权限模式"
-  // (异步拉取,见下方 default-permission 效应)。会话级档位优先,由事件流覆盖。
-  const [permission, setPermission] = useState<PermissionChoice>(() =>
-    hasStoredPermission() ? loadPermission() : 'auto-edit',
-  )
+  // 草稿态档位只有一个来源:设置里的"默认权限模式"。
+  //
+  // 不再读 localStorage 的"上次点过的档位":那会让用户在设置里改了默认值
+  // 之后,新建会话仍然沿用旧档位(例如设置默认为只读,新建会话却仍是完全
+  // 访问),与设置页展示的值直接矛盾。已经存在的会话另有来源 —— 它自己日志
+  // 里的 permission-selection,由下方事件流覆盖。
+  const [permission, setPermission] = useState<PermissionChoice>('auto-edit')
   const [permissionBusy, setPermissionBusy] = useState(false)
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
   const pendingFullAccessRef = useRef<PermissionChoice | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
 
-  // 设置里的默认档位只在"当前没有已加载会话 + 用户没显式选过"时生效
-  // (会话级档位由 attach 的 onSnapshot/onEnvelope 覆盖,优先级更高)。
+  // 设置里的默认档位作用于"草稿态"(还没有会话的输入框)。会话级档位由
+  // attach 的 onSnapshot/onEnvelope 覆盖,优先级更高。
   // 保存设置后经 SSE `settings-updated`(App 侧 bumpCatalogTick)重拉,
-  // 改动立刻反映到新草稿的输入框档位上。
+  // 新草稿立刻跟随新默认值。切回草稿态时同样重拉一次:设置可能在别的标签页
+  // 或别的入口改过。
   const noSessionRef = useRef(activeId === null)
   noSessionRef.current = activeId === null
   const loadDefaultPermission = useCallback(() => {
-    if (hasStoredPermission()) return
+    if (activeId !== null) return
     void consoleDefaultPermission().then((mode) => {
       // 异步落地期间若已切入/创建了会话,会话日志的档位说了算,不覆盖。
       if (!noSessionRef.current) return
       setPermission(mode)
     })
-  }, [])
+  }, [activeId])
   useEffect(() => {
     loadDefaultPermission()
   }, [loadDefaultPermission, catalogTick])
@@ -53,14 +55,6 @@ export function usePermissions({
     (level: PermissionChoice) => {
       if (activeId && level === permission) return
       setPermission(level)
-      try {
-        window.localStorage.setItem('denia.permission', level)
-        if (level === 'full') {
-          window.localStorage.setItem('denia.permission.migrated', '1')
-        }
-      } catch {
-        /* storage unavailable */
-      }
       if (!activeId) return
       setPermissionBusy(true)
       api

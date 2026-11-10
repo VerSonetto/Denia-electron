@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { clearCompacting, compactingAtOf } from '../appStore'
 import { applyEnvelopes, foldEvents } from '../fold'
@@ -17,6 +17,8 @@ import {
 } from '../sessionMemory'
 
 const OLDER_PAGE_LIMIT = SESSION_PAGE_LIMIT
+/** 距顶部多近开始自动补更早记录。 */
+const AUTO_LOAD_THRESHOLD_PX = 96
 
 // 轨迹台账体积不小(拖入大量历史事件),按需加载,不挤占对话首屏。
 const LazyTrajectoryView = lazy(() =>
@@ -143,6 +145,13 @@ export function SessionView({
   const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [], totals: emptyTotals() })
   const [loadingOlder, setLoadingOlder] = useState(false)
   const olderRequestRef = useRef<AbortController | null>(null)
+  /** 自动补页前记录视口几何，翻页后把读者原来看到的内容留在原处。 */
+  const scrollAnchorRef = useRef<{ top: number; height: number } | null>(null)
+  /** 只有读者自己向上滚动过，才允许触发自动补页，避免首屏落底时误判为到达顶部。 */
+  const autoLoadArmedRef = useRef(false)
+  const previousScrollTopRef = useRef(0)
+  const jumpRequestRef = useRef(jumpRequest)
+  jumpRequestRef.current = jumpRequest
   const [loading, setLoading] = useState(true)
   const eventsRef = useRef<SessionEnvelope[]>([])
   const pageMetaRef = useRef(pageMeta)
@@ -288,6 +297,8 @@ export function SessionView({
         }
         olderRequestRef.current?.abort()
         olderRequestRef.current = null
+        scrollAnchorRef.current = null
+        autoLoadArmedRef.current = false
         setLoadingOlder(false)
         queueRef.current = []
         const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [], totals: emptyTotals() }
@@ -355,7 +366,7 @@ export function SessionView({
   }, [pendingMessages.length, publishTodos])
 
   /** 向上翻页:把更早的完整轮次组 prepend 到当前事件流并重建 fold。 */
-  const loadOlder = useCallback(async (): Promise<boolean> => {
+  const loadOlder = useCallback(async (preserveScroll = false): Promise<boolean> => {
     const current = accRef.current
     const oldest = current[0]?.seq
     if (!oldest || olderRequestRef.current || !pageMetaRef.current.hasMoreBefore) return false
@@ -366,6 +377,12 @@ export function SessionView({
       const page = await api.getSessionPage(id, { before: oldest, limit: OLDER_PAGE_LIMIT }, controller.signal)
       if (controller.signal.aborted || olderRequestRef.current !== controller) return false
       const merged = [...page.events, ...accRef.current]
+      if (preserveScroll && page.events.length > 0) {
+        const scroller = paneRef.current?.closest<HTMLElement>('.conversation-scroll')
+        if (scroller) {
+          scrollAnchorRef.current = { top: scroller.scrollTop, height: scroller.scrollHeight }
+        }
+      }
       accRef.current = merged
       publishEvents()
       setNodes(foldEvents(merged, parentSessionIdRef.current))
@@ -382,7 +399,7 @@ export function SessionView({
       publishTodos(merged)
       return page.events.length > 0
     } catch {
-      /* 翻页失败不打断已有内容;按钮保持可重试 */
+      /* 翻页失败不打断已有内容;读者再次上滑时重试 */
       return false
     } finally {
       if (olderRequestRef.current === controller) {
@@ -391,6 +408,52 @@ export function SessionView({
       }
     }
   }, [id, publishTodos, publishEvents])
+
+  // 翻页 prepend 后补偿 scrollTop，保持读者当前看到的内容不跳。
+  useLayoutEffect(() => {
+    const anchor = scrollAnchorRef.current
+    if (anchor === null) return
+    scrollAnchorRef.current = null
+    const scroller = paneRef.current?.closest<HTMLElement>('.conversation-scroll')
+    if (!scroller) return
+    const delta = scroller.scrollHeight - anchor.height
+    if (delta !== 0) scroller.scrollTop = anchor.top + delta
+  }, [nodes])
+
+  // 滚动到顶部附近自动补更早记录；按钮已移除，不依赖手动点击。
+  useEffect(() => {
+    if (loading || view !== 'chat') return
+    const scroller = paneRef.current?.closest<HTMLElement>('.conversation-scroll')
+    if (!scroller) return
+    previousScrollTopRef.current = scroller.scrollTop
+    const maybeLoad = () => {
+      const top = scroller.scrollTop
+      const previous = previousScrollTopRef.current
+      previousScrollTopRef.current = top
+      // 只认向下的 scrollTop（读者向上翻）：程序性落底、翻页补偿不算。
+      if (top < previous - 1) autoLoadArmedRef.current = true
+      if (!autoLoadArmedRef.current || top > AUTO_LOAD_THRESHOLD_PX) return
+      if (jumpRequestRef.current != null || olderRequestRef.current ||
+          !pageMetaRef.current.hasMoreBefore) return
+      autoLoadArmedRef.current = false
+      void loadOlder(true)
+    }
+    scroller.addEventListener('scroll', maybeLoad, { passive: true })
+    // 首屏没有滚动条、或打开时停在顶部（例如恢复的是历史窗口）时，
+    // 也补一页；否则读者永远等不到一次 scroll。
+    const timer = window.setTimeout(() => {
+      if (olderRequestRef.current || !pageMetaRef.current.hasMoreBefore) return
+      const atTop = scroller.scrollTop <= AUTO_LOAD_THRESHOLD_PX
+      const short = scroller.scrollHeight <= scroller.clientHeight + 1
+      if (!atTop && !short) return
+      autoLoadArmedRef.current = true
+      maybeLoad()
+    }, 250)
+    return () => {
+      window.clearTimeout(timer)
+      scroller.removeEventListener('scroll', maybeLoad)
+    }
+  }, [loading, view, loadOlder])
 
   // 轮次轴跳转:锚点在窗口内直接定位;不在则向上翻页直至覆盖(或到头放弃)。
   useEffect(() => {
@@ -438,20 +501,9 @@ export function SessionView({
 
   return (
     <div className="transcript-pane" ref={paneRef}>
-      {pageMeta.hasMoreBefore && (
-        <div className="load-older-row">
-          <button
-            type="button"
-            className="load-older-btn"
-            disabled={loadingOlder}
-            onClick={() => void loadOlder()}
-          >
-            {loadingOlder
-              ? t('loadingOlder')
-              : pageMeta.total > events.length
-                ? t('loadOlderRemaining', { n: pageMeta.total - events.length })
-                : t('loadOlder')}
-          </button>
+      {loadingOlder && (
+        <div className="load-older-row" aria-live="polite">
+          <span className="load-older-hint">{t('loadingOlder')}</span>
         </div>
       )}
       <Transcript

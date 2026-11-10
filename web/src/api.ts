@@ -865,12 +865,18 @@ export interface SessionAnchor {
 export interface SessionPageResponse {
   header: SessionHeader
   events: SessionEnvelope[]
+  /** 展示事件总数：流式增量不计入分页窗口。 */
   total: number
   hasMoreBefore: boolean
   /** 全会话非注入 user-message 锚点(轮次轴刻度,不受分页窗口限制)。 */
   anchors: SessionAnchor[]
   /** 全会话累计统计(轮次/耗时/token);旧后端不返回时按零值兜底。 */
   totals?: Partial<SessionTotals>
+  /**
+   * 全会话最后使用的模型(与分页窗口无关)。`request-header` 只在请求形态
+   * 变化时落盘,尾部窗口里可能一条都没有 —— 缺了它,切会话恢复不出模型。
+   */
+  last_selection?: ModelSelection
 }
 
 /** 分页读取会话事件窗口:不经过全量快照,长会话首屏只拉尾部有限窗口。 */

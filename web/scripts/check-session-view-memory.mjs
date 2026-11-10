@@ -54,7 +54,7 @@ await act(async () => {
 })
 assert.ok(nodes.filter((node) => node.kind === 'user').length <= 60)
 assert.equal(anchors.length, 200)
-assert.ok(document.querySelector('.load-older-btn'))
+assert.equal(document.querySelector('.load-older-btn'), null)
 assert.match(document.querySelector('[data-user-anchor]').textContent, /turn 151/)
 console.log('ok   live SessionView trims settled bottom history and keeps all 200 navigation anchors')
 const scroller = document.querySelector('.conversation-scroll')
@@ -81,9 +81,18 @@ let pendingRequest
 globalThis.fetch = (url, options) => new Promise((resolve) => {
   pendingRequest = { url: String(url), signal: options.signal, resolve }
 })
-await act(async () => document.querySelector('.load-older-btn').click())
+await act(async () => {
+  // 先向上滚一段再回到顶部：自动补页只认读者自己的上滑。
+  scroller.scrollTop = 500
+  scroller.dispatchEvent(new dom.window.Event('scroll'))
+  scroller.scrollTop = 0
+  scroller.dispatchEvent(new dom.window.Event('scroll'))
+})
 assert.ok(pendingRequest)
 assert.match(pendingRequest.url, /limit=200/)
+assert.equal(document.querySelector('.load-older-btn'), null)
+assert.ok(document.querySelector('.load-older-hint'))
+console.log('ok   scrolling to top auto-loads older history without a button')
 await act(async () => fixtureListener.onSnapshot(header, turn(400), { total: 4, hasMoreBefore: false, anchors: [] }))
 assert.ok(pendingRequest.signal.aborted)
 await act(async () => {
