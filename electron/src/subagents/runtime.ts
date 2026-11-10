@@ -535,14 +535,17 @@ export class SubagentRuntime {
   recover(sessionId: string): void {
     const header = this.store.header(sessionId)
     if (!header) return
-    if (header.subagent) {
-      const session = this.store.read(sessionId)
-      const lastEnd = session ? this.lastTurnEnd(session.events) : null
-      if (lastEnd && Date.now() - lastEnd.time <= RECOVERY_WINDOW_MS) {
-        this.captureCompletion(sessionId)
-      }
+    // 两类收尾工作都只对有"待办"痕迹的会话成立：没有子代理描述的不需要重放
+    // 完成结果，日志尾部没有 agent-inbox 的也没有待唤醒的投递。启动时对上百
+    // 个历史会话逐一全量 read() 会把整个日志树搬进内存，而绝大多数会话两者
+    // 都不成立。用日志尾部的廉价探测先筛掉它们。
+    const tail = this.store.tailProbe(sessionId)
+    if (header.subagent && tail.lastTurnEnd !== null && Date.now() - tail.lastTurnEnd <= RECOVERY_WINDOW_MS) {
+      this.captureCompletion(sessionId)
     }
-    if (this.hasPending(sessionId)) this.wake(sessionId)
+    if (tail.pendingInbox) {
+      if (this.hasPending(sessionId)) this.wake(sessionId)
+    }
   }
 
   // —— completion capture ——

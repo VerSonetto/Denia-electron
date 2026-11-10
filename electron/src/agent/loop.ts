@@ -792,7 +792,7 @@ export class SessionDriver {
           cacheKey: sessionId,
           signal: controller.signal,
         }
-        this.cacheWarmer.remember(sessionId, provider, request)
+        this.cacheWarmer.remember(sessionId, provider, request, cacheSettings.cacheWarming.mode)
         this.cacheWarmer.cancel(sessionId)
         const stream = streamFor(request)
 

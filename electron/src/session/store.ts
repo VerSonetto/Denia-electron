@@ -52,6 +52,14 @@ export interface RewindOutcome {
   removedEvents: number
 }
 
+/** 日志尾部的廉价探测结果，供启动恢复判断"这个会话是否还有待办"。 */
+export interface TailProbe {
+  /** 最后一条 turn-end 的时刻；没有则 null。 */
+  lastTurnEnd: number | null
+  /** 尾部窗口里存在尚未被 agent-delivery 消费的 agent-inbox。 */
+  pendingInbox: boolean
+}
+
 class LogWriter {
   private readonly file: string
   private buffer: string[] = []
@@ -94,10 +102,204 @@ class LogWriter {
 }
 
 interface LiveSession {
+  id: string
   header: SessionHeader
+  /** 持久事件（不含流式帧）：分页、模型表面与统计只读这里。按 seq 升序。 */
   events: Envelope[]
+  /**
+   * 流式帧的驻留窗口，按 seq 升序。
+   *
+   * 这类帧占日志字节的 98%（一次长回答能产生上万条 `assistant-chunk`），
+   * 但全部用途只有"打字机效果"：结算后正文以 `assistant-message` 为准，
+   * 帧再没有人读。整份驻留会让单个会话独占数百 MB，所以内存里只留尚未
+   * 结算的那些，已结算的只存在于磁盘日志。`events` 里写入 `assistant-message`
+   * / `step-end` / `tool-result` 即视为该段帧已结算。
+   */
+  frames: Envelope[]
+  /** 下一个可用 seq。events 与 frames 都不连续，这里单独维护。 */
+  lastSeq: number
   writer: LogWriter
   followers: EventEmitter
+  /** LRU 依据：最近一次被读写或追加的时刻。 */
+  touchedAt: number
+}
+
+/** 流式帧驻留上限：兜住单个超长步骤，超出后最旧的帧让位（正文以磁盘为准）。 */
+const FRAME_KEEP = 20_000
+
+/** 空闲会话在内存里的保留上限；超出后按最久未用驱逐（有订阅者的不驱逐）。 */
+const LIVE_SESSION_LIMIT = 4
+
+/** 读日志的块大小：峰值内存随它增长，而不是随文件大小。 */
+const READ_CHUNK = 1 << 20
+
+/** 尾部帧窗口的读取字节数。 */
+const TAIL_READ_BYTES = 2 << 20
+
+/** 启动恢复探测的尾部窗口：够覆盖最后一轮的 inbox/delivery 往返。 */
+const TAIL_PROBE_EVENTS = 64
+
+/**
+ * 流式帧的行首判型。
+ *
+ * 写入端固定按 `{ seq, time, type, ... }` 的键序序列化（见 append()），类型
+ * 字段因此总在同一位置。命中这个模式的行一定是流式帧：它占日志行数的 98%，
+ * 而归属与摘要都只关心持久事件，所以可以整行跳过 JSON.parse —— 长会话载入
+ * 的主要 CPU 与瞬时分配就在这一步。
+ */
+const TRANSIENT_HEAD = /^\{"seq":(\d+),"time":\d+,"type":"(assistant-chunk|tool-output-chunk)"/
+
+/** 按 seq 升序的数组里找第一个 seq >= target 的下标。 */
+function lowerBound(list: Envelope[], target: number): number {
+  let low = 0
+  let high = list.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if (list[mid]!.seq < target) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+/** 合并两个 seq 升序的数组。 */
+function mergeBySeq(left: readonly Envelope[], right: readonly Envelope[]): Envelope[] {
+  if (right.length === 0) return [...left]
+  if (left.length === 0) return [...right]
+  const out: Envelope[] = []
+  let i = 0
+  let j = 0
+  while (i < left.length && j < right.length) {
+    if (left[i]!.seq <= right[j]!.seq) out.push(left[i++]!)
+    else out.push(right[j++]!)
+  }
+  while (i < left.length) out.push(left[i++]!)
+  while (j < right.length) out.push(right[j++]!)
+  return out
+}
+
+/**
+ * 单遍扫描日志：分离持久事件与流式帧，流式帧只取 seq。
+ *
+ * 流式帧的内容在这里被直接丢弃 —— 载入一个已有会话时，只有"正在流动的
+ * 那一步"的帧还有消费者（见 tailFrames），它们由尾部扫描单独取出。
+ */
+/**
+ * 逐块读日志并只保留持久事件。
+ *
+ * 一次 `readFileSync` 把整份日志读成字符串，会在解析期间同时持有"原文 +
+ * 全部行 + 全部对象"三份数据；60 MB 的会话因此把瞬时堆推到百 MB 级，而这
+ * 些中间态全是垃圾。按块读只长期持有结果，峰值随块大小而不是文件大小增长。
+ */
+function scanLogFile(
+  file: string,
+): { header: SessionHeader | null; events: Envelope[]; lastSeq: number; size: number } {
+  const headerless = { header: null as SessionHeader | null, events: [] as Envelope[], lastSeq: 0, size: 0 }
+  let fd: number
+  try {
+    fd = fs.openSync(file, 'r')
+  } catch {
+    return headerless
+  }
+  const result = { header: null as SessionHeader | null, events: [] as Envelope[], lastSeq: 0 }
+  const chunk = Buffer.allocUnsafe(READ_CHUNK)
+  let carry = ''
+  let size = 0
+  try {
+    while (true) {
+      const read = fs.readSync(fd, chunk, 0, chunk.length, null)
+      if (read <= 0) break
+      size += read
+      // 按字节切块可能切在多字节字符中间：用 toString 解出完整字符，
+      // 余下的半个字符留在 buffer 里等下一次拼接（StringDecoder 的语义）。
+      carry += chunk.subarray(0, read).toString('utf8')
+      let start = 0
+      while (true) {
+        const end = carry.indexOf('\n', start)
+        if (end < 0) break
+        consumeLine(carry.slice(start, end), result)
+        start = end + 1
+      }
+      carry = start === 0 ? carry : carry.slice(start)
+    }
+    if (carry.trim() !== '') consumeLine(carry, result)
+  } finally {
+    fs.closeSync(fd)
+  }
+  return { ...result, size }
+}
+
+/** 解析一行：头部进 header，流式帧只取 seq，其余进 events。 */
+function consumeLine(
+  line: string,
+  result: { header: SessionHeader | null; events: Envelope[]; lastSeq: number },
+): void {
+  if (line.trim() === '') return
+  const head = TRANSIENT_HEAD.exec(line)
+  if (head !== null) {
+    const seq = Number(head[1])
+    if (seq > result.lastSeq) result.lastSeq = seq
+    return
+  }
+  let parsed: SessionHeader | Envelope
+  try {
+    parsed = JSON.parse(line) as SessionHeader | Envelope
+  } catch {
+    // Torn tail: drop the broken line rather than failing the session.
+    return
+  }
+  if (result.header === null) {
+    result.header = parsed as SessionHeader
+    return
+  }
+  const envelope = parsed as Envelope
+  if (typeof envelope.seq !== 'number' || typeof envelope.type !== 'string') return
+  if (envelope.seq > result.lastSeq) result.lastSeq = envelope.seq
+  if (isTransientEvent(envelope)) return
+  result.events.push(envelope)
+}
+/**
+ * 取出日志尾部仍在流动的流式帧（seq 升序）。
+ *
+ * 从文件末尾往回走，直到遇到第一条持久事件：那之前的帧必然属于已经被
+ * 持久事件结算过的步骤，正文已有权威版本，没有重放价值。这样只解析真正
+ * 需要的那几步，而不是几十万条历史 chunk。
+ */
+function tailFrames(file: string, size: number): Envelope[] {
+  const out: Envelope[] = []
+  // 只读尾部固定窗口：末尾之前的内容与"正在流动的帧"无关。
+  const windowBytes = Math.min(size, TAIL_READ_BYTES)
+  if (windowBytes <= 0) return out
+  const buffer = Buffer.allocUnsafe(windowBytes)
+  let fd: number
+  try {
+    fd = fs.openSync(file, 'r')
+  } catch {
+    return out
+  }
+  let read = 0
+  try {
+    read = fs.readSync(fd, buffer, 0, windowBytes, size - windowBytes)
+  } finally {
+    fs.closeSync(fd)
+  }
+  const raw = buffer.subarray(0, read).toString('utf8')
+  let end = raw.length
+  while (end > 0 && out.length < FRAME_KEEP) {
+    const newline = raw.lastIndexOf('\n', end - 1)
+    const start = newline + 1
+    const line = raw.slice(start, end)
+    end = newline
+    if (line.trim() === '') continue
+    const head = TRANSIENT_HEAD.exec(line)
+    if (head === null) break
+    try {
+      out.push(JSON.parse(line) as Envelope)
+    } catch {
+      break
+    }
+  }
+  out.reverse()
+  return out
 }
 
 export class SessionStore {
@@ -111,6 +313,29 @@ export class SessionStore {
     this.home = home
     this.sessionsDir = path.join(home, 'sessions')
     fs.mkdirSync(this.sessionsDir, { recursive: true })
+  }
+
+  /**
+   * 把最久未用的空闲会话移出内存。
+   *
+   * 有订阅者的会话不驱逐（follow 流正在读它）；写入缓冲先落盘，驱逐后没有
+   * 任何人再持有那个 writer。被驱逐的会话下次访问时从日志重建，行为不变。
+   */
+  private evictIdle(): void {
+    if (this.live.size <= LIVE_SESSION_LIMIT) return
+    const idle: LiveSession[] = []
+    for (const session of this.live.values()) {
+      if (session.followers.listenerCount('event') > 0) continue
+      idle.push(session)
+    }
+    if (idle.length === 0) return
+    idle.sort((left, right) => left.touchedAt - right.touchedAt)
+    const excess = Math.min(this.live.size - LIVE_SESSION_LIMIT, idle.length)
+    for (let index = 0; index < excess; index += 1) {
+      const victim = idle[index]!
+      victim.writer.flush()
+      this.live.delete(victim.id)
+    }
   }
 
   private sessionDir(id: string): string {
@@ -143,11 +368,16 @@ export class SessionStore {
     fs.mkdirSync(this.sessionDir(id), { recursive: true })
     fs.writeFileSync(this.logFile(id), JSON.stringify(header) + '\n', 'utf8')
     this.live.set(id, {
+      id,
       header,
       events: [],
+      frames: [],
+      lastSeq: 0,
       writer: new LogWriter(this.logFile(id)),
       followers: new EventEmitter(),
+      touchedAt: Date.now(),
     })
+    this.evictIdle()
     return header
   }
 
@@ -197,50 +427,42 @@ export class SessionStore {
   }
   private load(id: string): LiveSession | null {
     const existing = this.live.get(id)
-    if (existing) return existing
+    if (existing) {
+      existing.touchedAt = Date.now()
+      return existing
+    }
     const file = this.logFile(id)
     if (!fs.existsSync(file)) return null
-    const raw = fs.readFileSync(file, 'utf8')
-    const lines = raw.split('\n')
-    let header: SessionHeader | null = null
-    const events: Envelope[] = []
-    for (const line of lines) {
-      if (!line.trim()) continue
-      let parsed: SessionHeader | Envelope
-      try {
-        parsed = JSON.parse(line) as SessionHeader | Envelope
-      } catch {
-        // Torn tail: drop the broken line rather than failing the session.
-        continue
-      }
-      if (!header) {
-        header = parsed as SessionHeader
-        continue
-      }
-      const envelope = parsed as Envelope
-      if (typeof envelope.seq !== 'number' || typeof envelope.type !== 'string') continue
-      events.push(envelope)
-    }
-    if (!header || header.type !== 'session') return null
-    const repaired = repairOpenTurn(events)
+    const scan = scanLogFile(file)
+    if (scan.header === null || scan.header.type !== 'session') return null
+    let lastSeq = scan.lastSeq
+    const repaired = repairOpenTurn(scan.events, lastSeq)
     if (repaired) {
-      events.push(repaired)
+      scan.events.push(repaired)
+      lastSeq = repaired.seq
       fs.appendFileSync(file, JSON.stringify(repaired) + '\n', 'utf8')
     }
     const session: LiveSession = {
-      header,
-      events,
+      id,
+      header: scan.header,
+      events: scan.events,
+      // 只有尾部那几步还在流动，历史 chunk 一律只留磁盘。
+      frames: tailFrames(file, scan.size),
+      lastSeq,
       writer: new LogWriter(file),
       followers: new EventEmitter(),
+      touchedAt: Date.now(),
     }
     this.live.set(id, session)
+    this.evictIdle()
     return session
   }
 
   read(id: string): { header: SessionHeader; events: Envelope[] } | null {
     const session = this.load(id)
     if (!session) return null
-    return { header: session.header, events: [...session.events] }
+    // 副本：调用方把它当只读事务日志用，不返回内部分页数组本身。
+    return { header: session.header, events: mergeBySeq(session.events, session.frames) }
   }
 
   /**
@@ -282,6 +504,9 @@ export class SessionStore {
       // a canonical one-envelope-per-line file instead.
       rewriteLog(file, session.header, session.events)
     }
+    // 截断之后，被砍掉的部分不再是"下一个 seq"的依据；帧全部作废。
+    session.frames.length = 0
+    session.lastSeq = lastSeq ?? synthesizedSeq(session.events)
     this.cache.delete(id)
     return { toSeq, toMessage: target.text, removedEvents }
   }
@@ -295,10 +520,10 @@ export class SessionStore {
   readPage(id: string, before?: number, limit = 500): SessionPage | null {
     const session = this.load(id)
     if (!session) return null
+    // events 只收持久事件（流式帧在 append 时就已经分流），所以它本身就是
+    // 分页口径：chunk 不占历史窗口，一次长回答不会把额度吃光。
     const all = session.events
-    // 分页按“展示事件”计数：流式 chunk 只服务实时观感，不能占历史窗口，
-    // 否则一次长回答就能把 200 条额度吃光，用户打开会话只看得到半段正文。
-    const display = all.filter((event) => !isTransientEvent(event))
+    const display = all
     const anchors = display
       .filter((event) => event.type === 'user-message' && !(event as { injected?: boolean }).injected)
       .map((event) => ({ seq: event.seq, text: (event as { text: string }).text.slice(0, 120) }))
@@ -334,23 +559,77 @@ export class SessionStore {
     }
   }
 
+  /**
+   * 只读日志尾部做一次廉价探测：最后一条 turn-end 的时刻，以及是否还有
+   * 未被消费的 agent-inbox。
+   *
+   * 启动恢复要对每个会话判断"要不要重放完成结果 / 唤醒",而全量 read() 在
+   * 上百个历史会话上是把整棵日志树搬进内存。这两个判断都只依赖尾部：
+   * turn-end 只看最后一条，inbox 的投递必然紧随其后（同一轮内）。
+   */
+  tailProbe(id: string): TailProbe {
+    const live = this.live.get(id)
+    if (live) return probeEvents(live.events)
+    let raw: string
+    try {
+      raw = fs.readFileSync(this.logFile(id), 'utf8')
+    } catch {
+      return { lastTurnEnd: null, pendingInbox: false }
+    }
+    // 只解析最后 TAIL_PROBE_EVENTS 条持久事件：更早的 inbox 一定已经被
+    // 同轮投递消费掉，否则它早就该被唤醒了（那时进程还活着）。
+    const tail: Envelope[] = []
+    let end = raw.length
+    while (end > 0 && tail.length < TAIL_PROBE_EVENTS) {
+      const newline = raw.lastIndexOf('\n', end - 1)
+      const start = newline + 1
+      const line = raw.slice(start, end)
+      end = newline
+      if (line.trim() === '' || TRANSIENT_HEAD.test(line)) continue
+      try {
+        tail.push(JSON.parse(line) as Envelope)
+      } catch {
+        /* torn line */
+      }
+    }
+    tail.reverse()
+    return probeEvents(tail)
+  }
+
+  /**
+   * 游标之后的全部事件（含仍驻留的流式帧），seq 升序。
+   *
+   * 帧与持久事件分成两个数组存放，这里按 seq 归并：归并成本对着"两者之和"
+   * 而不是"日志总行数"。游标以前的那段用二分定位，不做线性过滤。
+   */
   eventsAfter(id: string, after: number): Envelope[] {
     const session = this.load(id)
     if (!session) return []
-    if (after <= 0) return [...session.events]
-    // Events are contiguous, so the cursor maps to an array index.
-    const start = Math.min(session.events.length, Math.max(0, Math.floor(after)))
-    const first = session.events[start]
-    if (first && first.seq === after + 1) return session.events.slice(start)
-    return session.events.filter((event) => event.seq > after)
+    const durableStart = lowerBound(session.events, after + 1)
+    const frameStart = lowerBound(session.frames, after + 1)
+    if (frameStart >= session.frames.length) return session.events.slice(durableStart)
+    return mergeBySeq(
+      session.events.slice(durableStart),
+      session.frames.slice(frameStart),
+    )
   }
 
   append(id: string, event: SessionEvent): Envelope | null {
     const session = this.live.get(id) ?? this.load(id)
     if (!session) return null
-    const last = session.events[session.events.length - 1]
-    const envelope = { seq: (last?.seq ?? 0) + 1, time: Date.now(), ...event } as Envelope
-    session.events.push(envelope)
+    session.touchedAt = Date.now()
+    session.lastSeq += 1
+    const envelope = { seq: session.lastSeq, time: Date.now(), ...event } as Envelope
+    if (isTransientEvent(envelope)) {
+      // 环形窗口：只留最近 FRAME_KEEP 条。跟随流的游标依赖"最后一条事件"
+      // 的 seq，所以要留着它们；但没必要为此把整轮回答的 chunk 都背着。
+      session.frames.push(envelope)
+      if (session.frames.length > FRAME_KEEP) {
+        session.frames.splice(0, session.frames.length - FRAME_KEEP)
+      }
+    } else {
+      session.events.push(envelope)
+    }
     session.writer.write(JSON.stringify(envelope))
     if (
       event.type === 'turn-end' ||
@@ -417,13 +696,15 @@ export class SessionStore {
     const liveSession = this.live.get(id)
     const header = liveSession?.header ?? this.header(id)
     if (!header) return null
-    const events = liveSession?.events ?? readEnvelopes(file)
+    // 摘要只要"首条用户消息 + 末尾的标题/预设/模型"，不需要把整份日志
+    // 物化成事件数组：长会话在这里省下的是每次 list() 一次的全量分配。
+    const folded = liveSession ? foldSummary(liveSession.events) : foldSummaryFile(file)
     // A subagent has no human prompt; its label is the only meaningful row
     // title until (and unless) a generated title arrives.
-    const excerpt = header.subagent?.label ?? firstUserText(events)
-    const title = lastTitle(events)
-    const preset = lastAgentPreset(events)
-    const lastSelection = lastSelectionOf(events)
+    const excerpt = header.subagent?.label ?? folded.excerpt
+    const title = folded.title
+    const preset = folded.preset
+    const lastSelection = folded.selection
     const summary: SessionSummary = {
       id,
       created_at: header.created_at,
@@ -531,23 +812,137 @@ function closeRewoundTail(events: Envelope[]): boolean {
   return true
 }
 
-function readEnvelopes(file: string): Envelope[] {
+/** 从一段（通常是尾部）事件里读出恢复所需的两个判断依据。 */
+function probeEvents(events: readonly Envelope[]): TailProbe {
+  let lastTurnEnd: number | null = null
+  const delivered = new Set<string>()
+  for (const event of events) {
+    if (event.type === 'turn-end') lastTurnEnd = event.time
+    else if (event.type === 'agent-delivery') delivered.add(event.id)
+  }
+  let pendingInbox = false
+  for (const event of events) {
+    if (event.type !== 'agent-inbox') continue
+    if (!delivered.has(event.id)) pendingInbox = true
+  }
+  return { lastTurnEnd, pendingInbox }
+}
+
+/** 摘要所需的折叠结果：首条用户消息与末尾元数据。 */
+interface SummaryFold {
+  excerpt: string | null
+  title: string | null
+  preset: string | null
+  selection: ModelSelection | null
+}
+
+/**
+ * 折叠摘要字段。
+ *
+ * `selection` 取最后一条 request-header（仅请求形态变化时落盘，长会话可能
+ * 只在最开头有一条），没有时退到 request-context —— 与 lastSelectionOf 同义。
+ */
+function foldSummary(events: readonly Envelope[]): SummaryFold {
+  let excerpt: string | null = null
+  for (const event of events) {
+    if (event.type !== 'user-message' || (event as { injected?: boolean }).injected) continue
+    const text = (event as { text: string }).text.trim()
+    if (text !== '') {
+      excerpt = text.slice(0, EXCERPT_CHARS)
+      break
+    }
+  }
+  let title: string | null = null
+  let preset: string | null = null
+  let selection: ModelSelection | null = null
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (title === null && event.type === 'session-title') title = (event as { title: string }).title
+    else if (preset === null && event.type === 'agent-preset') preset = (event as { preset: string }).preset
+    else if (selection === null && event.type === 'request-header') {
+      const config = (event as { header: { config: { provider?: string; model?: string; reasoningEffort?: string } } }).header.config
+      if (config.provider && config.model) {
+        selection = {
+          provider: config.provider,
+          model: config.model,
+          ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+        }
+      }
+    } else if (selection === null && event.type === 'request-context') {
+      const context = event as { provider?: string; model?: string }
+      if (context.provider && context.model) selection = { provider: context.provider, model: context.model }
+    }
+  }
+  return { excerpt, title, preset, selection }
+}
+
+/**
+ * 从日志文件折叠摘要字段，边走边丢。
+ *
+ * 流式帧整行跳过（占行数 98%）：摘要只关心首条用户消息与末尾三条元数据，
+ * 没必要为它们解析几十万条 chunk。反向扫描留给末尾字段用，正向扫描只到
+ * 首条用户消息即停。
+ */
+function foldSummaryFile(file: string): SummaryFold {
   const raw = fs.readFileSync(file, 'utf8')
-  const out: Envelope[] = []
+  let excerpt: string | null = null
   let first = true
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue
+  let start = 0
+  while (start < raw.length) {
+    let end = raw.indexOf('\n', start)
+    if (end < 0) end = raw.length
+    const line = raw.slice(start, end)
+    start = end + 1
+    if (line.trim() === '') continue
     if (first) {
       first = false
       continue
     }
+    if (excerpt !== null) break
+    if (TRANSIENT_HEAD.test(line)) continue
+    let parsed: Envelope
     try {
-      out.push(JSON.parse(line) as Envelope)
+      parsed = JSON.parse(line) as Envelope
     } catch {
-      /* torn line */
+      continue
+    }
+    if (parsed.type !== 'user-message' || (parsed as { injected?: boolean }).injected) continue
+    const text = (parsed as { text: string }).text.trim()
+    if (text !== '') excerpt = text.slice(0, EXCERPT_CHARS)
+  }
+  // 末尾字段从后往前走，命中各一条即可停。
+  let title: string | null = null
+  let preset: string | null = null
+  let selection: ModelSelection | null = null
+  let tail = raw.length
+  let scanned = 0
+  while (tail > 0 && scanned < 20_000 && (title === null || preset === null || selection === null)) {
+    const newline = raw.lastIndexOf('\n', tail - 1)
+    const lineStart = newline + 1
+    const line = raw.slice(lineStart, tail)
+    tail = newline
+    scanned += 1
+    if (line.trim() === '' || TRANSIENT_HEAD.test(line)) continue
+    let parsed: Envelope
+    try {
+      parsed = JSON.parse(line) as Envelope
+    } catch {
+      continue
+    }
+    if (title === null && parsed.type === 'session-title') title = (parsed as { title: string }).title
+    else if (preset === null && parsed.type === 'agent-preset') preset = (parsed as { preset: string }).preset
+    else if (selection === null && parsed.type === 'request-header') {
+      const config = (parsed as { header: { config: { provider?: string; model?: string; reasoningEffort?: string } } }).header.config
+      if (config.provider && config.model) {
+        selection = {
+          provider: config.provider,
+          model: config.model,
+          ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+        }
+      }
     }
   }
-  return out
+  return { excerpt, title, preset, selection }
 }
 
 function firstUserText(events: Envelope[]): string | null {
@@ -602,6 +997,10 @@ function lastAgentPreset(events: Envelope[]): string | null {
   return null
 }
 
+function synthesizedSeq(events: Envelope[]): number {
+  return events[events.length - 1]?.seq ?? 0
+}
+
 function isDirectory(dir: string): boolean {
   try {
     return fs.statSync(dir).isDirectory()
@@ -615,7 +1014,7 @@ function isDirectory(dir: string): boolean {
  * session store does: a synthetic `turn-end { aborted, disposed }`, so the UI
  * (and the next turn) never sees a session stuck in "running".
  */
-function repairOpenTurn(events: Envelope[]): Envelope | null {
+function repairOpenTurn(events: Envelope[], lastSeq = events[events.length - 1]?.seq ?? 0): Envelope | null {
   let turn: number | null = null
   let step: number | null = null
   for (const event of events) {
@@ -632,8 +1031,7 @@ function repairOpenTurn(events: Envelope[]): Envelope | null {
     }
   }
   if (turn === null) return null
-  const last = events[events.length - 1]
-  const seq = (last?.seq ?? 0) + 1
+  const seq = lastSeq + 1
   return {
     seq,
     time: Date.now(),

@@ -74,10 +74,22 @@ export class CacheWarmer {
   }
 
   /**
-   * Remember the request shape to replay. A bounded map keeps a long-lived
-   * process from retaining every session's full history.
+   * Remember the request shape to replay.
+   *
+   * 关闭预热时立刻丢弃已经存过的请求：remember 在每一步都被无条件调用，
+   * 而它的载荷是一整份 messages 浅拷贝。默认关闭的配置下仍然保留这些，
+   * 等于替每个用过的会话常驻一整份上下文；有上限也只是把浪费限制在上限里。
    */
-  remember(session: string, provider: ProviderConfig, request: GenerateRequest): void {
+  remember(
+    session: string,
+    provider: ProviderConfig,
+    request: GenerateRequest,
+    mode: CacheWarmingMode = 'off',
+  ): void {
+    if (mode === 'off') {
+      this.last.delete(session)
+      return
+    }
     if (this.last.size >= MAX_REMEMBERED && !this.last.has(session)) {
       const oldest = this.last.keys().next()
       if (!oldest.done) this.last.delete(oldest.value)

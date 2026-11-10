@@ -461,7 +461,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     const pathname = safeDecode(url.pathname)
     try {
       if (!pathname.startsWith('/api/')) {
-        serveStatic(res, webDir, pathname)
+        serveStatic(req, res, webDir, pathname)
         return
       }
       await handleApi(req, res, pathname, url)
@@ -2387,7 +2387,15 @@ function builtinPresetRows(): AgentPresetRow[] {
   ]
 }
 
-function serveStatic(res: ServerResponse, webDir: string, pathname: string): void {
+/**
+ * 静态资源下发。
+ *
+ * 构建期已经给每个文本产物旁挂了 `.br` / `.gz`（wq11 Brotli，控制台主包
+ * 4.7 MB → 0.74 MB），这里只按 `Accept-Encoding` 选现成实体发出去：
+ * 运行时零压缩 CPU。不这么做的话，每次启动都要把未压缩的主包从本机 HTTP
+ * 搬进渲染进程，多出的几 MB 传输与解析全落在启动的关键路径上。
+ */
+function serveStatic(req: IncomingMessage, res: ServerResponse, webDir: string, pathname: string): void {
   if (!isDirectory(webDir)) {
     res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
     res.end(
@@ -2419,11 +2427,39 @@ function serveStatic(res: ServerResponse, webDir: string, pathname: string): voi
       return
     }
   }
+  const precompressed = precompressedFor(req, file)
+  const target = precompressed ?? file
   res.writeHead(200, {
     'content-type': mimeOf(file),
     'cache-control': file.endsWith('index.html') ? 'no-cache' : 'public, max-age=31536000, immutable',
+    ...(precompressed === null
+      ? {}
+      : { 'content-encoding': precompressed.endsWith('.br') ? 'br' : 'gzip', vary: 'Accept-Encoding' }),
   })
-  fs.createReadStream(file).pipe(res)
+  fs.createReadStream(target).pipe(res)
+}
+
+/**
+ * 选一个可用的预压缩实体路径。
+ *
+ * 只有文本类产物会带旁挂文件（图片/字体自身已压缩，再压一遍没有收益），
+ * 所以缺少旁挂文件是常态而不是错误：那时直接发原文件。
+ */
+function precompressedFor(req: IncomingMessage, file: string): string | null {
+  const accepted = req.headers['accept-encoding'] ?? ''
+  const candidates: [string, boolean][] = [
+    [`${file}.br`, /\bbr\b/.test(accepted)],
+    [`${file}.gz`, /\bgzip\b/.test(accepted)],
+  ]
+  for (const [candidate, usable] of candidates) {
+    if (!usable) continue
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate
+    } catch {
+      /* 这个产物没有预压缩变体 */
+    }
+  }
+  return null
 }
 
 function listDirectories(target: string | null): { path: string; parent: string | null; dirs: string[] } {
