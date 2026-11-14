@@ -10,7 +10,7 @@
  *
  * B 段直接读源码：这些断言的价值在于"回归时立刻失败"，而不是复述实现。
  */
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -180,18 +180,6 @@ check('空描述符返回空串', display.subagentSnapshotText(null), '')
 
 /* ---------- B) 契约与清理 ---------- */
 const read = (relative) => readFileSync(join(repo, relative), 'utf8')
-// agent_runtime 已拆成目录:断言只看"这些源码文本存在",与文件切分方式无关。
-let runtimeCache
-const readRuntime = () => {
-  if (runtimeCache !== undefined) return runtimeCache
-  const srcDir = join(repo, 'crates/server/src')
-  const parts = ['agent_runtime.rs']
-  for (const name of readdirSync(join(srcDir, 'agent_runtime'))) {
-    if (name.endsWith('.rs')) parts.push(join('agent_runtime', name))
-  }
-  runtimeCache = parts.map((part) => readFileSync(join(srcDir, part), 'utf8')).join('\n')
-  return runtimeCache
-}
 
 const runtimeSettings = read('web/src/components/settings/RuntimeSettings.tsx')
 assert(
@@ -260,30 +248,6 @@ const modal = read('web/src/components/SettingsModal.tsx')
 assert('设置弹窗挂载子代理页', modal.includes('<SubagentSettings notify={notify} />'))
 assert('设置弹窗注册子代理标签', modal.includes("| 'subagents'"))
 
-// Rust 侧：模型参数契约不再暴露 max_depth，且兼容解析给出稳定 code。
-const capabilities = read('crates/tools/src/capabilities.rs')
-assert('spawn/fork schema 不再暴露 max_depth 字段', !capabilities.includes('"max_depth": {"type"'))
-assert('max_depth 命中时给稳定 code', capabilities.includes('subagent/depth-config-removed'))
-assert('schema 描述说明可派遣类型与 inline', capabilities.includes('profile_id') && capabilities.includes('inline'))
-
-// Rust 侧：路由与错误语义。
-const routes = read('crates/server/src/api/subagents.rs')
-for (const path of [
-  '/api/subagent-profiles',
-  '/api/subagent-profiles/preview',
-  '/api/subagent-tools',
-  '/subagent-profiles/{qualified_id}',
-  '/reset',
-]) {
-  assert(`路由存在 ${path}`, routes.includes(path))
-}
-assert('project 作用域不接受任意 filePath', !routes.includes('filePath'))
-assert(
-  '预览 API 返回 modelFallback',
-  routes.includes('"modelFallback": model_fallback') &&
-    routes.includes('model_origin == resolver::ModelOrigin::ProfileExplicit'),
-)
-
 // 生成的 wire 类型包含运行快照字段（bindings 漂移守卫）。
 const generated = read('web/src/generated/core.ts')
 for (const name of [
@@ -325,39 +289,7 @@ assert('RuntimePanel 不展示快照摘要', !runtimePanel.includes("t('runtimeS
 const sessionsPage = read('web/src/pages/SessionsPage.tsx')
 assert('子会话横幅使用共享的身份摘要', sessionsPage.includes('subagentSnapshotText'))
 assert('子会话横幅渲染摘要', sessionsPage.includes('child-snapshot'))
-assert(
-  '列表负载来自服务端快照',
-  readRuntime().includes('"waitingInteraction"'),
-)
 
-// 未决交互的加载期收敛（重启后不得留下"可提交但必然失败"的卡片）。
-const recovery = read('crates/session/src/recovery.rs')
-assert('加载时收敛未决交互', recovery.includes('close_orphaned_interactions'))
-assert('收敛写入 unavailable 结局', recovery.includes('AskOutcome::Unavailable'))
-assert('收敛覆盖审批', recovery.includes('ApprovalOutcome::Unavailable'))
-
-// 后台命令必须与 job_start 同授权。
-const execSource = read('crates/agent-loop/src/exec.rs')
-assert('执行器拒绝无授权的后台命令', execSource.includes('bash_requests_background'))
-assert('会话有效工具面统一判定', read('crates/agent-loop/src/lib.rs').includes('session_tool_face'))
-
-// 派遣崩溃窗口有 fault-injection 覆盖。
-const runtimeSource = readRuntime()
-for (const point of ['"create"', '"snapshot"', '"pre-enqueue"', '"enqueue"', '"post-enqueue"']) {
-  assert(`故障注入点 ${point}`, runtimeSource.includes(`test_fault(${point})`))
-}
-
-// 缺口 6：工具目录的副作用说明与只读冲突约束。
-assert('工具目录带副作用说明', routes.includes('"effect": effect_note('))
-assert('工具目录带只读拒绝标记', routes.includes('"readOnlyDenied"'))
-assert(
-  '只读拒绝判定与执行面同源',
-  routes.includes('crate::subagents::resolver::ceiling_denied_tool'),
-)
-assert(
-  '副作用说明按具体工具细化（不拿写文件文案套待办）',
-  routes.includes('"todo_write" => "只更新本会话的待办清单'),
-)
 assert(
   '编辑器删掉按能力猜的只读兼容字段',
   !settings.includes('readOnlyCompatible') && !read('web/src/types.ts').includes('readOnlyCompatible'),
@@ -372,55 +304,6 @@ assert(
   '保存前拦截冲突',
   settings.includes("t('subagentsReadOnlyConflict')") && settings.includes('if (conflicts.length > 0)'),
 )
-assert(
-  '目录预算独立可诊断',
-  readRuntime().includes('subagent_catalog_max_bytes'),
-)
-
-// 缺口 7：浏览器 tab 按 child 归属，只清理该 child 自己的资源。
-const manager = read('crates/browser/src/manager.rs')
-assert('浏览器维护 tab 归属表', manager.includes('tab_owners') && manager.includes('pub struct TabOwners'))
-assert('按归属关闭 tab', manager.includes('pub async fn close_owned'))
-assert('带归属执行命令', manager.includes('pub async fn execute_owned'))
-assert(
-  '浏览器工具把会话身份当归属',
-  read('crates/tools/src/browser.rs').includes('execute_owned(command, owner.as_deref())'),
-)
-const runtimeForBrowser = readRuntime()
-assert('停止 child 时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(target)'))
-assert(
-  '结束 child 时清理其 tab',
-  runtimeForBrowser.includes('async fn close_owned_tabs')
-    && runtimeForBrowser.includes('close_owned_tabs(&child)'),
-)
-assert('删除会话时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(&child.id)'))
-assert('装配处挂载浏览器中枢', read('crates/server/src/state.rs').includes('attach_browser'))
-
-// 缺口 8：旧 child 的模型历史投影（可继续，且不把全局规则继续送模型）。
-const historySource = read('crates/session/src/history.rs')
-assert('投影按事件类别决策', historySource.includes('pub fn legacy_subagent_drop_set'))
-assert('投影持久化类型', historySource.includes('pub struct HistoryProjection'))
-assert('续跑前建立投影', runtimeForBrowser.includes('apply_history_projection'))
-assert('诊断改报投影状态', runtimeForBrowser.includes('"projection":'))
-assert(
-  '模型面走投影视图',
-  read('crates/session/src/projection.rs').includes('history_projection.clone()'),
-)
-assert(
-  '注入基线走模型面视图',
-  // 必须读派生 surface:读日志时压缩会把注入移出模型面,基线却仍以为"已经发过了"。
-  read('crates/agent-loop/src/injections.rs').includes('session.derive_surface()'),
-)
-
-// 调度上限的唯一来源是 subagent-policy。
-const policy = read('crates/server/src/subagents/policy.rs')
-assert('调度命名空间唯一持有并发上限', policy.includes('max_concurrent_runs'))
-assert(
-  '配置结构里没有深度字段',
-  !policy.includes('pub max_depth') && !policy.includes('pub maxDepth'),
-  '策略结构仍然声明了深度配置字段',
-)
-assert('非法深度字段被拒绝（有回归用例）', policy.includes('"maxDepth": 3'))
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

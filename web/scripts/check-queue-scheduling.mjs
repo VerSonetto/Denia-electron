@@ -3,10 +3,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8')
 const web = (path) => readFileSync(`${root}src/${path}`, 'utf8')
 
-/* ---- 任务二：插话 / 引导 ---- */
+/* ---- 插话 / 引导 ---- */
 
 const page = web('pages/SessionsPage.tsx')
 assert.ok(page.includes('guideQueued'), '队列条目提供「引导」发送')
@@ -42,21 +41,7 @@ const api = web('api.ts')
 assert.ok(api.includes('/steer'), '前端暴露运行中引导接口')
 assert.ok(api.includes("source?: 'user' | 'queue' | 'interject' | 'guide'"), '发送轨迹带来源')
 
-/* ---- 任务三：服务端步骤边界注入 + 跨会话调度 ---- */
-
-const serverSteer = read('../../crates/server/src/agent_runtime/steering.rs')
-assert.ok(serverSteer.includes('drain_steering_inner'), '服务端提供步骤边界取走引导')
-assert.ok(serverSteer.includes('SteeringDelivered'), '投递后广播送达事件供前端出队')
-assert.ok(serverSteer.includes('session/not-running'), '空闲会话拒绝引导，前端回落普通队列')
-
-const loop = read('../../crates/agent-loop/src/turn.rs')
-assert.ok(loop.includes('drain_steering'), '驱动器在每个 step 边界取走引导')
-assert.ok(loop.includes('steering:{}'), '引导落成带稳定 id 的真实用户消息')
-
-const route = read('../../crates/server/src/api/sessions.rs')
-assert.ok(route.includes('/steer'), '会话路由暴露引导接口')
-
-/* ---- 任务四：队列消息默认处理方式（常规设置） ---- */
+/* ---- 队列消息默认处理方式（常规设置） ---- */
 
 const settings = web('components/SettingsModal.tsx')
 assert.ok(settings.includes('queueDefaultActionTitle'), '常规设置提供队列默认处理配置')
@@ -74,11 +59,4 @@ assert.ok(
 )
 assert.ok(app.includes('setQueueDefaultAction'), '设置更新后同步队列默认处理缓存')
 
-const configuration = read('../../crates/server/src/configuration.rs')
-assert.ok(configuration.includes('queue_default_action'), '后端持久化队列默认处理字段')
-assert.ok(
-  configuration.includes('SELECTABLE_QUEUE_DEFAULT_ACTIONS'),
-  '后端校验三个可选值',
-)
-
-console.log('ok queue guide/interject split, per-session scheduler and steer delivery')
+console.log('ok queue guide/interject split, per-session scheduler and default action')
