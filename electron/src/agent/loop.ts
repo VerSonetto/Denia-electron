@@ -15,7 +15,7 @@ import { findProvider, resolveDefault } from '../config.ts'
 import { excludedPresetTools, presetForSession } from './presets.ts'
 import type { ApprovalGrants, PermissionState } from '../core/permission.ts'
 import { ExecPolicy } from '../core/exec-policy.ts'
-import { legacyModeOf, parsePermissionState, presetState, stateFromLegacy } from '../core/permission.ts'
+import { legacyModeOf, permissionStateFromEvents, presetState } from '../core/permission.ts'
 import type {
   ChatMessage,
   ContentBlock,
@@ -310,16 +310,7 @@ export class SessionDriver {
 
   /** The session's permission state, projected from its event log. */
   permissionStateOf(sessionId: string): PermissionState {
-    let state = stateFromLegacy('auto-edit')
-    for (const event of this.store.read(sessionId)?.events ?? []) {
-      if (event.type === 'permission-selection') {
-        const parsed = parsePermissionState(event)
-        if (parsed) state = parsed
-      } else if (event.type === 'permission-mode') {
-        state = stateFromLegacy(event.mode, state)
-      }
-    }
-    return state
+    return permissionStateFromEvents(this.store.read(sessionId)?.events ?? [])
   }
 
   /** Session-level grants for approval-free reruns of the same action. */

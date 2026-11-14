@@ -48,6 +48,44 @@ async function prompt(host: Host, id: string, text: string): Promise<void> {
   assert.equal(response.status, 202)
 }
 
+test('session page projects the last permission choice past the tail window', async () => {
+  const home = tempDir('denia-permission-home-')
+  const cwd = tempDir('denia-permission-cwd-')
+  const webDir = tempDir('denia-permission-web-')
+  const host = await startHost({ home, webDir, port: 0 })
+  try {
+    const sessionId = await createSession(host, cwd)
+    const changed = await fetch(`${host.baseUrl}/api/sessions/${sessionId}/permission`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'read-only' }),
+    })
+    assert.equal(changed.status, 200)
+    // 长会话:权限记录之后又落了 600 条持久事件,尾部窗口不再包含它。
+    for (let turn = 2; turn <= 301; turn += 1) {
+      host.store.append(sessionId, { type: 'turn-start', turn })
+      host.store.append(sessionId, { type: 'turn-end', turn, reason: { kind: 'completed' } })
+    }
+    host.store.flush(sessionId)
+
+    const page = (await (
+      await fetch(`${host.baseUrl}/api/sessions/${sessionId}/events?limit=200`)
+    ).json()) as {
+      events: { type: string }[]
+      last_permission?: string
+    }
+    // 前提:窗口确实把权限记录挤出去了,否则这个测试证明不了投影的必要性。
+    assert.equal(
+      page.events.some((event) => event.type === 'permission-mode' || event.type === 'permission-selection'),
+      false,
+    )
+    assert.equal(page.last_permission, 'read-only')
+    assert.equal(host.driver.permissionStateOf(sessionId).sandbox, 'read-only')
+  } finally {
+    await host.close()
+  }
+})
+
 test('session title, context breakdown and manual compaction', async () => {
   const home = tempDir('denia-session-home-')
   const cwd = tempDir('denia-session-cwd-')

@@ -317,6 +317,15 @@ export interface SessionPage {
    * 就会退回上一个会话的选择。
    */
   last_selection?: ModelSelection
+  /**
+   * The session's last permission choice (whole-session projection).
+   *
+   * Same failure mode as `last_selection`: the permission rows sit at the
+   * point where the user switched modes, so a long session's tail window no
+   * longer contains them. Without this projection the UI falls back to its
+   * default while the backend keeps enforcing the real mode.
+   */
+  last_permission?: PermissionMode | 'approve-for-me'
 }
 
 export interface ToolOutput {

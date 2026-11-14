@@ -19,6 +19,7 @@ import type {
 } from '../core/wire.ts'
 import type { SubagentDescriptor } from '../subagents/types.ts'
 import { newSessionId } from '../core/util.ts'
+import { choiceOf, permissionStateFromEvents } from '../core/permission.ts'
 
 const SESSION_FORMAT_VERSION = 0
 const EXCERPT_CHARS = 160
@@ -548,6 +549,11 @@ export class SessionStore {
       if (nearest >= 0) start = nearest
     }
     const lastSelection = lastSelectionOf(all)
+    // The selector's last choice is a whole-session projection for the same
+    // reason as last_selection: a long session pushes the permission rows out
+    // of the tail window, and scanning that window would silently reset the
+    // UI to its default even though the backend still enforces the old mode.
+    const lastPermission = choiceOf(permissionStateFromEvents(all))
     return {
       header: session.header,
       events: eligible.slice(start),
@@ -556,6 +562,7 @@ export class SessionStore {
       anchors,
       totals: computeTotals(all),
       ...(lastSelection ? { last_selection: lastSelection } : {}),
+      last_permission: lastPermission,
     }
   }
 

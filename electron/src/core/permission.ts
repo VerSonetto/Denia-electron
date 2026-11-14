@@ -158,6 +158,40 @@ export function stateFromLegacy(mode: LegacyPermissionMode, current?: Permission
   }
 }
 
+/** The five choices the UI selector exposes: four legacy levels plus auto-review. */
+export type PermissionChoice = LegacyPermissionMode | 'approve-for-me'
+
+/** Project a full permission state onto the UI's single-choice selector. */
+export function choiceOf(state: PermissionState): PermissionChoice {
+  if (state.collaboration === 'plan') return 'plan'
+  if (state.reviewer === 'auto-review' && state.sandbox === 'workspace-write') return 'approve-for-me'
+  return legacyModeOf(state)
+}
+
+/**
+ * Replay the persisted permission events into a session's current state.
+ *
+ * `permission-selection` is the precise record; `permission-mode` is the legacy
+ * projection and is all old logs have. The default matches a fresh session.
+ */
+export function permissionStateFromEvents(
+  events: ReadonlyArray<{ type: string }>,
+): PermissionState {
+  let state = stateFromLegacy('auto-edit')
+  for (const event of events) {
+    if (event.type === 'permission-selection') {
+      const parsed = parsePermissionState(event)
+      if (parsed) state = parsed
+    } else if (event.type === 'permission-mode' && 'mode' in event) {
+      const mode = event.mode
+      if (mode === 'read-only' || mode === 'auto-edit' || mode === 'plan' || mode === 'full') {
+        state = stateFromLegacy(mode, state)
+      }
+    }
+  }
+  return state
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

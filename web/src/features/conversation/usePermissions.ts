@@ -153,8 +153,9 @@ export function usePermissions({
       return
     }
     const unsubscribe = attach(activeId, {
-      onSnapshot: (_header, events) => {
-        const choice = latestPermissionChoice(events)
+      onSnapshot: (_header, events, meta) => {
+        // 优先用服务端全会话投影:长会话的权限记录会被挤出尾部窗口。
+        const choice = meta?.lastPermission ?? latestPermissionChoice(events)
         if (choice) setPermission(choice)
         setApprovalReq(latestPendingApproval(events))
       },

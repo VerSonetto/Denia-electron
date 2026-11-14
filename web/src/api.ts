@@ -6,6 +6,7 @@ import type {
   DiscoveredModel,
   ModelCatalog,
   ModelSelection,
+  PermissionChoice,
   PermissionMode,
   PresetSpec,
   ProfileWriteScope,
@@ -879,6 +880,11 @@ export interface SessionPageResponse {
    * 变化时落盘,尾部窗口里可能一条都没有 —— 缺了它,切会话恢复不出模型。
    */
   last_selection?: ModelSelection
+  /**
+   * 全会话最后使用的权限档位(与分页窗口无关)。长会话的权限记录会被挤出
+   * 尾部窗口,只扫窗口会把选择器打回默认值,而服务端仍按旧档位判权。
+   */
+  last_permission?: PermissionChoice
 }
 
 /** 分页读取会话事件窗口:不经过全量快照,长会话首屏只拉尾部有限窗口。 */

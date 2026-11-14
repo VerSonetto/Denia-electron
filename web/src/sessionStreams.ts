@@ -1,6 +1,6 @@
 import * as api from './api'
 import type { SessionAnchor } from './api'
-import type { ModelSelection, SessionEnvelope, SessionHeader, SessionTotals } from './types'
+import type { ModelSelection, PermissionChoice, SessionEnvelope, SessionHeader, SessionTotals } from './types'
 import { isPushDead, setPushDead } from './pushChannel'
 import { POLL_HOLD_SEC, pollSessionFollow } from './pushTransport'
 import { SESSION_PAGE_LIMIT } from './sessionMemory'
@@ -57,6 +57,11 @@ export interface SessionPageMeta {
    * 里可能一条都没有 —— 用它恢复会话模型,不靠扫描窗口。
    */
   lastSelection?: ModelSelection
+  /**
+   * 全会话最后使用的权限档位。与 `lastSelection` 同理:权限记录可能早于
+   * 快照窗口,只扫窗口会把选择器打回默认值。
+   */
+  lastPermission?: PermissionChoice
 }
 
 export interface SessionStreamListener {
@@ -180,6 +185,7 @@ function reconnect(id: string, state: StreamState) {
         anchors: data.anchors ?? [],
         totals: totalsFromPage(data.totals),
         ...(data.last_selection ? { lastSelection: data.last_selection } : {}),
+        ...(data.last_permission ? { lastPermission: data.last_permission } : {}),
       }
       for (const listener of state.listeners) {
         listener.onSnapshot(data.header, data.events, meta)
