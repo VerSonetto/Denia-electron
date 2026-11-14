@@ -42,6 +42,10 @@ export function IconSettingsRuntime(props: IconProps) {
   return <Icon {...props}><circle cx="10" cy="10" r="7" /><path d="M10 5.5V10l3 2" /></Icon>
 }
 
+export function IconSettingsRemote(props: IconProps) {
+  return <Icon {...props}><rect x="2.5" y="3" width="7.5" height="14" rx="1.6" /><path d="M5 5.5h2.5" /><circle cx="6.25" cy="14" r=".8" /><path d="M12.5 6a5 5 0 0 1 0 8m2.5-10.5a8.5 8.5 0 0 1 0 13" /></Icon>
+}
+
 export function IconSettingsAppearance(props: IconProps) {
   return <Icon {...props}><circle cx="10" cy="10" r="7" /><path d="M10 3v14m0-10h5.7M10 10h7m-7 3h5.7" /></Icon>
 }

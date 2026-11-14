@@ -23,6 +23,8 @@ import type {
   SubagentProfileView,
   SubagentToolsView,
   TokenUsage,
+  UsageRange,
+  UsageSnapshot,
   WorkspaceRecord,
   WireProtocol,
 } from './types'
@@ -1424,6 +1426,13 @@ export function toggleMcpTool(
   )
 }
 
+/* ---- 用量统计 ---- */
+
+/** 全量 token 用量快照;折叠缓存由服务端持有,切换区间只换视图。 */
+export function getUsage(range: UsageRange = '30d'): Promise<UsageSnapshot> {
+  return http(`/api/usage?range=${encodeURIComponent(range)}`, undefined, 60_000)
+}
+
 /** 「用应用打开」:本机探测到的应用 id,保持菜单顺序。 */
 export function getOpenInAppApps(): Promise<{ apps: string[] }> {
   return http('/api/open-in-app/apps')
@@ -1472,4 +1481,65 @@ export function connectQqbot(
 
 export function logoutQqbot(): Promise<import('./types').QqbotChannelStatus> {
   return http('/api/channels/qqbot/logout', { method: 'POST' })
+}
+
+/* ---- 远程访问 ---- */
+
+export function getRemoteStatus(): Promise<import('./types').RemoteStatusView> {
+  return http('/api/remote/status')
+}
+
+export function enableRemote(input: {
+  listenPort?: number
+  bindHost?: string
+  publicUrl?: string
+}): Promise<import('./types').RemoteStatusView> {
+  return http('/api/remote/enable', { method: 'POST', body: JSON.stringify(input) }, 30_000)
+}
+
+export function disableRemote(): Promise<import('./types').RemoteStatusView> {
+  return http('/api/remote/disable', { method: 'POST' }, 30_000)
+}
+
+/** 建一次性配对会话:返回链接与手输短码,两者都只出现这一次。 */
+export function createRemotePairing(input: {
+  label?: string
+  allowedKinds?: import('./types').RemoteClientKind[]
+}): Promise<import('./types').RemotePairingCreated> {
+  return http('/api/remote/pairing', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export function cancelRemotePairing(id: string): Promise<{ cancelled: boolean }> {
+  return http(`/api/remote/pairings/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function listRemoteClients(): Promise<{ clients: import('./types').RemoteClientView[] }> {
+  return http('/api/remote/clients')
+}
+
+export function revokeRemoteClient(id: string): Promise<{ revoked: boolean }> {
+  return http(`/api/remote/clients/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function purgeRemoteClients(): Promise<{ purged: number }> {
+  return http('/api/remote/clients/purge', { method: 'POST' })
+}
+
+/** 远程设备兑换配对码;令牌同时写进 HttpOnly Cookie。 */
+export function redeemRemotePairing(input: {
+  /** 整条 denia://connect 链接；与 pairingId + secret 二选一。 */
+  link?: string
+  pairingId?: string
+  secret?: string
+  code?: string
+  clientKind?: import('./types').RemoteClientKind
+  deviceName?: string
+  devicePlatform?: string
+  dedupeKey?: string
+}): Promise<{ ok: boolean; clientToken: string; client: import('./types').RemoteClientView }> {
+  return http('/api/remote/redeem', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export function remoteLogout(): Promise<{ ok: boolean }> {
+  return http('/api/remote/logout', { method: 'POST' })
 }

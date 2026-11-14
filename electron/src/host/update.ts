@@ -204,7 +204,7 @@ export class Updater {
     return check
   }
 
-  /** 下载并启动安装包。调用方负责在启动后退出应用。 */
+  /** 下载并启动安装包;安装器会先结束正在运行的实例,再静默覆盖安装。 */
   async install(version: string): Promise<UpdateStatus> {
     if (!this.supported) throw new Error('当前平台不支持桌面更新安装')
     if (this.state.phase === 'downloading' || this.state.phase === 'verifying') {
@@ -239,7 +239,7 @@ export class Updater {
       this.state = { ...this.state, phase: 'verifying' }
       if (digest) await this.verify(destination, target, asset, digest)
       this.state = { ...this.state, phase: 'launching' }
-      const child = spawn(destination, [], { detached: true, stdio: 'ignore' })
+      const child = spawn(destination, ['--updated', '/S', '--force-run'], { detached: true, stdio: 'ignore' })
       child.unref()
       this.state = { ...this.state, phase: 'launched' }
       return this.status()

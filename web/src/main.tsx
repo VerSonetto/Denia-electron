@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { RemoteGate } from './components/RemoteGate'
 import './styles.css'
 import './styles.traj.css'
 import './markdown.css'
@@ -16,7 +17,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     {/* 顶层兜底:任何渲染期异常都不该让整页变白(React 18 会卸载整棵根树)。 */}
     <ErrorBoundary>
-      <App />
+      {/* 远程来源先过配对门;本机打开时它是透明的。 */}
+      <RemoteGate>
+        <App />
+      </RemoteGate>
     </ErrorBoundary>
   </React.StrictMode>,
 )

@@ -79,6 +79,7 @@ import {
   IconNewSession,
   IconExtensions,
   IconSessionSearch,
+  IconUsage,
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -92,6 +93,7 @@ const LazySettingsModal = lazy(() =>
 const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
 const LazyExtensionsPage = lazy(() => import('./pages/ExtensionsPage'))
 const LazyVersionPage = lazy(() => import('./pages/VersionPage'))
+const LazyUsagePage = lazy(() => import('./pages/UsagePage'))
 const LazyUpdateDialog = lazy(() => import('./components/updates/UpdateDialog').then((module) => ({ default: module.UpdateDialog })))
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -116,22 +118,34 @@ export default function App() {
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [versionOpen, setVersionOpen] = useState(() => window.location.hash === '#version')
+  const [usageOpen, setUsageOpen] = useState(() => window.location.hash === '#usage')
   const [extensionTab, setExtensionTab] = useState<ExtensionTab | null>(() => extensionTabFromHash(window.location.hash))
   const updateDialogOpen = useUpdateDialogOpen()
   const openVersion = useCallback(() => {
     setSettingsOpen(false)
     setExtensionTab(null)
+    setUsageOpen(false)
     setVersionOpen(true)
     window.location.hash = 'version'
   }, [])
   const closeVersion = useCallback(() => setVersionOpen(false), [])
+  const openUsage = useCallback(() => {
+    setSettingsOpen(false)
+    setVersionOpen(false)
+    setExtensionTab(null)
+    setUsageOpen(true)
+    window.location.hash = 'usage'
+  }, [])
+  const closeUsage = useCallback(() => setUsageOpen(false), [])
   const openExtensions = useCallback((tab: ExtensionTab = 'skills') => {
     setVersionOpen(false)
+    setUsageOpen(false)
     setExtensionTab(tab)
     window.location.hash = `extensions/${tab}`
   }, [])
   const leaveExtensions = useCallback(() => {
     setVersionOpen(false)
+    setUsageOpen(false)
     setExtensionTab(null)
   }, [])
   // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内。
@@ -489,17 +503,24 @@ export default function App() {
       firstRenderRef.current = false
       return
     }
-    const target = versionOpen ? '#version' : extensionTab ? `#extensions/${extensionTab}` : activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
+    const target = versionOpen ? '#version' : extensionTab ? `#extensions/${extensionTab}` : usageOpen ? '#usage' : activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
     if (window.location.hash !== target) {
       window.history.replaceState(null, '', target || window.location.pathname)
     }
-  }, [activeId, extensionTab, versionOpen])
+  }, [activeId, extensionTab, versionOpen, usageOpen])
 
   useEffect(() => {
     const onHashChange = () => {
       const version = window.location.hash === '#version'
       setVersionOpen(version)
+      // 版本与用量互斥:两者都是整页视图,而 hash 只记得住一个。
+      const usage = !version && window.location.hash === '#usage'
+      setUsageOpen(usage)
       if (version) {
+        setExtensionTab(null)
+        return
+      }
+      if (usage) {
         setExtensionTab(null)
         return
       }
@@ -943,9 +964,13 @@ export default function App() {
               <IconNewSession size={16} />
               <span>{t('newSession')}</span>
             </button>
-            <button type="button" className={`sidebar-new-btn sidebar-extensions-btn${extensionTab ? ' active' : ''}`}
+            <button type="button" className={`sidebar-new-btn sidebar-nav-btn sidebar-extensions-btn${extensionTab ? ' active' : ''}`}
               aria-current={extensionTab ? 'page' : undefined} onClick={() => openExtensions()}>
               <IconExtensions size={16} /><span>{t('extensionsTitle')}</span>
+            </button>
+            <button type="button" className={`sidebar-new-btn sidebar-nav-btn sidebar-usage-btn${usageOpen ? ' active' : ''}`}
+              aria-current={usageOpen ? 'page' : undefined} onClick={openUsage}>
+              <IconUsage size={16} /><span>{t('usagePageTitle')}</span>
             </button>
             </nav>
             <div className="sidebar-region">
@@ -985,8 +1010,8 @@ export default function App() {
               <SidebarWorkspaces
                 sessions={sessions}
                 workspaces={workspaces}
-                activeId={extensionTab || versionOpen ? null : activeId}
-                secondaryId={extensionTab || versionOpen ? null : split?.secondaryId ?? null}
+                activeId={extensionTab || versionOpen || usageOpen ? null : activeId}
+                secondaryId={extensionTab || versionOpen || usageOpen ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
@@ -1039,6 +1064,11 @@ export default function App() {
               aria-label={t('extensionsTitle')} title={t('extensionsTitle')}
               aria-current={extensionTab ? 'page' : undefined} onClick={() => { openExtensions(); setDrawerOpen(false) }}>
               <IconExtensions size={18} />
+            </button>
+            <button type="button" className={`rail-btn${usageOpen ? ' accent' : ''}`}
+              aria-label={t('usagePageTitle')} title={t('usagePageTitle')}
+              aria-current={usageOpen ? 'page' : undefined} onClick={() => { openUsage(); setDrawerOpen(false) }}>
+              <IconUsage size={18} />
             </button>
             <button
               type="button"
@@ -1106,6 +1136,10 @@ export default function App() {
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
                 <LazyVersionPage onBack={closeVersion} />
               </Suspense>
+            ) : usageOpen ? (
+              <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
+                <LazyUsagePage onBack={closeUsage} />
+              </Suspense>
             ) : extensionTab ? (
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
                 <LazyExtensionsPage tab={extensionTab} cwd={paneWorkspacePath ?? undefined} onTabChange={openExtensions} notify={notify} />
@@ -1155,7 +1189,7 @@ export default function App() {
           {/* 侧边面板在手机上不渲染:390px 宽放不下「对话 + 面板」两列,
               面板会把自己挤成一条缝,还会把主列的输入区顶出屏幕。
               手机用户要终端/文件,用抽屉里的入口或直接开新会话更实际。 */}
-          {!isMobile && !extensionTab && !versionOpen && (
+          {!isMobile && !extensionTab && !versionOpen && !usageOpen && (
           <SidePane
             sessionId={activeId}
             state={pane.state}

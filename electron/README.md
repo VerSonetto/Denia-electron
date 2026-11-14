@@ -174,6 +174,12 @@ npm run dist
 
 产物：`electron/release/Denia-v<version>-windows-x64-setup.exe`。
 
+安装器行为由 `build.nsis` 与 `build/installer.nsh` 控制:
+
+- 全新安装显示目录选择页;已有安装记录时跳过目录页,覆盖到原来的位置。
+- 安装/卸载前自动结束正在运行的 Denia(含内置服务)。
+- 应用内更新静默安装并自动拉起新版本;手动安装由完成页启动。
+
 说明：
 
 - 应用身份是 `Denia` / `dev.denia.app`，安装到 `%LOCALAPPDATA%\Programs\Denia`。

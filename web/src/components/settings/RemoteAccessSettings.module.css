@@ -1,0 +1,225 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 14px;
+}
+
+@media (max-width: 720px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.label {
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+}
+
+.input {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-l2);
+  background: var(--bg-base);
+  color: var(--label-primary);
+  font-size: 13px;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.input:disabled {
+  opacity: 0.6;
+}
+
+.hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--label-tertiary);
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.addresses {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.addressList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.addressList code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--label-secondary);
+  background: var(--bg-layer-2);
+  padding: 3px 7px;
+  border-radius: var(--r-xs);
+}
+
+.pairing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pairingTop {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.qr {
+  flex: none;
+  border: 1px solid var(--border-l1);
+  padding: 0;
+}
+
+.pairingInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+@media (max-width: 640px) {
+  .pairingTop {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+}
+
+.code {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  letter-spacing: 0.22em;
+  color: var(--label-primary);
+  line-height: 1.3;
+}
+
+.fingerprint {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  letter-spacing: 0.12em;
+  color: var(--label-secondary);
+  line-height: 2.1;
+}
+
+.link {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-l2);
+  background: var(--bg-base);
+  color: var(--label-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  resize: vertical;
+  word-break: break-all;
+}
+
+.empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--label-tertiary);
+}
+
+.devices {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.devices li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+}
+
+.devices li:hover {
+  background: var(--hover-fill);
+}
+
+.revoked {
+  opacity: 0.55;
+}
+
+.deviceMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.deviceName {
+  font-size: 13px;
+  color: var(--label-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deviceMeta {
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+}
+
+.deviceTime {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+  white-space: nowrap;
+}
+
+.badge {
+  font-size: 11px;
+  color: var(--label-tertiary);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-pill);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.foot {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--label-tertiary);
+}

@@ -314,17 +314,25 @@
   color: var(--label-primary);
 }
 
-.sidebar-extensions-btn {
+/* 扁平导航项:拓展管理与用量统计与新建会话同一列,但只有文字,
+ * 不套主按钮的填充底。共用一个标记,新增入口时加类即可。 */
+.sidebar-nav-btn {
   color: var(--label-primary);
 }
 
-.sidebar-new-btn:active,
-.sidebar-extensions-btn.active {
+/* 选中态只做位置提示:底色比按下态再淡一档,不抢「新建会话」的主按钮。 */
+.sidebar-nav-btn.active {
+  background: var(--active-fill-soft);
+  color: var(--label-primary);
+}
+
+/* 按下仍用实一档的 active-fill:选中项被按住时有明确反馈。 */
+.sidebar-new-btn:active {
   background: var(--active-fill);
   color: var(--label-primary);
 }
 
-.sidebar-new-btn:not(.sidebar-extensions-btn) {
+.sidebar-new-btn:not(.sidebar-nav-btn) {
   justify-content: center;
   text-align: center;
   background: var(--sidebar-button);
@@ -334,11 +342,11 @@
   padding: 0 12px;
   font-weight: 500;
 }
-.sidebar-new-btn:not(.sidebar-extensions-btn):hover {
+.sidebar-new-btn:not(.sidebar-nav-btn):hover {
   background: color-mix(in srgb, var(--sidebar-button), var(--label-primary) 4%);
   border-color: var(--border-l3);
 }
-.sidebar-new-btn:not(.sidebar-extensions-btn):active {
+.sidebar-new-btn:not(.sidebar-nav-btn):active {
   background: var(--active-fill);
 }
 

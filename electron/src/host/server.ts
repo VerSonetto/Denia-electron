@@ -28,6 +28,8 @@ import { summarizeContextUsage } from '../agent/context-usage.ts'
 import { allPresetFeatures, presetForSession, presetRows, presetSettings } from '../agent/presets.ts'
 import type { AgentPresetRow } from '../agent/presets.ts'
 import { scheduleSessionTitle } from '../agent/session-title.ts'
+import { RemoteRuntime, decideAccess, isBlockedForRemote, type AccessDecision } from './remote.ts'
+import { handleRemoteApi } from './remote-api.ts'
 import { Updater } from './update.ts'
 import { availableApps, iconFor, launchApp } from './open-in-app.ts'
 import { compactSession } from '../agent/compact.ts'
@@ -52,6 +54,7 @@ import type { PermissionState } from '../core/permission.ts'
 import { streamFor } from '../llm/index.ts'
 import type { Envelope, ImageData, ModelSelection, SessionEvent, ToolCallRef } from '../core/wire.ts'
 import { errorMessage, isRecord } from '../core/util.ts'
+import { UsageIndex, isUsageRange } from '../session/usage.ts'
 import { SessionStore } from '../session/store.ts'
 import { FileHistoryStore } from '../session/file-history.ts'
 import { GoalStore } from '../goal/store.ts'
@@ -101,6 +104,13 @@ import {
 import { PROFILE_COLORS } from '../subagents/types.ts'
 
 const HEARTBEAT_MS = 15_000
+
+/** 远程设备在配对前必须能访问的端点:查状态、兑换配对码、退出。其余一律要令牌。 */
+const REMOTE_PUBLIC_PATHS = new Set([
+  '/api/remote/status',
+  '/api/remote/redeem',
+  '/api/remote/logout',
+])
 const POLL_MAX_SEC = 30
 const POLL_DEFAULT_SEC = 25
 const RING_LIMIT = 128
@@ -132,6 +142,10 @@ export interface Host {
   baseUrl: string
   store: SessionStore
   driver: SessionDriver
+  /** Cross-session token usage fold; the usage page reads it directly. */
+  usage: UsageIndex
+  /** 远程访问的设备台账与配对状态；测试与设置页都会读它。 */
+  remote: RemoteRuntime
   close(): Promise<void>
 }
 
@@ -263,6 +277,13 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   // Launching GUI apps only makes sense for the machine the host runs on.
   const localOnly = isLoopbackHost(options.host ?? '127.0.0.1')
   fs.mkdirSync(home, { recursive: true })
+  // 主监听端口先按配置估一个值,真正绑定后再回填 ephemeral 端口的实际值。
+  let boundPort = options.port ?? Number(process.env.DENIA_PORT ?? 43655)
+  const remote = new RemoteRuntime({
+    home,
+    port: () => boundPort,
+    bindHost: () => options.host ?? '127.0.0.1',
+  })
   const webDir = options.webDir ?? path.resolve(import.meta.dirname, '..', '..', '..', 'web', 'dist')
   const updater = new Updater({
     currentVersion: options.version ?? '0.0.0',
@@ -272,6 +293,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
 
   let config = loadConfig(home)
   const store = new SessionStore(home)
+  const usage = new UsageIndex(store.sessionsDir)
   const fileHistory = new FileHistoryStore(home)
   const registry = ToolRegistry.builtin()
   registry.register(new SkillTool(home))
@@ -461,14 +483,81 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     const pathname = safeDecode(url.pathname)
     try {
       if (!pathname.startsWith('/api/')) {
+        // 静态资源不设门:远程设备要能先把界面加载出来,才谈得上输入配对码。
         serveStatic(req, res, webDir, pathname)
         return
       }
-      await handleApi(req, res, pathname, url)
+      const access = decideAccess(remote, req, { requireToken: true })
+      // 只在宿主机上有意义的能力,远程来源一律拒绝 —— 不靠 UI 藏。
+      if (access.kind !== 'local' && isBlockedForRemote(pathname)) {
+        apiError(res, 403, 'remote/blocked', '该能力只能在宿主机器上使用')
+        return
+      }
+      if (access.kind === 'unauthorized' && !REMOTE_PUBLIC_PATHS.has(pathname)) {
+        apiError(res, 401, 'remote/unauthorized', '需要先与宿主配对')
+        return
+      }
+      await handleApi(req, res, pathname, url, access)
     } catch (error) {
       if (!res.headersSent) apiError(res, 500, 'internal', errorMessage(error))
       else if (!res.writableEnded) res.end()
     }
+  }
+
+  // —— 远程监听 ——
+  //
+  // 独立第二个 http.Server,与回环主监听共用同一个 handler:
+  //   - 主监听保持 127.0.0.1 不变,桌面窗口不受任何影响;
+  //   - 远程监听绑在 config.listenPort(默认主端口 + 1)上,开关即时生效,
+  //     不需要重启进程,也不用把回环端口暴露出去。
+  let remoteServer: http.Server | null = null
+  let remoteListenError: string | null = null
+  let remoteListenHost: string | null = null
+  let remoteListenPort = 0
+
+  const remoteListenerState = () => ({
+    listening: remoteServer !== null,
+    host: remoteListenHost,
+    port: remoteListenPort,
+    error: remoteListenError,
+  })
+
+  const stopRemoteListener = async (): Promise<void> => {
+    const current = remoteServer
+    remoteServer = null
+    remoteListenHost = null
+    remoteListenPort = 0
+    if (!current) return
+    // SSE 是常驻连接,close() 会一直等下去,必须先掐断。
+    current.closeAllConnections?.()
+    await new Promise<void>((resolve) => current.close(() => resolve()))
+  }
+
+  const startRemoteListener = async (): Promise<void> => {
+    await stopRemoteListener()
+    const config = remote.readConfig()
+    const host = config.bindHost ?? '0.0.0.0'
+    const port = config.listenPort
+    const next = http.createServer((req, res) => {
+      void handler(req, res)
+    })
+    next.requestTimeout = 0
+    try {
+      await new Promise<void>((resolve, reject) => {
+        next.once('error', reject)
+        next.listen(port, host, () => {
+          next.off('error', reject)
+          resolve()
+        })
+      })
+    } catch (error) {
+      remoteListenError = errorMessage(error)
+      throw error
+    }
+    remoteServer = next
+    remoteListenHost = host
+    remoteListenPort = port
+    remoteListenError = null
   }
 
   const handleApi = async (
@@ -476,8 +565,21 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     res: ServerResponse,
     pathname: string,
     url: URL,
+    access: AccessDecision,
   ): Promise<void> => {
     const method = req.method ?? 'GET'
+
+    // —— remote access ——
+    if (await handleRemoteApi(req, res, pathname, url, access, {
+      remote,
+      json,
+      apiError,
+      readJson,
+      listener: () => remoteListenerState(),
+      startListener: startRemoteListener,
+      stopListener: stopRemoteListener,
+      serverLabel: () => os.hostname() || 'Denia',
+    })) return
 
     // —— permissions ——
     if (pathname === '/api/permissions/catalog' && method === 'GET') {
@@ -2049,6 +2151,16 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       json(res, 200, emptyQqbotStatus())
       return
     }
+    // —— usage ——
+    if (pathname === '/api/usage' && method === 'GET') {
+      const requested = url.searchParams.get('range')
+      if (requested !== null && !isUsageRange(requested)) {
+        apiError(res, 400, 'usage/bad-range', `未知的统计区间: ${requested}`)
+        return
+      }
+      json(res, 200, usage.snapshot(requested ?? '30d'))
+      return
+    }
     if (pathname === '/api/update/check' && method === 'GET') {
       const force = url.searchParams.get('force') === 'true'
       try {
@@ -2150,7 +2262,18 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   })
   const address = server.address()
   const actualPort = typeof address === 'object' && address !== null ? address.port : port
+  boundPort = actualPort
   instanceBase = `http://${host}:${actualPort}`
+
+  // 上次退出时远程是开着的就自动恢复监听。失败不阻断启动:桌面端照常可用,
+  // 原因通过 /api/remote/status 的 listenerError 暴露给设置页。
+  if (remote.readConfig().enabled) {
+    try {
+      await startRemoteListener()
+    } catch (error) {
+      console.error('[denia] 远程监听启动失败:', errorMessage(error))
+    }
+  }
 
   return {
     server,
@@ -2159,7 +2282,10 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     baseUrl: `http://${host}:${actualPort}`,
     store,
     driver,
+    usage,
+    remote,
     async close() {
+      await stopRemoteListener()
       clearInterval(heartbeatTimer)
       for (const client of sseClients) client.end()
       sseClients.clear()

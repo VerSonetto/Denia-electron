@@ -706,6 +706,21 @@ export function IconActivity(props: IconProps) {
   )
 }
 
+/**
+ * 用量统计:三根高低不同的柱子 + 一条基线。
+ *
+ * 这张页面回答的是"用得多少、起伏如何",柱子正是它自己的形状 ——
+ * 比折线更像"量",也不会和连通性那条心跳线混为一谈。
+ */
+export function IconUsage(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M2.4 13.2h11.2" />
+      <path d="M4.6 13V9.2M8 13V5.4M11.4 13V7.6" strokeWidth="1.7" />
+    </StrokeSvg>
+  )
+}
+
 /** 层叠:模型目录。 */
 export function IconStack(props: IconProps) {
   return (

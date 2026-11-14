@@ -60,6 +60,8 @@
 
   --hover-fill: rgba(255, 255, 255, 0.05);
   --active-fill: rgba(255, 255, 255, 0.09);
+  /* 常驻选中底色:比按下态淡一档,扁平导航项用它做位置提示而非实心块。 */
+  --active-fill-soft: rgba(255, 255, 255, 0.06);
 
   --shadow-lv2: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 32px rgba(0, 0, 0, 0.55);
   --shadow-float: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 16px 48px rgba(0, 0, 0, 0.6);
@@ -142,6 +144,7 @@
 
     --hover-fill: rgba(0, 0, 0, 0.04);
     --active-fill: rgba(0, 0, 0, 0.07);
+    --active-fill-soft: rgba(0, 0, 0, 0.05);
 
     --shadow-lv2: 0 1px 0 rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
     --shadow-float: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.1);
@@ -210,6 +213,7 @@
 
   --hover-fill: rgba(0, 0, 0, 0.04);
   --active-fill: rgba(0, 0, 0, 0.07);
+  --active-fill-soft: rgba(0, 0, 0, 0.05);
 
   --shadow-lv2: 0 1px 0 rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
   --shadow-float: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.1);

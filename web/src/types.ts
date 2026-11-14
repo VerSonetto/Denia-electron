@@ -301,6 +301,104 @@ export interface SessionTotals {
   reasoningTokens: number
 }
 
+/** 用量页可选的统计区间;服务端拥有这份集合,界面不另抄一份。 */
+export type UsageRange = 'today' | '7d' | '30d' | 'all'
+
+/**
+ * 一个统计区间的 token 计数。
+ *
+ * 口径与 `TokenUsage` 一致:`inputTokens` 是**未缓存**输入,与
+ * `cacheReadTokens` 互斥;`reasoningTokens` 是输出侧的明细,不计入总量。
+ */
+export interface UsageBucket {
+  inputTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+  reasoningTokens: number
+  /** 上报了用量的模型请求数。 */
+  requests: number
+  /** 已闭合轮次。 */
+  turns: number
+  /** 工具调用数。 */
+  toolCalls: number
+}
+
+export interface UsageSummary extends UsageBucket {
+  /** 计费 token = 未缓存输入 + 缓存读 + 输出。 */
+  totalTokens: number
+  /** 缓存读 /(未缓存输入 + 缓存读),百分比;无任何缓存上报时为 null。 */
+  cacheHitRate: number | null
+  activeDays: number
+  peakDay: string | null
+  peakDayTokens: number
+  currentStreakDays: number
+  longestStreakDays: number
+  /** 区间内上报过用量的会话数。 */
+  sessions: number
+}
+
+export interface UsageDay extends UsageBucket {
+  /** 本地日历日,YYYY-MM-DD。 */
+  date: string
+  totalTokens: number
+}
+
+export interface UsageModelRow extends UsageBucket {
+  provider: string
+  model: string
+  totalTokens: number
+  /** 占当前区间总量的比例,0–1。 */
+  share: number
+}
+
+export interface UsageSessionRow extends UsageBucket {
+  id: string
+  title: string | null
+  cwd: string | null
+  updatedAt: number
+  /** 由父会话派遣产生,而非用户直接发起。 */
+  subagent: boolean
+  totalTokens: number
+}
+
+export interface UsageHeatmapCell {
+  date: string
+  totalTokens: number
+  requests: number
+  /** 0 = 无用量,1–4 为最忙当天的四等分。 */
+  level: number
+}
+
+export interface UsageHeatmapWeek {
+  weekIndex: number
+  /** 七格,周一在前;今天之后的列为 null。 */
+  days: (UsageHeatmapCell | null)[]
+}
+
+export interface UsageHeatmap {
+  startDate: string
+  endDate: string
+  maxTokens: number
+  weeks: UsageHeatmapWeek[]
+}
+
+/** 用量快照(/api/usage)。 */
+export interface UsageSnapshot {
+  range: UsageRange
+  /** 服务端接受的区间;页面按它渲染切换项。 */
+  ranges: UsageRange[]
+  generatedAt: number
+  timeZone: string
+  /** 全量累计:总览条与热力图不随区间收窄。 */
+  lifetime: UsageSummary
+  summary: UsageSummary
+  /** 区间内连续的每日数据,最早在前。 */
+  days: UsageDay[]
+  models: UsageModelRow[]
+  sessions: UsageSessionRow[]
+  heatmap: UsageHeatmap
+}
+
 /** agent preset 名册里的一行(随附或用户自定义)。 */
 export interface AgentPresetRow {
   id: string
@@ -421,4 +519,66 @@ export interface QqbotChannelStatus {
   lastInboundAt: number | null
   lastInboundChars: number
   lastAction: string | null
+}
+
+/* ---- 远程访问(/api/remote/*) ---- */
+
+export type RemoteClientKind = 'mobile' | 'desktop' | 'browser'
+
+export interface RemoteClientView {
+  id: string
+  label: string
+  createdAt: string
+  lastUsedAt: string | null
+  revokedAt: string | null
+  clientKind: RemoteClientKind
+  deviceName: string | null
+  devicePlatform: string | null
+  appVersion: string | null
+}
+
+export interface RemotePairingView {
+  id: string
+  createdAt: string
+  expiresAt: string
+  usedAt: string | null
+  cancelledAt: string | null
+  clientId: string | null
+  label: string | null
+  /** 带外核对用指纹,形如 A1B2-C3D4。 */
+  fingerprint: string
+  allowedKinds: RemoteClientKind[]
+}
+
+export interface RemoteCandidateView {
+  type: 'lan' | 'tunnel'
+  url: string
+  priority?: number
+}
+
+export interface RemoteStatusView {
+  /** true 表示这次请求来自宿主本机(桌面窗口 / 本机浏览器)。 */
+  local: boolean
+  authenticated: boolean
+  enabled: boolean
+  listenPort: number
+  bindHost: string | null
+  publicUrl: string | null
+  listening: boolean
+  listenerError: string | null
+  addresses: { lan: string[]; publicUrl: string | null }
+  serverLabel?: string
+  /** 服务器稳定标识;App 用它防止把令牌发给换了主的局域网地址。 */
+  serverId?: string
+  clientKind?: RemoteClientKind | null
+  clients?: RemoteClientView[]
+  pending?: RemotePairingView[]
+}
+
+export interface RemotePairingCreated {
+  pairing: RemotePairingView
+  secret: string
+  code: string
+  link: string
+  candidates: RemoteCandidateView[]
 }

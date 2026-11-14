@@ -130,7 +130,7 @@ assert.equal(
 
 /* 主按钮(新建会话)是居中填充按钮,不需要额外 margin 破坏 6px 间距节奏。 */
 const primaryButtonDecls = declarations(
-  rule(shellCss, '.sidebar-new-btn:not(.sidebar-extensions-btn)'),
+  rule(shellCss, '.sidebar-new-btn:not(.sidebar-nav-btn)'),
 )
 assert.equal(primaryButtonDecls.get('margin-bottom'), undefined, '主按钮不应再叠 margin-bottom')
 assert.equal(sides(value(primaryButtonDecls, 'padding', '主按钮')).top, 0)
@@ -206,6 +206,32 @@ assert.ok(sessionRowSource.includes('pinned &&'), '置顶标记必须受 pinned 
 assert.ok(
   sessionRowSource.includes('data-testid="pin-mark"'),
   '置顶标记缺少稳定的测试锚点',
+)
+
+/* ---------- 扁平导航项选中态 ---------- */
+
+/* 拓展管理/用量统计的常驻选中底只做位置提示,必须比按下态更淡:
+ * 两者一旦取同值,选中项在视觉上等同被按住的按钮。 */
+function alphaOf(map, name, selector) {
+  const found = value(map, name, selector)
+  const match = /rgba\([^)]*,\s*([\d.]+)\s*\)$/.exec(found)
+  assert.ok(match, `${selector} 的 ${name} 必须是 rgba:${found}`)
+  return Number.parseFloat(match[1])
+}
+
+for (const selector of [':root', ":root[data-theme='light']", ":root:not([data-theme='dark'])"]) {
+  const theme = declarations(rule(foundationCss, selector))
+  const active = alphaOf(theme, '--active-fill', selector)
+  const soft = alphaOf(theme, '--active-fill-soft', selector)
+  assert.ok(soft < active, `${selector} 下 --active-fill-soft 必须比 --active-fill 淡`)
+  assert.ok(soft > 0, `${selector} 下选中底仍需可见`)
+}
+
+const navActiveDecls = declarations(rule(shellCss, '.sidebar-nav-btn.active'))
+assert.equal(
+  value(navActiveDecls, 'background', '.sidebar-nav-btn.active'),
+  'var(--active-fill-soft)',
+  '扁平导航项选中态应使用更淡的常驻底色',
 )
 
 /* ---------- 深浅主题 ---------- */
