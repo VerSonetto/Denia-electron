@@ -82,3 +82,4 @@
 # esbuild 偶发把输出写到包根目录,构建产物不入库
 /electron/main.js
 /electron/main.js.map
+.openbitfun/
