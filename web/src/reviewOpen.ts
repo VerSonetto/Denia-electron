@@ -12,7 +12,7 @@
  * # 默认行为
  *
  * 未注册(如 jsdom 挂载测试)时返回 false,调用方据此**不做任何事**,而不是
- * 抛错或假装打开 —— 与 `openWorkspaceFile` 的同一原则。
+ * 抛错或假装打开 —— 与 `openProjectFile` 的同一原则。
  */
 
 import { useSyncExternalStore } from 'react'

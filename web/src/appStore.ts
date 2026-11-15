@@ -1,15 +1,15 @@
 import { useSyncExternalStore } from 'react'
 import * as api from './api'
-import type { SessionSummary, WorkspaceRecord } from './types'
+import type { ProjectRecord, SessionSummary } from './types'
 import { dropSession } from './sessionStreams'
 import { forgetSessionModel } from './features/conversation/sessionModelMemory'
 
 /**
  * 全局应用 store(自写,不引状态库):唯一数据源。
  *
- * - 所有会话/工作区/导航状态集中在这里,组件只通过 hook 订阅自己
+ * - 所有会话/项目/导航状态集中在这里,组件只通过 hook 订阅自己
  *   关心的字段,引用稳定 → 不相关组件零重渲染。
- * - 派生值(activeSession / activeWs / locked)由组件用 hook 组合,
+ * - 派生值(activeSession / activeProject / locked)由组件用 hook 组合,
  *   不在 store 里放重复副本。
  */
 
@@ -20,9 +20,9 @@ export interface Toast {
 
 interface AppSnapshot {
   sessions: SessionSummary[]
-  workspaces: WorkspaceRecord[]
+  projects: ProjectRecord[]
   activeId: string | null
-  pendingWsId: string | null
+  pendingProjectId: string | null
   toast: Toast | null
   connLost: boolean
   catalogTick: number
@@ -33,7 +33,7 @@ interface AppSnapshot {
    * 空白会话的自动清理作用域**必须**限于此集合:会话列表是全局共享的,
    * 而 `activeId` 只代表本页面的焦点。若按"列表里非活跃即空白"去清扫,
    * 就会把别的标签页 / 别的实例(正式与开发实例共用同一数据目录)刚创建、
-   * 正在使用的会话当垃圾删掉 —— 表现为"新建会话没选中工作区 + 发不出消息
+   * 正在使用的会话当垃圾删掉 —— 表现为"新建会话没选中项目 + 发不出消息
    * + 列表里看不到新会话",以及发消息时报 `session not found`。
    */
   localBlankIds: Record<string, true>
@@ -98,9 +98,9 @@ function writeCompacting(map: Record<string, number>) {
 
 let state: AppSnapshot = {
   sessions: [],
-  workspaces: [],
+  projects: [],
   activeId: null,
-  pendingWsId: null,
+  pendingProjectId: null,
   toast: null,
   connLost: false,
   catalogTick: 0,
@@ -130,9 +130,9 @@ function useApp<T>(pick: (s: AppSnapshot) => T): T {
 /* ---- 字段级 hooks(引用稳定,隔离重渲染) ---- */
 
 export const useSessions = () => useApp((s) => s.sessions)
-export const useWorkspaces = () => useApp((s) => s.workspaces)
+export const useProjects = () => useApp((s) => s.projects)
 export const useActiveId = () => useApp((s) => s.activeId)
-export const usePendingWsId = () => useApp((s) => s.pendingWsId)
+export const usePendingProjectId = () => useApp((s) => s.pendingProjectId)
 export const useToast = () => useApp((s) => s.toast)
 export const useConnLost = () => useApp((s) => s.connLost)
 export const useCatalogTick = () => useApp((s) => s.catalogTick)
@@ -229,12 +229,12 @@ export function notify(kind: Toast['kind'], message: string) {
   toastTimer = window.setTimeout(() => setState({ toast: null }), 3500)
 }
 
-export function setActiveId(id: string | null, pendingWsId?: string | null) {
-  setState({ activeId: id, ...(pendingWsId !== undefined ? { pendingWsId } : {}) })
+export function setActiveId(id: string | null, pendingProjectId?: string | null) {
+  setState({ activeId: id, ...(pendingProjectId !== undefined ? { pendingProjectId } : {}) })
 }
 
-export function setPendingWsId(id: string | null) {
-  setState({ pendingWsId: id })
+export function setPendingProjectId(id: string | null) {
+  setState({ pendingProjectId: id })
 }
 
 export function setConnLost(lost: boolean) {
@@ -265,23 +265,23 @@ export function useLocalBlankIds(): Record<string, true> {
   return useApp((s) => s.localBlankIds)
 }
 
-/** 全量刷新会话列表 + 工作区列表(SSE 通知/删除/创建后调用)。 */
+/** 全量刷新会话列表 + 项目列表(SSE 通知/删除/创建后调用)。 */
 export async function refreshList(): Promise<void> {
   try {
-    const [sess, ws] = await Promise.all([api.listSessions(), api.listWorkspaces()])
+    const [sess, projectList] = await Promise.all([api.listSessions(), api.listProjects()])
     const nextStarted = { ...state.startedIds }
     for (const session of sess.sessions) {
       if (session.excerpt) nextStarted[session.id] = true
     }
     // activeId 指向的会话已不存在(被别的页面/实例删除,或本页面切走后
     // 被清理):必须丢掉悬空焦点,否则输入框仍停在它上面,发消息会报
-    // `session not found`。只清焦点、保留 pendingWsId —— 工作区落点还在,
-    // 页面回到该工作区的可输入草稿态,而不是掉进 inert 死态。
+    // `session not found`。只清焦点、保留 pendingProjectId —— 项目落点还在,
+    // 页面回到该项目的可输入草稿态,而不是掉进 inert 死态。
     const activeStillExists =
       state.activeId === null || sess.sessions.some((s) => s.id === state.activeId)
     setState({
       sessions: sess.sessions,
-      workspaces: ws.workspaces,
+      projects: projectList.projects,
       startedIds: nextStarted,
       sessionsLoaded: true,
       ...(activeStillExists ? {} : { activeId: null }),
@@ -293,25 +293,25 @@ export async function refreshList(): Promise<void> {
 }
 
 /** 本地插入/更新一条会话摘要(创建成功时,避免整表重拉)。 */
-export function addSessionLocal(summary: SessionSummary, workspaceId?: string) {
+export function addSessionLocal(summary: SessionSummary, projectId?: string) {
   const sessions = [
     summary,
     ...state.sessions.filter((s) => s.id !== summary.id),
   ]
-  const workspaces = workspaceId
-    ? state.workspaces.map((ws) =>
-        ws.id === workspaceId
+  const projects = projectId
+    ? state.projects.map((project) =>
+        project.id === projectId
           ? {
-              ...ws,
-              sessionIds: [summary.id, ...ws.sessionIds.filter((id) => id !== summary.id)],
+              ...project,
+              sessionIds: [summary.id, ...project.sessionIds.filter((id) => id !== summary.id)],
             }
-          : ws,
+          : project,
       )
-    : state.workspaces
-  setState({ sessions, workspaces })
+    : state.projects
+  setState({ sessions, projects })
 }
 
-/** 会话删除:成功后本地移除 + 工作区账本去引用 + 停流。 */
+/** 会话删除:成功后本地移除 + 项目账本去引用 + 停流。 */
 export async function deleteSessionAction(id: string): Promise<void> {
   await api.deleteSession(id)
   dropSession(id)
@@ -321,23 +321,23 @@ export async function deleteSessionAction(id: string): Promise<void> {
   delete localBlankIds[id]
   setState({
     sessions: state.sessions.filter((s) => s.id !== id),
-    workspaces: state.workspaces.map((ws) => ({
-      ...ws,
-      sessionIds: ws.sessionIds.filter((sid) => sid !== id),
+    projects: state.projects.map((project) => ({
+      ...project,
+      sessionIds: project.sessionIds.filter((sid) => sid !== id),
     })),
     localBlankIds,
-    // 只丢焦点,保留 pendingWsId:删掉当前会话后仍停在该工作区的草稿态,
+    // 只丢焦点,保留 pendingProjectId:删掉当前会话后仍停在该项目的草稿态,
     // 输入框可以继续用,不会掉进 inert 死态。
     ...(state.activeId === id ? { activeId: null } : {}),
   })
 }
 
-/** 工作区删除:成功后级联刷新(后端已级联删会话)。 */
-export async function deleteWorkspaceAction(id: string): Promise<void> {
-  await api.deleteWorkspace(id)
+/** 项目删除:成功后级联刷新(后端已级联删会话)。 */
+export async function deleteProjectAction(id: string): Promise<void> {
+  await api.deleteProject(id)
   await refreshList()
   if (state.activeId && !state.sessions.some((s) => s.id === state.activeId)) {
-    setState({ activeId: null, pendingWsId: null })
+    setState({ activeId: null, pendingProjectId: null })
   }
 }
 
@@ -347,10 +347,10 @@ function isBlank(s: SessionSummary): boolean {
   return !s.excerpt && !state.startedIds[s.id]
 }
 
-/** 该工作区路径下可复用的空白会话。 */
-export function findWorkspaceBlank(cwd: string): SessionSummary | undefined {
+/** 该项目中可复用的空白会话。 */
+export function findProjectBlank(projectId: string): SessionSummary | undefined {
   return state.sessions.find(
-    (s) => s.cwd === cwd && s.cwd_alive !== false && isBlank(s),
+    (s) => s.project_id === projectId && s.cwd_alive !== false && isBlank(s),
   )
 }
 
@@ -360,20 +360,25 @@ export function getActiveSession(): SessionSummary | null {
   return state.sessions.find((s) => s.id === state.activeId) ?? null
 }
 
-/** 当前生效的工作区:活跃会话的 cwd 匹配项,否则 pendingWsId。 */
-export function getActiveWorkspace(): WorkspaceRecord | null {
+/** 当前生效的项目:活跃会话的 project_id,否则 pendingProjectId。 */
+export function getActiveProject(): ProjectRecord | null {
   const active = getActiveSession()
   if (active) {
-    return state.workspaces.find((w) => w.path === active.cwd) ?? null
+    const byId = state.projects.find((project) => project.id === active.project_id)
+    if (byId) return byId
+    const byPath = active.cwd
+      ? state.projects.find((project) => project.dirs.includes(active.cwd!))
+      : undefined
+    if (byPath) return byPath
   }
-  return state.workspaces.find((w) => w.id === state.pendingWsId) ?? null
+  return state.projects.find((project) => project.id === state.pendingProjectId) ?? null
 }
 
 /**
- * 发送前确保会话存在:复用 activeId → 复用该工作区空白会话 → 创建。
- * 返回会话 id;无工作区时返回 null。
+ * 发送前确保会话存在:复用 activeId → 复用该项目空白会话 → 创建。
+ * 返回会话 id;无项目时返回 null。
  */
-export async function ensureSession(ws: WorkspaceRecord | null, activate = true): Promise<string | null> {
+export async function ensureSession(project: ProjectRecord | null, activate = true): Promise<string | null> {
   // activeId 可能悬空(会话被别的页面/实例删掉,而本页面焦点还没跟上)。
   // 直接拿它去 postPrompt 会报 `session not found`,所以先校验它确实还在
   // 列表里;列表尚未加载完时不做校验,避免误判。
@@ -382,13 +387,13 @@ export async function ensureSession(ws: WorkspaceRecord | null, activate = true)
     if (known) return state.activeId
     setState({ activeId: null })
   }
-  if (!ws) return null
-  const blank = findWorkspaceBlank(ws.path)
+  if (!project) return null
+  const blank = findProjectBlank(project.id)
   if (blank) {
-    if (activate) setActiveId(blank.id, ws.id)
+    if (activate) setActiveId(blank.id, project.id)
     return blank.id
   }
-  const { session } = await api.createSession({ workspaceId: ws.id })
+  const { session } = await api.createSession({ projectId: project.id })
   const summary: SessionSummary = {
     id: session.id,
     created_at: session.created_at,
@@ -398,18 +403,19 @@ export async function ensureSession(ws: WorkspaceRecord | null, activate = true)
     cwd: session.cwd,
     sandbox: session.sandbox,
     cwd_alive: true,
+    project_id: session.project_id,
     // 预设在创建时就写进会话日志;带上它,新会话页不必等下一次列表刷新
     // 才知道这个会话跑的是什么(否则会短暂显示部署默认值)。
     agent_preset: session.agent_preset,
   }
-  addSessionLocal(summary, ws.id)
+  addSessionLocal(summary, project.id)
   // 本页面为发送首条消息而创建的会话:同样登记,发送失败留下空白时可被清理。
   markLocalBlank(summary.id)
-  if (activate) setActiveId(summary.id, ws.id)
+  if (activate) setActiveId(summary.id, project.id)
   return summary.id
 }
 
-/** 同步读取当前工作区(非 hook,供事件回调)。 */
-export function peekActiveWorkspace(): WorkspaceRecord | null {
-  return getActiveWorkspace()
+/** 同步读取当前项目(非 hook,供事件回调)。 */
+export function peekActiveProject(): ProjectRecord | null {
+  return getActiveProject()
 }

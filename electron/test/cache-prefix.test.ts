@@ -159,7 +159,7 @@ test('warming respects the phase and mode, and cancel drops the timer', () => {
     temperature: 0.7,
     stop: ['x'],
   }
-  warmer.remember('session-1', provider, request)
+  warmer.remember('session-1', provider, request, 'idle')
 
   warmer.schedule('session-1', 'idle', settings('off'))
   assert.equal(warmer.pending('session-1'), false)
@@ -216,7 +216,7 @@ test('a fired warming timer replays the shaped request and drains it', async (t)
     tools: [],
     cacheKey: 'session-1',
     maxTokens: 50,
-  })
+  }, 'streaming')
   warmer.schedule('session-1', 'streaming', settings('streaming'))
   t.mock.timers.tick(270_000)
   assert.equal(seen.length, 1)

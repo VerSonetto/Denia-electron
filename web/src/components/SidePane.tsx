@@ -60,8 +60,10 @@ export interface SidePaneProps {
   state: SidePaneState
   /** 是否折叠。 */
   collapsed: boolean
-  /** 工作区路径(审查面板与终端 cwd 用)。 */
-  workspacePath: string | null
+  /** 项目主目录(终端 cwd 与单目录面板用)。 */
+  projectPath: string | null
+  /** 项目的全部目录(审查面板按目录聚合)。 */
+  projectDirs?: readonly string[]
   /** 内嵌浏览器是否可用。 */
   supportsBrowser: boolean
   /** 当前对话选择的模型(审查面板的 AI 生成提交信息复用同一条模型链路)。 */
@@ -96,7 +98,8 @@ export function SidePane({
   sessionId,
   state,
   collapsed,
-  workspacePath,
+  projectPath,
+  projectDirs,
   supportsBrowser,
   modelSelection,
   recentClosed,
@@ -282,21 +285,21 @@ export function SidePane({
   const addable = useMemo(
     () =>
       availablePanels({
-        workspacePath,
+        projectPath,
         isOpen: (type) => state.tabs.some((tab) => tab.type === type),
         supportsBrowser,
       }).map((panel) => panel.type),
-    [workspacePath, state.tabs, supportsBrowser],
+    [projectPath, state.tabs, supportsBrowser],
   )
 
   const openable = useMemo(
     () =>
       availablePanels({
-        workspacePath,
+        projectPath,
         isOpen: () => false,
         supportsBrowser,
       }),
-    [workspacePath, supportsBrowser],
+    [projectPath, supportsBrowser],
   )
 
   const activeId = state.tabs.some((tab) => tab.id === state.activeTabId)
@@ -317,7 +320,7 @@ export function SidePane({
 
   /** 终端组的轻量头部:显示当前终端的 shell 名与目录,`+` 直接开新终端。 */
   const activeTerminal = terminalTabs.find((tab) => tab.id === activeId) ?? null
-  const terminalCwd = activeTerminal?.cwd ?? workspacePath ?? ''
+  const terminalCwd = activeTerminal?.cwd ?? projectPath ?? ''
   const terminalCwdName = terminalCwd.split(/[\\/]/).filter(Boolean).pop() ?? terminalCwd
 
   return (
@@ -477,36 +480,37 @@ export function SidePane({
                           <div className="pane-placeholder">{t('planReviewParseFailed')}</div>
                         ))}
                       {tab.type === 'review' &&
-                        (workspacePath ? (
+                        (projectPath ? (
                           <ReviewSlot
-                            workspacePath={workspacePath}
+                            projectPath={projectPath}
+                            projectDirs={projectDirs}
                             sessionId={sessionId}
                             selection={modelSelection ?? null}
                           />
                         ) : (
-                          <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
+                          <div className="pane-placeholder">{t('sidePaneNeedsProject')}</div>
                         ))}
                       {tab.type === 'files' &&
-                        (workspacePath ? (
+                        (projectPath ? (
                           <FileTreeSlot
-                            workspacePath={workspacePath}
+                            projectPath={projectPath}
                             sessionId={sessionId}
                             onOpenFile={onOpenFile}
                           />
                         ) : (
-                          <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
+                          <div className="pane-placeholder">{t('sidePaneNeedsProject')}</div>
                         ))}
                       {tab.type === 'file' &&
-                        (workspacePath ? (
+                        (projectPath ? (
                           <FileReaderSlot
-                            workspacePath={workspacePath}
+                            projectPath={projectPath}
                             files={tab.files ?? []}
                             activeFile={tab.activeFile}
                             onActivate={onActivateFile}
                             onCloseFile={onCloseFile}
                           />
                         ) : (
-                          <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
+                          <div className="pane-placeholder">{t('sidePaneNeedsProject')}</div>
                         ))}
                       {tab.type === 'browser' && renderBrowser?.(tab, visible)}
                     </div>
@@ -525,25 +529,25 @@ export function SidePane({
 /** 审查面板槽:懒加载(它带着 diff 逻辑,不必进首包)。 */
 const LazyReviewPanel = lazy(() => import('./ReviewPanel'))
 
-/** 工作区文件面板槽:同样懒加载(树只在真打开该标签时才需要)。 */
+/** 项目文件面板槽:同样懒加载(树只在真打开该标签时才需要)。 */
 const LazyFileTreePanel = lazy(() => import('./FileTreePanel'))
 
 /** 文件读取面板槽:同样懒加载。 */
 const LazyFileReaderPanel = lazy(() => import('./FileReaderPanel'))
 
 function FileTreeSlot({
-  workspacePath,
+  projectPath,
   sessionId,
   onOpenFile,
 }: {
-  workspacePath: string
+  projectPath: string
   sessionId: string | null
   onOpenFile: (path: string) => void
 }) {
   return (
     <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
       <LazyFileTreePanel
-        workspacePath={workspacePath}
+        projectPath={projectPath}
         sessionId={sessionId}
         onOpenFile={onOpenFile}
       />
@@ -552,13 +556,13 @@ function FileTreeSlot({
 }
 
 function FileReaderSlot({
-  workspacePath,
+  projectPath,
   files,
   activeFile,
   onActivate,
   onCloseFile,
 }: {
-  workspacePath: string
+  projectPath: string
   files: readonly OpenedFile[]
   activeFile: string | undefined
   onActivate: (path: string) => void
@@ -567,7 +571,7 @@ function FileReaderSlot({
   return (
     <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
       <LazyFileReaderPanel
-        workspacePath={workspacePath}
+        projectPath={projectPath}
         files={files}
         activeFile={activeFile}
         onActivate={onActivate}
@@ -578,17 +582,24 @@ function FileReaderSlot({
 }
 
 function ReviewSlot({
-  workspacePath,
+  projectPath,
+  projectDirs,
   sessionId,
   selection,
 }: {
-  workspacePath: string
+  projectPath: string
+  projectDirs?: readonly string[]
   sessionId: string | null
   selection: import('../types').ModelSelection | null
 }) {
   return (
     <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
-      <LazyReviewPanel workspacePath={workspacePath} sessionId={sessionId} selection={selection} />
+      <LazyReviewPanel
+        projectPath={projectPath}
+        {...(projectDirs ? { projectDirs: [...projectDirs] } : {})}
+        sessionId={sessionId}
+        selection={selection}
+      />
     </Suspense>
   )
 }

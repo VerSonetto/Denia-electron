@@ -343,7 +343,7 @@ export function modelLabel(provider: string, model: string): string {
 /**
  * 会话行的展示名。
  *
- * 标题缺省时退回工作区末段目录名(比"未命名会话"更能定位),两者都没有
+ * 标题缺省时退回项目末段目录名(比"未命名会话"更能定位),两者都没有
  * 才用 id 前 8 位 —— 至少能让两行不重名。
  */
 export function sessionLabel(row: {

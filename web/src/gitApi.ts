@@ -10,7 +10,7 @@ export interface GitEntry {
   path: string
   /** 索引区状态字符(`M`/`A`/`D`/`R`/`?`…)。 */
   indexStatus: string
-  /** 工作区状态字符。 */
+  /** 项目状态字符。 */
   worktreeStatus: string
   staged: boolean
   unstaged: boolean
@@ -97,17 +97,17 @@ export class GitApiError extends Error {
   }
 }
 
-export function fetchGitStatus(workspacePath: string): Promise<GitStatus> {
-  const query = new URLSearchParams({ path: workspacePath })
+export function fetchGitStatus(projectPath: string): Promise<GitStatus> {
+  const query = new URLSearchParams({ path: projectPath })
   return http<GitStatus>(`/api/git/status?${query.toString()}`)
 }
 
 export function fetchGitDiff(
-  workspacePath: string,
+  projectPath: string,
   file: string,
   source: GitSource,
 ): Promise<GitDiff> {
-  const query = new URLSearchParams({ path: workspacePath, file, source })
+  const query = new URLSearchParams({ path: projectPath, file, source })
   return http<GitDiff>(`/api/git/diff?${query.toString()}`)
 }
 
@@ -121,7 +121,7 @@ export interface GitSection {
 /**
  * 按来源过滤 + 分组。
  *
- * 一个文件可能同时"已暂存 + 又改了"(索引区与工作区状态都非空),
+ * 一个文件可能同时"已暂存 + 又改了"(索引区与项目状态都非空),
  * 所以它会同时出现在 staged 与 unstaged 两个分组里 —— 这与
  * `git status` 的短格式语义一致,不是重复。
  */
@@ -160,9 +160,9 @@ export interface CommitResult {
   summary: string
 }
 
-/** 提交工作区全部改动(含未跟踪文件,与面板展示范围一致)。 */
-export function commitChanges(workspacePath: string, message: string): Promise<CommitResult> {
-  return post<CommitResult>('/api/git/commit', { path: workspacePath, message })
+/** 提交项目全部改动(含未跟踪文件,与面板展示范围一致)。 */
+export function commitChanges(projectPath: string, message: string): Promise<CommitResult> {
+  return post<CommitResult>('/api/git/commit', { path: projectPath, message })
 }
 
 export interface PushResult {
@@ -173,8 +173,8 @@ export interface PushResult {
 }
 
 /** 推送到当前分支的 upstream。 */
-export function pushChanges(workspacePath: string): Promise<PushResult> {
-  return post<PushResult>('/api/git/push', { path: workspacePath })
+export function pushChanges(projectPath: string): Promise<PushResult> {
+  return post<PushResult>('/api/git/push', { path: projectPath })
 }
 
 export interface GenerateMessageOptions {
@@ -255,7 +255,7 @@ export function failureHint(code: string): string {
     case 'git/identity-missing':
       return '这是首次提交前的必要配置,配置一次即可长期生效。'
     case 'git/nothing-to-commit':
-      return '工作区干净时无需提交。'
+      return '项目干净时无需提交。'
     default:
       return ''
   }

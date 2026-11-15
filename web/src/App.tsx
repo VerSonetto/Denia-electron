@@ -13,15 +13,15 @@ import {
   addSessionLocal,
   bumpCatalogTick,
   deleteSessionAction,
-  deleteWorkspaceAction,
-  findWorkspaceBlank,
-  getActiveWorkspace,
+  deleteProjectAction,
+  findProjectBlank,
+  getActiveProject,
   markLocalBlank,
   notify,
   refreshList,
   setActiveId,
   setConnLost,
-  setPendingWsId,
+  setPendingProjectId,
   replaceRunningIds,
   setRunningStatus,
   clearCompacting,
@@ -33,7 +33,7 @@ import {
   useSessionsLoaded,
   useStartedIds,
   useToast,
-  useWorkspaces,
+  useProjects,
 } from './appStore'
 import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
@@ -81,9 +81,9 @@ import {
   IconSessionSearch,
   IconUsage,
 } from './components/icons'
-import { DirPicker } from './components/DirPicker'
+import { ProjectDialog } from './components/ProjectDialog'
 import { ConfirmDialog } from './components/ConfirmDialog'
-import { SidebarWorkspaces } from './components/sidebar/SidebarWorkspaces'
+import { SidebarProjects } from './components/sidebar/SidebarProjects'
 import { DesktopTitleBar } from './components/DesktopTitleBar'
 
 // 设置/浏览器面板按需加载,减少首屏主包体积。
@@ -95,7 +95,7 @@ const LazyExtensionsPage = lazy(() => import('./pages/ExtensionsPage'))
 const LazyVersionPage = lazy(() => import('./pages/VersionPage'))
 const LazyUsagePage = lazy(() => import('./pages/UsagePage'))
 const LazyUpdateDialog = lazy(() => import('./components/updates/UpdateDialog').then((module) => ({ default: module.UpdateDialog })))
-import type { SessionSummary, WorkspaceRecord } from './types'
+import type { ProjectRecord, SessionSummary } from './types'
 
 /**
  * 应用外壳:布局 + 全局事件订阅(SSE 推送)+ URL 导航 + 启动引导。
@@ -105,7 +105,7 @@ export type Notify = (kind: 'ok' | 'err', message: string) => void
 
 export default function App() {
   const sessions = useSessions()
-  const workspaces = useWorkspaces()
+  const projects = useProjects()
   const activeId = useActiveId()
   const startedIds = useStartedIds()
   const localBlankIds = useLocalBlankIds()
@@ -157,16 +157,23 @@ export default function App() {
     (sessionId) => visualRequestRef.current(sessionId),
   )
 
-  /* ---- 右侧面板(多标签工作区) ---- */
+  /* ---- 右侧面板(多标签项目) ---- */
 
-  // 面板归属:当前会话的工作区路径。会话头 cwd 不可变,所以直接取。
+  // 面板归属:当前会话的项目路径。会话头 cwd 不可变,所以直接取。
   const activeSessionForPane = activeId
     ? (sessions.find((s) => s.id === activeId) ?? null)
     : null
-  // 没有活跃会话(空白态)时退回"待发工作区":终端要有起点目录,
-  // 而用户在空白页也已经选好了工作区。
-  const paneWorkspacePath = activeSessionForPane?.cwd ?? getActiveWorkspace()?.path ?? null
-  const pane = useSidePaneController(activeId, paneWorkspacePath)
+  // 没有活跃会话(空白态)时退回"待发项目":终端要有起点目录,
+  // 而用户在空白页也已经选好了项目。
+  const paneProject =
+    (activeSessionForPane?.project_id
+      ? projects.find((project) => project.id === activeSessionForPane.project_id)
+      : undefined) ?? getActiveProject()
+  const paneProjectPath = activeSessionForPane?.cwd ?? paneProject?.dirs[0] ?? null
+  const paneProjectDirs =
+    paneProject?.dirs ??
+    (activeSessionForPane?.cwd ? [activeSessionForPane.cwd] : [])
+  const pane = useSidePaneController(activeId, paneProjectPath)
   const [planReview, setPlanReview] = useState<{ title?: string; planText: string } | null>(null)
 
   /**
@@ -230,15 +237,15 @@ export default function App() {
 
   /** 新建一个终端标签。 */
   const openTerminalTab = useCallback(() => {
-    pane.openPanel('terminal', { cwd: paneWorkspacePath ?? undefined })
-  }, [pane, paneWorkspacePath])
+    pane.openPanel('terminal', { cwd: paneProjectPath ?? undefined })
+  }, [pane, paneProjectPath])
 
   /**
    * 把 `pane.openFile` 注册给模块级入口：Markdown 链接渲染是纯函数
    * （见 `fileOpen.ts` 注释），拿不到 hook，只能走这条注册通道。
    *
-   * 依赖里带上 `pane.openFile`（它已按 sessionId/workspacePath 记忆），
-   * 切会话时会重新注册，指向新的工作区。
+   * 依赖里带上 `pane.openFile`（它已按 sessionId/projectPath 记忆），
+   * 切会话时会重新注册，指向新的项目。
    */
   useEffect(() => registerOpenFile(pane.openFile), [pane.openFile])
 
@@ -246,12 +253,12 @@ export default function App() {
    * 收尾变更卡片的「查看变更」:打开审查面板,并把本轮改动交给它。
    *
    * 走 `pane.openPanel('review')` 而不是新建标签 —— 审查是单例面板,里面
-   * 已经有工作区的全部改动与逐文件 diff,本轮文件是它们的子集,再开一个
+   * 已经有项目的全部改动与逐文件 diff,本轮文件是它们的子集,再开一个
    * 面板只会让人对不上"哪份是权威"。
    *
    * 本轮文件另存到 `turnChangesStore`(内存态,不进 localStorage):审查
    * 面板据此多出一个**不依赖 git** 的来源。理由是审查面板的其余来源全
-   * 走 `git status`/`git diff`,工作区不是仓库时它们只有空态 —— 那时
+   * 走 `git status`/`git diff`,项目不是仓库时它们只有空态 —— 那时
    * 本轮这张卡就是唯一还讲得清"改了什么"的地方,却会因为点开的是空面板
    * 而白做。点文件行进来时额外传 focusPath,面板定位到该文件。
    */
@@ -383,10 +390,8 @@ export default function App() {
   const hashRestoredRef = useRef(false)
   const firstRenderRef = useRef(true)
 
-  // 目录流:capability 决定 native 还是 browse。
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [, setPicking] = useState(false)
-  const capabilityRef = useRef<'native' | 'browse'>('native')
+  // 创建项目弹窗:名称 + 任意数量的目录。
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
 
   useEffect(() => {
     ensureStartupUpdateCheck()
@@ -406,15 +411,6 @@ export default function App() {
           normalizeConversationFoldMode(console?.value.conversationFoldMode),
         )
         bumpCatalogTick()
-      })
-      .catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    api
-      .pickerCapability()
-      .then((cap) => {
-        capabilityRef.current = cap.kind === 'browse' ? 'browse' : 'native'
       })
       .catch(() => {})
   }, [])
@@ -539,7 +535,7 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [sessions])
 
-  /* ---- 会话/工作区派生 ---- */
+  /* ---- 会话/项目派生 ---- */
 
   const activeSession = activeId
     ? (sessions.find((s) => s.id === activeId) ?? null)
@@ -550,7 +546,7 @@ export default function App() {
     [startedIds],
   )
 
-  // 首条消息后(或已有历史)会话与工作区绑定,不能换。分屏副窗格按它
+  // 首条消息后(或已有历史)会话与项目绑定,不能换。分屏副窗格按它
   // 自己的会话判定(不能借用主会话的状态)。
   const lockedFor = useCallback(
     (id: string) => {
@@ -561,42 +557,42 @@ export default function App() {
   )
   const locked = activeSession !== null && lockedFor(activeSession.id)
 
-  const focusSession = useCallback((sessionId: string, wsId?: string) => {
-    setActiveId(sessionId, wsId ?? null)
+  const focusSession = useCallback((sessionId: string, projectId?: string) => {
+    setActiveId(sessionId, projectId ?? null)
   }, [])
 
   /* ---- 启动自动导航 ---- */
 
-  const recentWorkspace = useCallback((): WorkspaceRecord | null => {
-    let best: WorkspaceRecord | null = null
+  const recentProject = useCallback((): ProjectRecord | null => {
+    let best: ProjectRecord | null = null
     let bestTime = -1
-    for (const ws of workspaces) {
+    for (const project of projects) {
       const memberTime = Math.max(
-        ws.createdAt,
+        project.createdAt,
         ...sessions
-          .filter((s) => s.cwd === ws.path)
-          .map((s) => s.created_at),
+          .filter((session) => session.project_id === project.id)
+          .map((session) => session.created_at),
       )
       if (memberTime > bestTime) {
         bestTime = memberTime
-        best = ws
+        best = project
       }
     }
     return best
-  }, [workspaces, sessions])
+  }, [projects, sessions])
 
-  const connectWorkspace = useCallback(
-    (ws: WorkspaceRecord) => {
-      if (activeSession && activeSession.cwd === ws.path) {
-        setPendingWsId(ws.id)
+  const connectProject = useCallback(
+    (project: ProjectRecord) => {
+      if (activeSession && activeSession.project_id === project.id) {
+        setPendingProjectId(project.id)
         return
       }
-      const blank = findWorkspaceBlank(ws.path)
+      const blank = findProjectBlank(project.id)
       if (blank) {
-        focusSession(blank.id, ws.id)
+        focusSession(blank.id, project.id)
         return
       }
-      setActiveId(null, ws.id)
+      setActiveId(null, project.id)
     },
     [activeSession, focusSession],
   )
@@ -605,18 +601,18 @@ export default function App() {
   useEffect(() => {
     if (bootedRef.current || activeId) return
     if (!hashSettled) return
-    if (workspaces.length === 0) return
+    if (projects.length === 0) return
     bootedRef.current = true
-    const recent = recentWorkspace()
-    if (recent) connectWorkspace(recent)
-  }, [workspaces, activeId, hashSettled, recentWorkspace, connectWorkspace])
+    const recent = recentProject()
+    if (recent) connectProject(recent)
+  }, [projects, activeId, hashSettled, recentProject, connectProject])
 
   /* ---- 空白会话不保留:仅清理本页面自己创建的空白会话 ---- */
 
   // 清理作用域必须是 `localBlankIds`(本页面创建的会话),绝不能按"全局列表
   // 里非活跃即空白"去扫:会话列表是跨页面/跨实例共享的(正式与开发实例还
   // 共用同一份数据目录),那样会把别的标签页刚创建、正在使用的会话当垃圾删掉,
-  // 表现为"新建会话没选中工作区 + 发不出消息 + 列表里看不到新会话",以及
+  // 表现为"新建会话没选中项目 + 发不出消息 + 列表里看不到新会话",以及
   // 发消息时报 `session not found`。浏览器直接关闭留下的残留空白,由后端
   // 启动时一次性清扫(见 SessionStore::sweep_stale_blanks)。
   const prevActiveIdRef = useRef<string | null>(null)
@@ -640,23 +636,25 @@ export default function App() {
   /* ---- 显式"新建会话" ---- */
 
   const startSession = useCallback(
-    async (targetWsId?: string) => {
+    async (targetProjectId?: string) => {
       leaveExtensions()
-      const activeWs = getActiveWorkspace()
+      const activeProject = getActiveProject()
       const target =
-        workspaces.find((w) => w.id === targetWsId) ??
+        projects.find((project) => project.id === targetProjectId) ??
         (activeSession
-          ? workspaces.find((w) => w.path === activeSession.cwd) ?? null
-          : activeWs) ??
-        recentWorkspace()
+          ? projects.find((project) => project.id === activeSession.project_id) ?? null
+          : activeProject) ??
+        recentProject() ??
+        projects.find((project) => project.builtin === 'default') ??
+        null
       if (!target) {
         setActiveId(null, null)
         return
       }
       // 侧栏"新建会话"总是创建全新会话,不复用空白(空白由"离开即删"
-      // 与"非活跃清扫"自动清理,不会堆积)。
+      // 与非活跃清扫自动清理,不会堆积)。
       try {
-        const { session } = await api.createSession({ workspaceId: target.id })
+        const { session } = await api.createSession({ projectId: target.id })
         const summary: SessionSummary = {
           id: session.id,
           created_at: session.created_at,
@@ -666,6 +664,7 @@ export default function App() {
           cwd: session.cwd,
           sandbox: session.sandbox,
           cwd_alive: true,
+          project_id: session.project_id,
         }
         addSessionLocal(summary, target.id)
         // 登记为本页面创建的空白会话:只有它允许被本页面的"切走即删"清理。
@@ -678,45 +677,19 @@ export default function App() {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [workspaces, activeSession, recentWorkspace, leaveExtensions],
+    [projects, activeSession, recentProject, leaveExtensions],
   )
 
-  /* ---- 目录流入口 ---- */
+  /* ---- 创建项目 ---- */
 
-  const openDirectoryFlow = useCallback(() => {
-    if (capabilityRef.current === 'native') {
-      setPicking(true)
-      api
-        .pickDirectory()
-        .then(async ({ path }) => {
-          setPicking(false)
-          if (!path) return
-          try {
-            const { workspace } = await api.createWorkspace(path)
-            void refreshList()
-            connectWorkspace(workspace)
-            notify('ok', t('workspaceAdded'))
-          } catch (error) {
-            notify('err', `${t('folderError')}:${error instanceof Error ? error.message : error}`)
-          }
-        })
-        .catch((error) => {
-          setPicking(false)
-          notify('err', `${t('folderError')}:${error instanceof Error ? error.message : error}`)
-        })
-    } else {
-      setPickerOpen(true)
-    }
-  }, [connectWorkspace])
-
-  const adoptFromBrowse = useCallback(
-    async (path: string) => {
-      const { workspace } = await api.createWorkspace(path)
-      void refreshList()
-      connectWorkspace(workspace)
-      notify('ok', t('workspaceAdded'))
+  const createProject = useCallback(
+    async (input: { title?: string; dirs: string[] }) => {
+      const { project } = await api.createProject(input)
+      await refreshList()
+      connectProject(project)
+      notify('ok', t('projectCreated'))
     },
-    [connectWorkspace],
+    [connectProject],
   )
 
   /* ---- 删除(自定义确认框,替代 window.confirm) ---- */
@@ -728,15 +701,18 @@ export default function App() {
     onConfirm: () => void
   } | null>(null)
 
-  const deleteWorkspace = useCallback(
-    (ws: WorkspaceRecord) => {
-      // 工作区删除会级联删掉它的全部会话,所以它们的面板桶与终端
+  const deleteProject = useCallback(
+    (project: ProjectRecord) => {
+      // 项目删除会级联删掉它的全部会话,所以它们的面板桶与终端
       // 进程也要一起收掉 —— 只删服务端数据会留下跑着的 PTY。
-      const doomed = sessions.filter((s) => s.cwd === ws.path).map((s) => s.id)
-      void deleteWorkspaceAction(ws.id)
+      const doomed = sessions
+        .filter((session) =>
+          session.project_id === project.id || project.sessionIds.includes(session.id))
+        .map((session) => session.id)
+      void deleteProjectAction(project.id)
         .then(() => {
           for (const id of doomed) cleanupSessionPane(id)
-          notify('ok', t('workspaceDeleted'))
+          notify('ok', t('projectDeleted'))
         })
         .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
     },
@@ -755,31 +731,6 @@ export default function App() {
       })
       .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
   }, [cleanupSessionPane])
-
-  const deleteUngrouped = useCallback(
-    (items: SessionSummary[]) => {
-      if (items.length === 0) return
-      setConfirmReq({
-        title: t('confirmDeleteUngrouped'),
-        desc: t('confirmDeleteUngroupedDesc', { n: items.length }),
-        danger: true,
-        onConfirm: () => {
-          void (async () => {
-            for (const session of items) {
-              if (runningIds[session.id]) {
-                throw new Error(t('sessionRunningDelete'))
-              }
-              await deleteSessionAction(session.id)
-              cleanupSessionPane(session.id)
-            }
-          })()
-            .then(() => notify('ok', t('sessionDeleted')))
-            .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
-        },
-      })
-    },
-    [runningIds, cleanupSessionPane],
-  )
 
   /* ---- 分屏:拖动侧栏会话到会话窗口 ---- */
 
@@ -800,34 +751,33 @@ export default function App() {
     keySplitDrag,
     focusPane,
     navigateSecondary,
-  } = useSplitView({ activeId, sessions, sessionsLoaded, workspaces, isMobile, extensionTab })
+  } = useSplitView({ activeId, sessions, sessionsLoaded, projects, isMobile, extensionTab })
 
   const openSession = useCallback(
-    (id: string, wsId?: string) => {
+    (id: string, projectId?: string) => {
       setVersionOpen(false)
       setExtensionTab(null)
       // 手机上选中会话后自动收起抽屉 —— 否则用户点完还得再点一次遮罩
       // 才能看到刚打开的对话。
       setDrawerOpen(false)
-      applySplitView(openSessionInView({ primaryId: activeId, split }, id), wsId ?? null)
+      applySplitView(openSessionInView({ primaryId: activeId, split }, id), projectId ?? null)
     },
     [activeId, split, applySplitView],
   )
 
   /* ---- 会话窗格渲染 ---- */
 
-  /** 主窗格的工作区切换(发消息前可切;已发消息后锁定)。 */
-  const selectWorkspaceForPane = (ws: WorkspaceRecord) => {
+  /** 主窗格的项目切换(发消息前可切;已发消息后锁定)。 */
+  const selectProjectForPane = (project: ProjectRecord) => {
     if (locked) {
-      notify('err', t('lockedWorkspace'))
+      notify('err', t('lockedProject'))
       return
     }
-    connectWorkspace(ws)
+    connectProject(project)
   }
 
-  const openWorkspacePicker = () => {
-    if (workspaces.length === 0) openDirectoryFlow()
-    else setPickerOpen(true)
+  const openProjectPicker = () => {
+    if (projects.length === 0) setProjectDialogOpen(true)
   }
 
   // 计划正文进入右侧工作台；分屏或手机放不下两列时，仍由会话页本地预览。
@@ -865,9 +815,9 @@ export default function App() {
       activeId={activeId}
       locked={locked}
       hasStarted={activeId ? !!startedIds[activeId] : false}
-      onSelectWorkspace={selectWorkspaceForPane}
-      onOpenPicker={openWorkspacePicker}
-      onAddWorkspace={openDirectoryFlow}
+      onSelectProject={selectProjectForPane}
+      onOpenPicker={openProjectPicker}
+      onAddProject={() => setProjectDialogOpen(true)}
       sidePaneOpen={!pane.collapsed}
       onToggleSidePane={isMobile ? undefined : toggleSidePane}
       planPreviewInPane={!isMobile && !splitActive}
@@ -875,7 +825,7 @@ export default function App() {
     />
   )
 
-  /** 分屏窗格:副窗格不渲染工作区入口,会话切换约束在本窗格内。 */
+  /** 分屏窗格:副窗格不渲染项目入口,会话切换约束在本窗格内。 */
   const renderSplitPane = (slot: PaneSlot) => {
     const id = slot === 'primary' ? activeId : split?.secondaryId ?? null
     if (id === null) return null
@@ -894,9 +844,9 @@ export default function App() {
           activeId={id}
           locked={lockedFor(id)}
           hasStarted={!!startedIds[id]}
-          onSelectWorkspace={selectWorkspaceForPane}
-          onOpenPicker={openWorkspacePicker}
-          onAddWorkspace={openDirectoryFlow}
+          onSelectProject={selectProjectForPane}
+          onOpenPicker={openProjectPicker}
+          onAddProject={() => setProjectDialogOpen(true)}
           sidePaneOpen={false}
           secondary={slot === 'secondary'}
           navigate={slot === 'secondary' ? navigateSecondary : undefined}
@@ -975,7 +925,7 @@ export default function App() {
             </nav>
             <div className="sidebar-region">
               <div className="sidebar-region-head">
-                <span className="label">{t('workspacesTitle')}</span>
+                <span className="label">{t('projectsTitle')}</span>
                 <div className="sidebar-region-actions">
                   <button
                     type="button"
@@ -990,8 +940,8 @@ export default function App() {
                   <button
                     type="button"
                     className="icon-btn"
-                    title={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
-                    aria-label={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
+                    title={sidebarAllExpanded ? t('collapseAllProjects') : t('expandAllProjects')}
+                    aria-label={sidebarAllExpanded ? t('collapseAllProjects') : t('expandAllProjects')}
                     onClick={() => setSidebarExpandAllTick((tick) => tick + 1)}
                   >
                     {sidebarAllExpanded ? <IconCollapseAll size={14} /> : <IconExpandAll size={14} />}
@@ -999,17 +949,17 @@ export default function App() {
                   <button
                     type="button"
                     className="icon-btn"
-                    title={t('addWorkspace')}
-                    aria-label={t('addWorkspace')}
-                    onClick={openDirectoryFlow}
+                    title={t('addProject')}
+                    aria-label={t('addProject')}
+                    onClick={() => setProjectDialogOpen(true)}
                   >
                     <IconFolderPlus size={14} />
                   </button>
                 </div>
               </div>
-              <SidebarWorkspaces
+              <SidebarProjects
                 sessions={sessions}
-                workspaces={workspaces}
+                projects={projects}
                 activeId={extensionTab || versionOpen || usageOpen ? null : activeId}
                 secondaryId={extensionTab || versionOpen || usageOpen ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
@@ -1018,10 +968,9 @@ export default function App() {
                 expandAllTick={sidebarExpandAllTick}
                 onAllExpandedChange={setSidebarAllExpanded}
                 onOpenSession={openSession}
-                onNewSession={(wsId) => void startSession(wsId)}
-                onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
+                onNewSession={(projectId) => void startSession(projectId)}
+                onDeleteProject={(project) => void deleteProject(project)}
                 onDeleteSession={(session) => void deleteSession(session)}
-                onDeleteUngrouped={(items) => void deleteUngrouped(items)}
               />
             </div>
             <nav className="sidebar-foot" aria-label={t('navSettings')}>
@@ -1073,9 +1022,9 @@ export default function App() {
             <button
               type="button"
               className="rail-btn"
-              title={t('addWorkspace')}
-              aria-label={t('addWorkspace')}
-              onClick={openDirectoryFlow}
+              title={t('addProject')}
+              aria-label={t('addProject')}
+              onClick={() => setProjectDialogOpen(true)}
             >
               <IconFolderPlus size={16} />
             </button>
@@ -1142,7 +1091,7 @@ export default function App() {
               </Suspense>
             ) : extensionTab ? (
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
-                <LazyExtensionsPage tab={extensionTab} cwd={paneWorkspacePath ?? undefined} onTabChange={openExtensions} notify={notify} />
+                <LazyExtensionsPage tab={extensionTab} cwd={paneProjectPath ?? undefined} onTabChange={openExtensions} notify={notify} />
               </Suspense>
             ) : splitActive && split ? (
               <div
@@ -1194,7 +1143,8 @@ export default function App() {
             sessionId={activeId}
             state={pane.state}
             collapsed={pane.collapsed || splitActive}
-            workspacePath={paneWorkspacePath}
+            projectPath={paneProjectPath}
+            projectDirs={paneProjectDirs}
             supportsBrowser={true}
             modelSelection={modelSelection}
             recentClosed={pane.recentClosed}
@@ -1220,7 +1170,7 @@ export default function App() {
               <TerminalHost
                 tabs={tabs}
                 activeId={activeId2}
-                cwd={paneWorkspacePath ?? ''}
+                cwd={paneProjectPath ?? ''}
                 paneVisible={paneVisible}
                 onTitle={handleTerminalTitle}
                 onExit={handleTerminalExit}
@@ -1254,11 +1204,11 @@ export default function App() {
           <LazyUpdateDialog onOpenVersion={openVersion} />
         </Suspense>
       )}
-      {pickerOpen && (
-        <DirPicker
-          onPick={adoptFromBrowse}
-          onClose={() => setPickerOpen(false)}
-          onError={(message) => notify('err', `${t('folderError')}:${message}`)}
+      {projectDialogOpen && (
+        <ProjectDialog
+          onCreate={createProject}
+          onClose={() => setProjectDialogOpen(false)}
+          onError={(message) => notify('err', message)}
         />
       )}
       {connLost && <div className="conn-lost">{t('connectionLost')}</div>}

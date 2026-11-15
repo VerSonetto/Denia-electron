@@ -5,7 +5,7 @@ const PINS_KEY = 'denia.sidebar-pins.v1'
 
 /** 侧栏手动排序账本:目前只保留项目顺序;任务顺序由活跃度/更新时间决定。 */
 export interface SidebarOrder {
-  workspaces: string[]
+  projects: string[]
 }
 
 /** 侧栏主视图:按项目,或按最近更新平铺。 */
@@ -13,7 +13,7 @@ export type SidebarView = 'projects' | 'timeline'
 
 /** 置顶账本:项目与会话各一份 id 列表,顺序不影响显示(显示按当前排序)。 */
 export interface SidebarPins {
-  workspaces: string[]
+  projects: string[]
   sessions: string[]
 }
 
@@ -47,18 +47,20 @@ export function readSidebarOrder(): SidebarOrder {
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(ORDER_KEY) ?? 'null')
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return { workspaces: [] }
+      return { projects: [] }
     }
-    return { workspaces: readIdList((value as Record<string, unknown>).workspaces) }
+    const doc = value as Record<string, unknown>
+    // `workspaces` is the pre-project preference shape.
+    return { projects: readIdList(doc.projects ?? doc.workspaces) }
   } catch {
-    return { workspaces: [] }
+    return { projects: [] }
   }
 }
 
 export function writeSidebarOrder(value: SidebarOrder): void {
   try {
     window.localStorage.setItem(ORDER_KEY, JSON.stringify({
-      workspaces: value.workspaces,
+      projects: value.projects,
     }))
   } catch {
     // 写入失败只影响刷新后的顺序,本次页面内的拖动结果仍然生效。
@@ -88,22 +90,22 @@ export function readSidebarPins(): SidebarPins {
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(PINS_KEY) ?? 'null')
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      return { workspaces: [], sessions: [] }
+      return { projects: [], sessions: [] }
     }
     const doc = value as Record<string, unknown>
     return {
-      workspaces: readIdList(doc.workspaces),
+      projects: readIdList(doc.projects ?? doc.workspaces),
       sessions: readIdList(doc.sessions),
     }
   } catch {
-    return { workspaces: [], sessions: [] }
+    return { projects: [], sessions: [] }
   }
 }
 
 export function writeSidebarPins(value: SidebarPins): void {
   try {
     window.localStorage.setItem(PINS_KEY, JSON.stringify({
-      workspaces: value.workspaces,
+      projects: value.projects,
       sessions: value.sessions,
     }))
   } catch {

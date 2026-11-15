@@ -1,6 +1,6 @@
-/* ---------- workspace selector ---------- */
+/* ---------- project selector ---------- */
 
-.composer-workspace {
+.composer-project {
   position: relative;
   display: flex;
   align-items: center;
@@ -9,7 +9,7 @@
   flex: 1;
 }
 
-.ws-chip {
+.project-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -27,12 +27,12 @@
   transition: background 0.15s var(--ease);
 }
 
-.ws-chip:hover,
-.ws-chip.open {
+.project-chip:hover,
+.project-chip.open {
   background: var(--hover-fill);
 }
 
-.ws-chip .label {
+.project-chip .label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -41,7 +41,7 @@
   font-size: 12px;
 }
 
-.ws-chip .label.dim {
+.project-chip .label.dim {
   color: var(--label-caption);
   font-family: var(--font-ui);
 }
@@ -52,7 +52,7 @@
   z-index: 40;
 }
 
-.ws-menu {
+.project-menu {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
@@ -71,11 +71,11 @@
   overflow-y: auto;
 }
 
-.hero-ws-row .ws-menu {
+.hero-project-row .project-menu {
   top: calc(100% + 4px);
 }
 
-.ws-menu-item {
+.project-menu-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -90,22 +90,22 @@
   min-width: 0;
 }
 
-.ws-menu-item:hover {
+.project-menu-item:hover {
   background: var(--hover-fill);
   color: var(--label-primary);
 }
 
-.ws-menu-item:disabled {
+.project-menu-item:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.ws-menu-item.active {
+.project-menu-item.active {
   background: var(--active-fill);
   color: var(--label-primary);
 }
 
-.ws-menu-text {
+.project-menu-text {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -113,7 +113,7 @@
   gap: 3px;
 }
 
-.ws-menu-path {
+.project-menu-path {
   color: var(--label-caption);
   font-size: 11px;
   overflow: hidden;
@@ -121,7 +121,7 @@
   text-overflow: ellipsis;
 }
 
-.ws-menu-item .name {
+.project-menu-item .name {
   font-weight: 600;
   max-width: 100%;
   white-space: nowrap;
@@ -129,12 +129,12 @@
   text-overflow: ellipsis;
 }
 
-.ws-menu-item.create {
+.project-menu-item.create {
   color: var(--label-primary);
   font-weight: 600;
 }
 
-/* 未选工作区:整张卡是"选一个工作区"的点击靶。虚线轮廓是唯一的例外 ——
+/* 未选项目:整张卡是"选一个项目"的点击靶。虚线轮廓是唯一的例外 ——
    卡片本身不画边框,这道虚线用 outline 画(不占盒模型,不影响 22px 圆角),
    因为虚线没法用 box-shadow 表达。 */
 .prompt-panel.pick-target {
@@ -324,7 +324,7 @@
  * 皮肤「幽灵 ghost」:无底无框,识别交给图标(提亮到 secondary 当锚点)+ mono
  * 名字,让卡片几乎融进正文;hover 才浮出淡底,补上「这是一个可删除的实体」
  * 的边界感。对比旧灰胶囊:视觉噪声最低,长句阅读最顺,也不再和 @ 提及
- * 菜单、工作区胶囊撞脸。
+ * 菜单、项目胶囊撞脸。
  *
  * 对齐口径:胶囊的几何中心 == 同行文字的视觉中心。
  * 推导:卡片高度取一行行高(`1lh`,即 .prompt-editor 的 line-height),

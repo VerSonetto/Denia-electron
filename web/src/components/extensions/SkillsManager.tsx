@@ -135,7 +135,7 @@ export function SkillsManager({ cwd }: { cwd?: string }) {
     <label className={styles.field}>保存位置
       <select value={value} disabled={busy} onChange={(event) => onChange(event.target.value as SkillScope)}>
         <option value="user">用户技能 · 所有项目可用</option>
-        <option value="project" disabled={!cwd}>项目技能{cwd ? ' · 当前工作区' : ' · 请先选择工作区'}</option>
+        <option value="project" disabled={!cwd}>项目技能{cwd ? ' · 当前项目' : ' · 请先选择项目'}</option>
       </select>
     </label>
   )

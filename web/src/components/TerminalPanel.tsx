@@ -77,7 +77,7 @@ const clampCols = (value: number) => Math.max(2, Math.min(1000, Math.round(value
 const clampRows = (value: number) => Math.max(1, Math.min(500, Math.round(value)))
 
 export interface TerminalPanelProps {
-  /** 工作目录(会话 cwd;空白态用工作区路径)。 */
+  /** 工作目录(会话 cwd;空白态用项目路径)。 */
   cwd: string
   /** 面板当前是否可见:不可见时不同步尺寸(尺寸为 0 会把 PTY 压成 1 列)。 */
   visible: boolean

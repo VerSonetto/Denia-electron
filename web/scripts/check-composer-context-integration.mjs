@@ -19,9 +19,9 @@ import { JSDOM } from 'jsdom'
 const web = fileURLToPath(new URL('..', import.meta.url))
 const src = join(web, 'src')
 const bridgeKey = '__deniaComposerContextIntegration'
-const workspace = { id: 'ws-test', title: 'Integration workspace', path: 'D:/mock-workspace', created_at: 1 }
-const active = { id: 'active-test', title: 'Current conversation', cwd: workspace.path, cwd_alive: true, excerpt: 'Existing dialogue', created_at: 1 }
-const source = { id: 'source-test', title: 'Reference conversation', cwd: 'd:\\MOCK-WORKSPACE\\', cwd_alive: true, excerpt: 'Not the quoted body', created_at: 2 }
+const project = { id: 'project-test', title: 'Integration project', dirs: ['D:/mock-project'], createdAt: 1, sessionIds: [] }
+const active = { id: 'active-test', title: 'Current conversation', cwd: project.dirs[0], project_id: project.id, cwd_alive: true, excerpt: 'Existing dialogue', created_at: 1 }
+const source = { id: 'source-test', title: 'Reference conversation', cwd: 'd:\\MOCK-PROJECT\\', cwd_alive: true, excerpt: 'Not the quoted body', created_at: 2 }
 const sourceTwo = { ...source, id: 'source-two', title: 'Second reference' }
 const envelope = (seq, data) => ({ seq, time: seq, ...data })
 const recentEvents = [
@@ -41,7 +41,7 @@ const recentEvents = [
 const bridge = {
   calls: [], notifications: [], networkAttempts: [], execCalls: [], pickerClicks: [], queue: [],
   listeners: new Set(), memory: new Map(),
-  snapshot: { sessions: [], workspaces: [workspace], activeWs: workspace, activeId: null, running: false },
+  snapshot: { sessions: [], projects: [project], activeProject: project, activeId: null, running: false },
   postFailures: 0,
   pages: new Map(),
   record(name, args) { this.calls.push({ name, args }) },
@@ -55,7 +55,7 @@ const bridge = {
     this.memory.clear()
     this.pages = new Map([[source.id, { events: recentEvents, hasMoreBefore: true }],
       [sourceTwo.id, { events: [envelope(401, { type: 'user-message', text: 'Independent second question' })], hasMoreBefore: false }]])
-    this.snapshot = { sessions: [active, source, sourceTwo], workspaces: [workspace], activeWs: workspace,
+    this.snapshot = { sessions: [active, source, sourceTwo], projects: [project], activeProject: project,
       activeId: null, running: false, ...overrides }
   },
 }
@@ -83,11 +83,11 @@ const stubs = new Map([
     export async function getGoal(...args) { b.record('getGoal', args); return { goal: null, tokensUsed: 0, maxRounds: 10 }; }
     export async function pickFiles(...args) {
       b.record('pickFiles', args);
-      return { paths: ['D:/mock-workspace/docs/context.txt'] };
+      return { paths: ['D:/mock-project/docs/context.txt'] };
     }
     export async function searchMentions(...args) {
       b.record('searchMentions', args);
-      if (args[0] !== 'D:/mock-workspace' || !args[2] || args[2].aborted) throw new Error('Unexpected mention scope/signal');
+      if (args[0] !== 'D:/mock-project' || !args[2] || args[2].aborted) throw new Error('Unexpected mention scope/signal');
       return { items: [{ path: 'src/context file.ts', kind: 'file' }] };
     }
     export async function getSessionPage(...args) {
@@ -120,11 +120,11 @@ const stubs = new Map([
     const snapshot = () => b.snapshot;
     const useStore = () => useSyncExternalStore(subscribe, snapshot, snapshot);
     export const useSessions = () => useStore().sessions;
-    export const useWorkspaces = () => useStore().workspaces;
+    export const useProjects = () => useStore().projects;
     export const useCatalogTick = () => 0;
     export const useCompactingFor = () => null;
     export const useRunningFor = id => { const s = useStore(); return !!id && s.running; };
-    export const getActiveWorkspace = () => b.snapshot.activeWs;
+    export const getActiveProject = () => b.snapshot.activeProject;
     export async function ensureSession(ws, ...options) { b.record('ensureSession', [ws, ...options]); return b.snapshot.activeId ?? (ws ? 'mock-new-session' : null); }
     export function notify(...args) { b.notifications.push(args); }
     export function subscribeRunningStatus() { return () => {}; }
@@ -133,7 +133,7 @@ const stubs = new Map([
       b.record('setActiveId', args);
       const id = args[0];
       const sessions = b.snapshot.sessions.some(session => session.id === id) ? b.snapshot.sessions
-        : [...b.snapshot.sessions, { id, title: 'Created conversation', cwd: b.snapshot.activeWs?.path, cwd_alive: true, created_at: 3 }];
+        : [...b.snapshot.sessions, { id, title: 'Created conversation', cwd: b.snapshot.activeProject?.dirs?.[0], cwd_alive: true, created_at: 3 }];
       b.publish({ activeId: id, sessions });
     }
     export function markStarted(...args) { b.record('markStarted', args); }
@@ -291,7 +291,7 @@ async function chooseSession(id = source.id) {
   await click(row('session', 'data-context-session', id))
   await waitFor(() => chip() && !menu(), 'Session handler must create a quote chip and close the menu')
 }
-async function attachFile(name = 'context.txt', path = 'D:/mock-workspace/docs/context.txt') {
+async function attachFile(name = 'context.txt', path = 'D:/mock-project/docs/context.txt') {
   // 附件不再经隐藏 file input：页面直接调后端原生选择器，只拿绝对路径。
   bridge.pickerClicks.push({ viaNativeDialog: true, menuWasOpen: !!menu() })
   await onUploadFromMenu()
@@ -338,7 +338,7 @@ async function onUploadFromMenu() {
 }
 let root
 let pickerRequests = 0
-let selectedWorkspaces = []
+let selectedProjects = []
 function Harness() {
   const snapshot = React.useSyncExternalStore(listener => {
     bridge.listeners.add(listener)
@@ -347,13 +347,13 @@ function Harness() {
   return H(SessionsPage, {
     key: snapshot.activeId ?? 'draft',
     activeId: snapshot.activeId, locked: false, hasStarted: Boolean(snapshot.activeId),
-    onSelectWorkspace: ws => { selectedWorkspaces.push(ws); bridge.publish({ activeWs: ws }) },
-    onOpenPicker: () => { pickerRequests++ }, onAddWorkspace: () => { throw new Error('Unexpected workspace creation') },
+    onSelectProject: ws => { selectedProjects.push(ws); bridge.publish({ activeProject: ws }) },
+    onOpenPicker: () => { pickerRequests++ }, onAddProject: () => { throw new Error('Unexpected project creation') },
   })
 }
 async function mount(overrides = {}) {
   bridge.reset(overrides)
-  pickerRequests = 0; selectedWorkspaces = []
+  pickerRequests = 0; selectedProjects = []
   window.localStorage.clear(); window.sessionStorage.clear()
   root = createRoot(document.getElementById('root'))
   await act(async () => root.render(H(Harness)))
@@ -367,7 +367,7 @@ async function unmount() {
 }
 const expectedTitle = summary => `Session reference: ${summary.title}`
 function expectedQuote(summary = source) {
-  const metadata = `${expectedTitle(summary)}\nSession: ${summary.id}\nWorkspace: ${summary.cwd}\n\n`
+  const metadata = `${expectedTitle(summary)}\nSession: ${summary.id}\nProject: ${summary.cwd}\n\n`
   return {
     id: `session:${summary.id}`, title: expectedTitle(summary),
     text: metadata + (summary.id === source.id
@@ -475,19 +475,19 @@ try {
     })
   }
 
-  await test('3 新会话实际选择工作区后文件搜索/插入可用，无需创建会话', async () => {
-    await mount({ activeWs: null })
+  await test('3 新会话实际选择项目后文件搜索/插入可用，无需创建会话', async () => {
+    await mount({ activeProject: null })
     assert.equal(trigger().disabled, true)
     assert.equal(editor().getAttribute('contenteditable'), 'false')
     assert.equal(calls('searchMentions').length, 0)
-    await click(document.querySelector('.ws-chip'))
-    await click(document.querySelector('.ws-menu-item:not(.create)'))
-    assert.deepEqual(selectedWorkspaces, [workspace])
+    await click(document.querySelector('.project-chip'))
+    await click(document.querySelector('.project-menu-item:not(.create)'))
+    assert.deepEqual(selectedProjects, [project])
     assert.equal(trigger().disabled, false)
     assert.equal(editor().getAttribute('contenteditable'), 'true')
     await openMenu()
-    await waitFor(() => row('file'), 'New draft files must work after choosing a workspace')
-    assert.deepEqual(calls('searchMentions').map(call => call.args.slice(0, 2)), [[workspace.path, '']])
+    await waitFor(() => row('file'), 'New draft files must work after choosing a project')
+    assert.deepEqual(calls('searchMentions').map(call => call.args.slice(0, 2)), [[project.dirs[0], '']])
     await click(row('file'))
     assert.equal(editorApi.serializeEditor(editor()), '@"src/context file.ts" ')
     assert.equal(calls('ensureSession').length, 0)
@@ -525,7 +525,7 @@ try {
     assert.deepEqual(calls('postPrompt')[0].args[1].images, [])
     assert.deepEqual(calls('postPrompt')[0].args[1].files, [])
     assert.ok(chip(), 'Failure must preserve the quote chip after activating the created session')
-    assert.deepEqual(bridge.memory.get(`workspace:${workspace.path}`), { text: '', images: [], attachments: [], quotes: [], queue: [] }, 'Migration clears the old workspace snapshot without cleanup resurrecting it')
+    assert.deepEqual(bridge.memory.get(`project:${project.id}`), { text: '', images: [], attachments: [], quotes: [], queue: [] }, 'Migration clears the old project snapshot without cleanup resurrecting it')
     assert.deepEqual(bridge.memory.get('session:mock-new-session').quotes, [expectedQuote()], 'Failed first send persists the quote in the created session')
     assert.equal(editorApi.serializeEditor(editor()), '')
     assert.equal(sendButton().disabled, false)
@@ -534,7 +534,7 @@ try {
     await click(sendButton())
     assert.equal(calls('postPrompt').length, 2)
     assert.deepEqual(calls('postPrompt')[1].args, calls('postPrompt')[0].args)
-    assert.deepEqual(calls('ensureSession').map(call => call.args), [[workspace, false]], 'Retry uses the newly activated session with restored draft')
+    assert.deepEqual(calls('ensureSession').map(call => call.args), [[project, false]], 'Retry uses the newly activated session with restored draft')
     assert.equal(chip(), null)
   })
 
@@ -564,7 +564,7 @@ try {
     await waitFor(() => calls('postPrompt').length === 1, 'Finishing the run must flush the queue through page postMessage')
     assertPostedQuote(calls('postPrompt')[0], source, active.id)
     assert.equal(calls('postPrompt')[0].args[1].prompt, 'Queued with context')
-    assert.deepEqual(calls('postPrompt')[0].args[1].files, ['D:/mock-workspace/docs/context.txt'])
+    assert.deepEqual(calls('postPrompt')[0].args[1].files, ['D:/mock-project/docs/context.txt'])
     // 附件只传路径：不再读内容、不再调上传端点。
     assert.equal(calls('uploadAttachment').length, 0, 'Attachments must not be base64-uploaded')
     assert.equal(document.querySelector('.queue-panel'), null)

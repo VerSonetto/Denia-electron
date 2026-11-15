@@ -4,10 +4,10 @@ import { t } from '../i18n'
 import { IconAgentPreset, IconCheck, IconChevron } from './icons'
 
 /**
- * agent preset(预设)选择器:新会话页里与工作区 chip 同排的那一个。
+ * agent preset(预设)选择器:新会话页里与项目 chip 同排的那一个。
  *
  * 预设决定模型看到的工具面与 persona,而会话一旦开始工作就固定下来——所以
- * 它只长在"还没发出第一条消息"的那一屏(工作区行),会话进行后没有任何
+ * 它只长在"还没发出第一条消息"的那一屏(项目行),会话进行后没有任何
  * 改选入口(服务端对已产出内容的会话返回 `agent-preset/locked`)。
  */
 export function AgentPresetSelector({
@@ -23,7 +23,7 @@ export function AgentPresetSelector({
   /** 设置里的默认 preset id。 */
   defaultId: string
   onChange: (id: string) => void
-  /** 输入栏 inert(无工作区)或切换请求在途。 */
+  /** 输入栏 inert(无项目)或切换请求在途。 */
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -44,7 +44,7 @@ export function AgentPresetSelector({
     <div className={`preset-selector${open ? ' open' : ''}`}>
       <button
         type="button"
-        className={`ws-chip${open ? ' open' : ''}`}
+        className={`project-chip${open ? ' open' : ''}`}
         aria-expanded={open}
         aria-haspopup="menu"
         disabled={disabled}

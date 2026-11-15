@@ -1,4 +1,4 @@
-// Skills, project memory and workspace instructions: discovery, tools,
+// Skills, project memory and project instructions: discovery, tools,
 // injections, management endpoints and the memory-write permission class.
 
 import assert from 'node:assert/strict'
@@ -29,7 +29,7 @@ import {
   rebuildIndex,
   searchMemories,
 } from '../src/context/memory.ts'
-import { discoverWorkspaceInstructions, renderWorkspaceInstructions } from '../src/context/workspace-instructions.ts'
+import { discoverProjectInstructions, renderProjectInstructions } from '../src/context/project-instructions.ts'
 import { startMockGateway, lastToolContents, lastUserText, writeConfig } from './helpers/mock-gateway.ts'
 
 function tempDir(prefix: string): string {
@@ -197,7 +197,7 @@ test('project memory: deterministic root, index projection, search and rebuild',
   assert.ok(health.indexLines > 0)
 })
 
-test('workspace instructions: scope, rendering and idempotence', () => {
+test('project instructions: scope, rendering and idempotence', () => {
   const home = tempDir('denia-rules-home-')
   const project = tempDir('denia-rules-project-')
   const sub = path.join(project, 'packages', 'app')
@@ -207,22 +207,22 @@ test('workspace instructions: scope, rendering and idempotence', () => {
   fs.writeFileSync(path.join(project, 'AGENTS.md'), 'project rule')
   fs.writeFileSync(path.join(sub, 'AGENTS.md'), 'sub rule')
 
-  const all = discoverWorkspaceInstructions(home, sub, [], 1_048_576, 'global-and-project')
+  const all = discoverProjectInstructions(home, sub, [], 1_048_576, 'global-and-project')
   assert.deepEqual(all.map((file) => file.displayPath), ['~/AGENTS.md', 'AGENTS.md', 'packages/app/AGENTS.md'])
-  const child = discoverWorkspaceInstructions(home, sub, [], 1_048_576, 'project-only')
+  const child = discoverProjectInstructions(home, sub, [], 1_048_576, 'project-only')
   assert.deepEqual(child.map((file) => file.displayPath), ['AGENTS.md', 'packages/app/AGENTS.md'])
 
-  const rendered = renderWorkspaceInstructions(all, 1_048_576, null)
+  const rendered = renderProjectInstructions(all, 1_048_576, null)
   assert.ok(rendered?.includes('global rule'))
   assert.ok(rendered?.includes('project rule'))
-  assert.equal(renderWorkspaceInstructions(all, 1_048_576, rendered), null, 'unchanged body is idempotent')
+  assert.equal(renderProjectInstructions(all, 1_048_576, rendered), null, 'unchanged body is idempotent')
   fs.writeFileSync(path.join(project, 'AGENTS.md'), 'project rule v2')
-  const changed = renderWorkspaceInstructions(
-    discoverWorkspaceInstructions(home, sub, [], 1_048_576, 'global-and-project'),
+  const changed = renderProjectInstructions(
+    discoverProjectInstructions(home, sub, [], 1_048_576, 'global-and-project'),
     1_048_576,
     rendered,
   )
-  assert.ok(changed?.includes('取代之前所有工作区指令基线'))
+  assert.ok(changed?.includes('取代之前所有项目指令基线'))
   assert.ok(changed?.includes('project rule v2'))
 })
 
@@ -332,7 +332,7 @@ test('host integrations: skill tool, catalog injection, memory write and APIs', 
     assert.ok(
       afterSkill.some(
         (event) => event.type === 'user-message' &&
-          event.channel === 'workspace-instructions' &&
+          event.channel === 'project-instructions' &&
           event.text.includes('project rules for tests'),
       ),
     )
@@ -386,43 +386,43 @@ test('host integrations: skill tool, catalog injection, memory write and APIs', 
     })
     assert.ok(fs.existsSync(path.join(memoryRoot(home, project), 'auto.md')))
 
-    const workspace = await fetch(`${host.baseUrl}/api/workspaces`, {
+    const createdProject = await fetch(`${host.baseUrl}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: project, title: 'Context' }),
+      body: JSON.stringify({ dirs: [project], title: 'Context' }),
     })
-    const workspaceBody = (await workspace.json()) as { workspace: { id: string } }
+    const projectBody = (await createdProject.json()) as { project: { id: string } }
     const projects = (await (
       await fetch(`${host.baseUrl}/api/memories/projects`)
     ).json()) as {
       projects: { id: string; root: string; index: unknown; files: { name: string }[] }[]
     }
-    const memoryProject = projects.projects.find((entry) => entry.id === workspaceBody.workspace.id)
+    const memoryProject = projects.projects.find((entry) => entry.id === projectBody.project.id)
     assert.ok(memoryProject)
     assert.equal(memoryProject.index, null, 'no index until it is created or rebuilt')
     assert.ok(memoryProject.files.some((file) => file.name === 'auto.md'))
 
     const fileResponse = await fetch(
-      `${host.baseUrl}/api/memories/projects/${workspaceBody.workspace.id}/auto.md`,
+      `${host.baseUrl}/api/memories/projects/${projectBody.project.id}/auto.md`,
     )
     assert.equal(fileResponse.status, 200)
     assert.match(((await fileResponse.json()) as { content: string }).content, /自动写入/)
     const search = await fetch(
-      `${host.baseUrl}/api/memories/projects/${workspaceBody.workspace.id}/search?q=自动`,
+      `${host.baseUrl}/api/memories/projects/${projectBody.project.id}/search?q=自动`,
     )
     assert.equal(search.status, 200)
     assert.ok(((await search.json()) as { hits: unknown[] }).hits.length > 0)
     const rebuild = await fetch(
-      `${host.baseUrl}/api/memories/projects/${workspaceBody.workspace.id}/index`,
+      `${host.baseUrl}/api/memories/projects/${projectBody.project.id}/index`,
       { method: 'POST' },
     )
     assert.equal(rebuild.status, 200)
     const rebuiltProjects = (await (
       await fetch(`${host.baseUrl}/api/memories/projects`)
     ).json()) as { projects: { id: string; index: unknown }[] }
-    assert.ok(rebuiltProjects.projects.find((entry) => entry.id === workspaceBody.workspace.id)?.index)
+    assert.ok(rebuiltProjects.projects.find((entry) => entry.id === projectBody.project.id)?.index)
     const deleted = await fetch(
-      `${host.baseUrl}/api/memories/projects/${workspaceBody.workspace.id}/auto.md`,
+      `${host.baseUrl}/api/memories/projects/${projectBody.project.id}/auto.md`,
       { method: 'DELETE' },
     )
     assert.equal(deleted.status, 200)

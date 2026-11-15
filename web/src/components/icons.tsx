@@ -230,7 +230,7 @@ export function IconEye(props: IconProps) {
   )
 }
 
-/** 铅笔:工作区写入权限。 */
+/** 铅笔:项目写入权限。 */
 export function IconPencil(props: IconProps) {
   return (
     <Svg {...props}>
@@ -508,7 +508,7 @@ export function IconFolder(props: IconProps) {
   )
 }
 
-/** 工作区文件(文件系统树,与 Git 无关)。 */
+/** 项目文件(文件系统树,与 Git 无关)。 */
 export function IconFiles(props: IconProps) {
   return (
     <Svg {...props}>
@@ -593,7 +593,7 @@ export function IconPanelOpen(props: IconProps) {
   )
 }
 
-/** 添加工作区：文件夹与独立加号。 */
+/** 添加项目：文件夹与独立加号。 */
 export function IconFolderPlus(props: IconProps) {
   return (
     <StrokeSvg {...props}>
@@ -602,7 +602,7 @@ export function IconFolderPlus(props: IconProps) {
   )
 }
 
-/** 层叠工作区与向下折线。 */
+/** 层叠项目与向下折线。 */
 export function IconExpandAll(props: IconProps) {
   return (
     <StrokeSvg {...props}>
@@ -611,7 +611,7 @@ export function IconExpandAll(props: IconProps) {
   )
 }
 
-/** 层叠工作区与向上折线。 */
+/** 层叠项目与向上折线。 */
 export function IconCollapseAll(props: IconProps) {
   return (
     <StrokeSvg {...props}>
@@ -1083,7 +1083,7 @@ export function IconNewSession(props: IconProps) {
 }
 
 
-export function IconWorkspace(props: IconProps) {
+export function IconProject(props: IconProps) {
   return (
     <StrokeSvg {...props}>
       <path transform="scale(.8)" strokeWidth="1.4" d="M2.5 6V4.5h6l2 2h7v10h-15V6Z" />

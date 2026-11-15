@@ -62,9 +62,9 @@ function injectionDisplay(text: string): { title: string; body: string } {
     const nl = inner.indexOf('\n')
     const head = nl < 0 ? inner : inner.slice(0, nl)
     const body = nl < 0 ? '' : inner.slice(nl + 1).replace(/^\n+/, '')
-    if (head.startsWith('工作区指令:')) {
+    if (head.startsWith('项目指令:') || head.startsWith('工作区指令:')) {
       return {
-        title: t(head.includes('取代') ? 'injectionWorkspaceUpdate' : 'injectionWorkspace'),
+        title: t(head.includes('取代') ? 'injectionProjectUpdate' : 'injectionProject'),
         body,
       }
     }

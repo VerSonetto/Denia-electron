@@ -51,7 +51,7 @@ export function SessionRow({
   onToggleCollapse: () => void
 }) {
   // 标题前补"(父)"提示,让用户一眼看出这是分支出来的子会话(已嵌套显示,
-  // 但同工作区里有多个分支时文字也帮回忆),只对子会话生效,顶会不画。
+  // 但同项目里有多个分支时文字也帮回忆),只对子会话生效,顶会不画。
   const isSubagent = Boolean(session.subagent)
   const isBranch = depth > 0 && !isSubagent
   const isChild = depth > 0

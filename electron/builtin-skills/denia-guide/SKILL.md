@@ -67,14 +67,14 @@ metadata:
 
 ## MCP 服务（命名空间 `mcp`）
 
-结构：`{"servers": [{id, transport, command, args, env, cwd, url, headers, enabled, disabledTools, scope, workspaceId, protocolVersion, callTimeoutMs}]}`，最多 32 个服务器、单个命令最多 64 个参数，整段校验不过整段拒绝并点名。
+结构：`{"servers": [{id, transport, command, args, env, cwd, url, headers, enabled, disabledTools, scope, projectId, protocolVersion, callTimeoutMs}]}`，最多 32 个服务器、单个命令最多 64 个参数，整段校验不过整段拒绝并点名。
 
 - `id`：`[a-z][a-z0-9-]*`、1–32 字符，同时是模型侧工具名前缀。`transport`：`stdio | http | sse`。
 - `stdio` 必须给 `command`（`args` 无空串，`cwd` 给了就必须是绝对路径）；`http/sse` 必须给合法 `http(s)` 的 `url`，且不接受 `command/args/env`（填了就拒绝）。`env`/`headers` 的值是凭据，只存不回传。
-- `protocolVersion` 目前固定 `2024-11-05`（空拒绝）；`callTimeoutMs` 给了就得在 1–600000 之间；`scope: project` 必须配 `workspaceId`（本期仍按全局生效，先保证字段合法）。
+- `protocolVersion` 目前固定 `2024-11-05`（空拒绝）；`callTimeoutMs` 给了就得在 1–600000 之间；`scope: project` 必须配 `projectId`（本期仍按全局生效，先保证字段合法）。
 - 写路径：改 settings→重连→同步工具面→广播，控制台 `PUT /api/mcp/servers`（`{server, expectedRevision?}`，同名替换否则追加，顺序即展示顺序）一条龙；只开关某个工具走 `POST /api/mcp/tools`（不过滤重连，最便宜）。模型侧工具名形如 `mcp__<server>__<tool>`。
 - 接入后模型默认只看到 MCP 服务器目录和 `mcp_list` 工具（工具清单与参数定义按需发现、首次调用装载）——这是目录化工具面的预期行为，不是没生效；生效的判定口径是 `GET /api/mcp` 里 status=connected 且 toolCount 增加。
-- 常见拒绝：id 非法/重复、传输不支持、http 缺 url、stdio 缺 command、cwd 相对路径、参数超限、project 缺 workspace_id——报错里都已点名，按字面修。
+- 常见拒绝：id 非法/重复、传输不支持、http 缺 url、stdio 缺 command、cwd 相对路径、参数超限、project 缺 project_id——报错里都已点名，按字面修。
 
 ## 全局系统提示词与控制台默认
 
@@ -86,4 +86,4 @@ metadata:
 - 配完提供商：catalog 里出现路由→chat 冒烟通→会话输入框能选到。`failures` 里有该路由=端点探测失败，看 message（多为 baseURL/protocol/密钥错）。
 - 配完 MCP：`GET /api/mcp` 里状态正常且 toolCount 增加；连不上只标 error 不阻断启动，逐个修。
 - 配完 preset：名册里健康行（无 `broken`）、新会话选择器可见。
-- 高频坑：`baseURL` 大小写错键、protocol 拼错、模型 id 前后空格、headers 名非法、revision 拿旧了（409）、环境变量遮蔽密钥（shadowed）、preset id 大写或下划线、MCP 用 http 却填了 command、project 作用域漏 workspace_id。
+- 高频坑：`baseURL` 大小写错键、protocol 拼错、模型 id 前后空格、headers 名非法、revision 拿旧了（409）、环境变量遮蔽密钥（shadowed）、preset id 大写或下划线、MCP 用 http 却填了 command、project 作用域漏 project_id。

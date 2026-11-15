@@ -49,7 +49,7 @@ export function MemorySettings() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<PreviewError | null>(null)
   const [changedDuringRead, setChangedDuringRead] = useState(false)
-  const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const [projectOpen, setProjectOpen] = useState(false)
   // 删除:待确认目标 + 执行中 + 失败提示。
   const [deleteTarget, setDeleteTarget] = useState<api.MemoryFileInfo | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
@@ -200,8 +200,8 @@ export function MemorySettings() {
     [selectedId],
   )
 
-  /** 切换工作区:已选文件与预览一并复位(预览内容属于旧工作区)。 */
-  const selectWorkspace = useCallback((id: string) => {
+  /** 切换项目:已选文件与预览一并复位(预览内容属于旧项目)。 */
+  const selectProject = useCallback((id: string) => {
     setSelectedId(id)
     setSelectedFile(null)
     setPreview(null)
@@ -272,21 +272,21 @@ export function MemorySettings() {
               type="button"
               className={styles.dropdownTrigger}
               disabled={!projects || projects.length === 0}
-              aria-expanded={workspaceOpen}
+              aria-expanded={projectOpen}
               aria-haspopup="listbox"
-              onClick={() => setWorkspaceOpen((state) => !state)}
+              onClick={() => setProjectOpen((state) => !state)}
             >
               <span className={styles.dropdownValue}>
                 {selected ? selected.title || selected.path : '—'}
               </span>
             </button>
-            {workspaceOpen && (
+            {projectOpen && (
               <>
-                <div className="menu-backdrop" onClick={() => setWorkspaceOpen(false)} />
+                <div className="menu-backdrop" onClick={() => setProjectOpen(false)} />
                 <div
                   className={`ui-dropdown-menu ${styles.menu}`}
                   role="listbox"
-                  aria-label={t('memoryWorkspaceLabel')}
+                  aria-label={t('memoryProjectLabel')}
                 >
                   {(projects ?? []).map((project) => {
                     const selected = project.id === selectedId
@@ -298,17 +298,19 @@ export function MemorySettings() {
                         aria-selected={selected}
                         className={`ui-dropdown-item ${styles.menuItem}`}
                         onClick={() => {
-                          selectWorkspace(project.id)
-                          setWorkspaceOpen(false)
+                          selectProject(project.id)
+                          setProjectOpen(false)
                         }}
                       >
                         <span className={styles.menuItemText}>
                           <span className={`name${selected ? ` ${styles.nameSelected}` : ''}`}>
-                            {project.title || project.path}
+                            {project.builtin === 'default' ? t('defaultProject') : project.title || project.path}
                           </span>
-                          {project.title && project.title !== project.path && (
-                            <span className={`hint ${styles.menuHint}`}>{project.path}</span>
-                          )}
+                          <span className={`hint ${styles.menuHint}`}>
+                            {project.dirs.length > 1
+                              ? t('projectDirsCount', { n: project.dirs.length })
+                              : project.path}
+                          </span>
                         </span>
                         {selected && (
                           <span className={styles.checkWrap}>

@@ -6,7 +6,7 @@
  * { tabs: SidePaneTab[], activeTabId: string }
  * ```
  * 这里直接**按 scope 分桶**存,每个 scope 一份独立的 `{tabs,activeTabId}`,
- * 而不是把所有工作区/任务的标签塞进同一个数组再按 owner 过滤,于是
+ * 而不是把所有项目/任务的标签塞进同一个数组再按 owner 过滤,于是
  * 切会话就是换一个桶 —— O(1) 且天然不会串台。
  *
  * 这一层必须是纯函数:标签栏的拖拽/关闭/重排逻辑最容易写错,放在纯函数里
@@ -23,20 +23,20 @@ export type SidePaneTabType =
   | 'terminal'
   /** 浏览器:内嵌实时画面。可多开。 */
   | 'browser'
-  /** 工作区文件:文件系统目录树(与 Git 无关)。单例。 */
+  /** 项目文件:文件系统目录树(与 Git 无关)。单例。 */
   | 'files'
   /**
-   * 文件读取:只读查看工作区内文件内容。单例。
+   * 文件读取:只读查看项目内文件内容。单例。
    *
    * 没有手动入口 —— 不能从 `+` 菜单新建、不能手输路径。它只能由四类点击
    * 触发（对话里的文件引用 / edit·write 工具行的路径 / 轮次产物列表 /
-   * 工作区文件树的文件项），具体见 `hooks/useSidePane` 的 `openFile`。
+   * 项目文件树的文件项），具体见 `hooks/useSidePane` 的 `openFile`。
    */
   | 'file'
 
 /** 文件读取标签页里已打开的一个文件条目。 */
 export interface OpenedFile {
-  /** 相对工作区根的路径（以 `/` 分隔）：去重键，与文件树/拖拽引用同一坐标。 */
+  /** 相对项目根的路径（以 `/` 分隔）：去重键，与文件树/拖拽引用同一坐标。 */
   path: string
   /** 文件短名（条目标签上显示）。 */
   name: string
@@ -317,8 +317,8 @@ export function closeFile(state: SidePaneState | null, path: string): SidePaneSt
 /**
  * 面板状态的归属键。
  *
- * 直接取 `sessionId`:会话已经隐含了工作区(cwd 不可变),所以不需要
- * 单独的 workspaceKey;没有活跃会话(空白态)时用 `__draft__` 桶 ——
+ * 直接取 `sessionId`:会话已经隐含了项目(cwd 不可变),所以不需要
+ * 单独的 projectKey;没有活跃会话(空白态)时用 `__draft__` 桶 ——
  * 这样"还没发第一条消息"时也能开终端看目录。
  */
 export const DRAFT_SCOPE = '__draft__'

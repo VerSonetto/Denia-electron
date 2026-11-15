@@ -1,6 +1,6 @@
 // Permission policy: three orthogonal dimensions (sandbox profile, approval
 // policy, reviewer) instead of a single-dimensional mode switch.
-//   - a sandbox profile (`read-only` / `workspace-write` / `danger-full-access`)
+//   - a sandbox profile (`read-only` / `project-write` / `danger-full-access`)
 //   - an approval policy (`untrusted` / `on-request` / `granular` / `never`)
 //   - an approvals reviewer (`user` / `auto-review`)
 //   - a collaboration mode (`default` / `plan`), which is orthogonal to the above.
@@ -15,7 +15,7 @@
 import type { PermissionMode as LegacyPermissionMode } from './wire.ts'
 
 /** How much the sandbox lets a tool touch. */
-export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+export type SandboxMode = 'read-only' | 'project-write' | 'danger-full-access'
 
 /** When approval prompts may reach a reviewer, and when they are refused outright. */
 export type AskForApproval =
@@ -42,7 +42,7 @@ export type CollaborationMode = 'default' | 'plan'
 /** The four presets the permission catalog exposes. */
 export type AgentMode =
   | 'read-only'
-  | 'workspace-write'
+  | 'project-write'
   | 'approve-for-me'
   | 'full-access'
 
@@ -75,15 +75,15 @@ export const AGENT_MODE_CATALOG: Record<AgentMode, AgentModePreset> = {
     approval: 'on-request',
     reviewer: 'user',
   },
-  'workspace-write': {
-    mode: 'workspace-write',
-    sandbox: 'workspace-write',
+  'project-write': {
+    mode: 'project-write',
+    sandbox: 'project-write',
     approval: 'on-request',
     reviewer: 'user',
   },
   'approve-for-me': {
     mode: 'approve-for-me',
-    sandbox: 'workspace-write',
+    sandbox: 'project-write',
     approval: 'on-request',
     reviewer: 'auto-review',
   },
@@ -98,7 +98,7 @@ export const AGENT_MODE_CATALOG: Record<AgentMode, AgentModePreset> = {
 /** All selectable presets, in catalog order (read-only first, full access last). */
 export const AGENT_MODES: AgentMode[] = [
   'read-only',
-  'workspace-write',
+  'project-write',
   'approve-for-me',
   'full-access',
 ]
@@ -107,7 +107,7 @@ export const AGENT_MODES: AgentMode[] = [
 export function modeOf(state: PermissionState): AgentMode {
   if (state.sandbox === 'read-only') return 'read-only'
   if (state.sandbox === 'danger-full-access') return 'full-access'
-  return state.reviewer === 'auto-review' ? 'approve-for-me' : 'workspace-write'
+  return state.reviewer === 'auto-review' ? 'approve-for-me' : 'project-write'
 }
 
 export function presetState(mode: AgentMode, collaboration: CollaborationMode = 'default'): PermissionState {
@@ -139,7 +139,7 @@ export function stateFromLegacy(mode: LegacyPermissionMode, current?: Permission
   if (mode === 'plan') {
     // Leaving plan mode restores the previous sandbox/approval/reviewer fields.
     return {
-      sandbox: current?.sandbox ?? 'workspace-write',
+      sandbox: current?.sandbox ?? 'project-write',
       approval: current?.approval ?? 'on-request',
       reviewer: current?.reviewer ?? 'user',
       collaboration,
@@ -147,11 +147,11 @@ export function stateFromLegacy(mode: LegacyPermissionMode, current?: Permission
   }
   if (mode === 'read-only') return presetState('read-only', collaboration)
   if (mode === 'full') return presetState('full-access', collaboration)
-  // `auto-edit` means workspace-write; keep the automatic reviewer if the
+  // `auto-edit` means project-write; keep the automatic reviewer if the
   // session was already in approve-for-me, otherwise fall back to the user.
-  const keepAutoReview = current?.sandbox === 'workspace-write' && current.reviewer === 'auto-review'
+  const keepAutoReview = current?.sandbox === 'project-write' && current.reviewer === 'auto-review'
   return {
-    sandbox: 'workspace-write',
+    sandbox: 'project-write',
     approval: 'on-request',
     reviewer: keepAutoReview ? 'auto-review' : 'user',
     collaboration,
@@ -164,7 +164,7 @@ export type PermissionChoice = LegacyPermissionMode | 'approve-for-me'
 /** Project a full permission state onto the UI's single-choice selector. */
 export function choiceOf(state: PermissionState): PermissionChoice {
   if (state.collaboration === 'plan') return 'plan'
-  if (state.reviewer === 'auto-review' && state.sandbox === 'workspace-write') return 'approve-for-me'
+  if (state.reviewer === 'auto-review' && state.sandbox === 'project-write') return 'approve-for-me'
   return legacyModeOf(state)
 }
 
@@ -196,8 +196,13 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isSandboxMode(value: unknown): value is SandboxMode {
-  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access'
+/** Parse a sandbox value; `workspace-write` is the pre-project alias. */
+function sandboxOf(value: unknown): SandboxMode | null {
+  if (value === 'workspace-write') return 'project-write'
+  if (value === 'read-only' || value === 'project-write' || value === 'danger-full-access') {
+    return value
+  }
+  return null
 }
 
 function isReviewer(value: unknown): value is ApprovalsReviewer {
@@ -223,8 +228,9 @@ function isApproval(value: unknown): value is AskForApproval {
 /** Parse one persisted/request-provided permission state; null when malformed. */
 export function parsePermissionState(value: unknown): PermissionState | null {
   if (!isRecord(value)) return null
-  const { sandbox, approval, reviewer, collaboration } = value
-  if (!isSandboxMode(sandbox) || !isApproval(approval) || !isReviewer(reviewer)) return null
+  const { approval, reviewer, collaboration } = value
+  const sandbox = sandboxOf(value.sandbox)
+  if (!sandbox || !isApproval(approval) || !isReviewer(reviewer)) return null
   return {
     sandbox,
     approval,
@@ -282,8 +288,8 @@ export type ApprovalGrants = ReadonlySet<string>
 export interface PolicyInput {
   state: PermissionState
   action: ActionClass
-  /** True when the target path sits inside the session workspace. */
-  insideWorkspace: boolean
+  /** True when the target path sits inside any project directory. */
+  insideProject: boolean
   /** Shell-specific refinements (only meaningful for `bash`). */
   shell?: {
     command: string
@@ -369,13 +375,13 @@ export function decideAction(input: PolicyInput): Decision {
     return ALLOW
   }
 
-  // workspace-write: in-workspace writes run directly; the rest needs review.
+  // project-write: writes inside the project run directly; the rest needs review.
   const base: Decision = (() => {
     switch (action) {
       case 'read':
         return ALLOW
       case 'write':
-        return input.insideWorkspace ? ALLOW : promptDecision('该操作要写工作区之外的路径,需要用户确认')
+        return input.insideProject ? ALLOW : promptDecision('该操作要写项目目录之外的路径,需要用户确认')
       case 'delete':
         return promptDecision('该操作要删除文件(删除不可逆),需要用户确认')
       case 'network':
@@ -426,7 +432,7 @@ export function grantedBySession(
 // Shell heuristics: write / delete / network side effects.
 // ---------------------------------------------------------------------------
 
-/** Files touched by a tool call, for workspace-boundary checks. */
+/** Files touched by a tool call, for project-boundary checks. */
 export function bashMayWrite(command: string): boolean {
   const lower = command.toLowerCase()
   const markers = [

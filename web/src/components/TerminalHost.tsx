@@ -22,7 +22,7 @@ export interface TerminalHostProps {
   tabs: SidePaneTab[]
   /** 当前激活的标签 id。 */
   activeId: string
-  /** 终端 cwd(会话工作区)。 */
+  /** 终端 cwd(会话项目)。 */
   cwd: string
   /** 面板整体是否可见(折叠时为 false)。 */
   paneVisible: boolean

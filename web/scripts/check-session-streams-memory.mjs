@@ -28,7 +28,7 @@ globalThis.document = { hidden: false }
 globalThis.fixture = { requests: [], follows: [] }
 const engine = await import(pathToFileURL(output).href)
 const tick = async () => { await Promise.resolve(); await Promise.resolve() }
-const snapshot = (seq = 7) => ({ header: { id: 'session', cwd: 'D:/workspace' },
+const snapshot = (seq = 7) => ({ header: { id: 'session', cwd: 'D:/project' },
   events: [{ seq, time: 1, type: 'user-message', text: 'fixture' }],
   total: 1, hasMoreBefore: false, anchors: [] })
 const listener = () => ({ snapshots: 0, envelopes: 0,

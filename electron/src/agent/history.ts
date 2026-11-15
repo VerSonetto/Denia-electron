@@ -231,7 +231,8 @@ export function deriveHistory(events: readonly Envelope[]): ChatMessage[] {
 function injectionChannelOf(event: Extract<Envelope, { type: 'user-message' }>): string | null {
   if (event.channel) return event.channel
   if (!event.injected) return null
-  if (event.text.startsWith('<system-reminder>\n工作区指令:')) return 'workspace-instructions'
+  if (event.text.startsWith('<system-reminder>\n项目指令:')) return 'project-instructions'
+  if (event.text.startsWith('<system-reminder>\n工作区指令:')) return 'project-instructions'
   if (event.text.startsWith('<system-reminder>\n技能目录:')) return 'skill-catalog'
   if (
     event.text.startsWith('<system-reminder>\n') &&
@@ -245,7 +246,7 @@ function injectionChannelOf(event: Extract<Envelope, { type: 'user-message' }>):
 /** Baseline channels: only the newest occurrence is model-visible. */
 
 export const BASELINE_CHANNELS = new Set([
-  'workspace-instructions',
+  'project-instructions',
   'capability',
   'skill-catalog',
   'project-memory',

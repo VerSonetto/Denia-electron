@@ -18,9 +18,10 @@ function toolContext(manager: JobManager, sessionId = 's1'): ToolContext {
     sessionId,
     callId: 'call-1',
     cwd: process.cwd(),
+    roots: [process.cwd()],
     confined: true,
     cancel: new AbortController().signal,
-    permission: presetState('workspace-write'),
+    permission: presetState('project-write'),
     jobs: manager,
     emit: () => {},
   }
@@ -92,6 +93,12 @@ test('kill stops a long-running job and keeps its partial output', async () => {
     cwd: process.cwd(),
     command: 'node -e "console.log(\'started\'); setTimeout(()=>{}, 60000)"',
   })
+  // Give the child a moment to flush its first line before killing it: under
+  // a loaded test runner the kill can otherwise land before stdout arrives.
+  const started = Date.now()
+  while (!manager.read(job.id, 's1').output.includes('started') && Date.now() - started < 5000) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
   manager.kill(job.id, 's1')
   assert.equal(manager.peek(job.id, 's1').job.status, 'stopping')
   await waitSettled(manager, job.id, 's1')
@@ -103,7 +110,7 @@ test('kill stops a long-running job and keeps its partial output', async () => {
 
 test('plan and read-only modes refuse background commands with write effects', () => {
   const manager = new JobManager()
-  const plan = presetState('workspace-write', 'plan')
+  const plan = presetState('project-write', 'plan')
   const readOnly = presetState('read-only')
   assert.throws(
     () =>

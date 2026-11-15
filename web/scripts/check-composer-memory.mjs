@@ -104,7 +104,7 @@ const empty = () => ({ text: '', images: [], attachments: [], quotes: [], queue:
 assert.deepEqual(await memory.loadComposer('session:missing'), empty())
 assert.equal(memory.readComposerText('session:missing'), null)
 await assert.rejects(memory.loadComposer('invalid'), /scope/)
-await assert.rejects(memory.saveComposer('workspace:', empty()), /scope/)
+await assert.rejects(memory.saveComposer('project:', empty()), /scope/)
 const attachment = { name: 'example.txt', path: 'D:/docs/example.txt' }
 const snapshot = {
   text: 'draft',
@@ -142,9 +142,9 @@ await Promise.all(writes)
 assert.equal(maxActiveWrites, 1)
 assert.deepEqual(committed.filter(([scope]) => scope === 'session:ordered').map(([, text]) => text), ['first', 'second', 'third'])
 assert.equal((await memory.loadComposer('session:ordered')).text, 'third')
-await memory.saveComposer('workspace:D:/one', { ...empty(), text: 'workspace' })
+await memory.saveComposer('project:D:/one', { ...empty(), text: 'project' })
 assert.equal((await memory.loadComposer('session:one')).text, 'draft')
-assert.equal((await memory.loadComposer('workspace:D:/one')).text, 'workspace')
+assert.equal((await memory.loadComposer('project:D:/one')).text, 'project')
 
 failWrite = true
 await assert.rejects(memory.saveComposer('session:one', { ...empty(), text: 'new backup' }), /aborted/)

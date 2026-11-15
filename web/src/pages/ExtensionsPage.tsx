@@ -48,7 +48,7 @@ export default function ExtensionsPage({ tab, cwd, onTabChange, notify }: {
               </button>
             ))}
           </div>
-          {cwd && <span className={styles.workspace} title={cwd}>{t('extensionsWorkspace')}: {cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd}</span>}
+          {cwd && <span className={styles.project} title={cwd}>{t('extensionsProject')}: {cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd}</span>}
         </div>
         <div role="tabpanel" id={`extension-panel-${tab}`} aria-labelledby={`extension-tab-${tab}`} className={styles.panel}>
           {tab === 'skills' ? <SkillsManager key={cwd ?? 'user'} cwd={cwd} /> : <McpSettings notify={notify} />}

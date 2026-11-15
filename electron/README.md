@@ -15,18 +15,18 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
   对齐（header version 0 / UUID id / seq 连续）；崩溃遗留轮次加载时补
   `turn-end {aborted, disposed}`
 - **共享配置**：读取 `settings.yaml` 的 `llm-openai.providers`、从
-  `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；工作区读写 `workspaces.json`
-  的 map+order 结构；随附 preset（standard / creator / minimal）与 Rust 对齐
+  `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；项目读写 `projects.json` 的 map+order 结构（一个项目可包含多个目录）；随附 preset（standard / creator / minimal）与 Rust 对齐
 - **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、
   `todo_write`、`exit_plan`、`skill`
 - **权限（三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
-  只读 / 工作区编辑 / 自动审批（Approve for me）/ 完全访问；四值决策
+  只读 / 项目编辑 / 自动审批（Approve for me）/ 完全访问；四值决策
   （allow / prompt / prompt-user / forbid）；五值审批（accept、accept-for-session、
   accept-with-rule、decline、cancel）；execpolicy 命令前缀规则
   （`<home>/execpolicy.json`，批准时可持久化 allow 规则）；自动审批用模型
   按严格 JSON 审查，超时/失败一律拒绝；项目记忆写入是独立的 memory-write 类
+- **审查面板**：按项目目录聚合 Git 状态；同一仓库自动去重；可切单个目录审查、Diff、提交与推送，也可对全部目录批量提交/推送；非 Git 目录显式标注
 - **HTTP/SSE 宿主**：会话列表/创建/快照/分页/发消息/取消/引导、follow SSE、
-  全局事件 SSE、模型目录、设置、工作区、文件树/文件读取、审批应答
+  全局事件 SSE、模型目录、设置、项目、文件树/文件读取、审批应答
 - **MCP**：stdio / Streamable HTTP / HTTP+SSE 三种传输；`mcp__<server>__<tool>`
   命名与冲突过滤；`mcp_list` 目录 + 首次调用懒加载参数；按字符分页与
   `result_id` 续读（续读不重新执行外部工具）；`/api/mcp` 管理端点（增删改、
@@ -42,7 +42,7 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **项目记忆**：`<home>/memories/projects/<slug>-<sha16>/memory/` 桶；
   `MEMORY.md` 索引注入（剔除历史区、行/字节预算）；memory-write 权限类；
   `/api/memories/projects` 列表/读写/检索/重建/体检
-- **工作区指令**：`AGENTS.md` 分层发现（全局 + 项目祖先链 + 触达文件后代链），
+- **项目指令**：`AGENTS.md` 分层发现（全局 + 每个项目目录的祖先链 + 触达文件后代链），
   子代理仅项目级；按正文变化幂等注入；`/api/global-rules` 读写
 - **标题 / 上下文**：首轮后后台生成 `session-title`；`/context-breakdown`
   近似 token 拆分与压力；手动压缩按整轮摘要并落 `compaction-summary`
@@ -65,12 +65,12 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 | 预设 | 沙箱档案 | 审批策略 | 审批人 |
 | --- | --- | --- | --- |
 | `read-only` | `read-only` | `on-request` | 用户 |
-| `workspace-write` | `workspace-write` | `on-request` | 用户 |
-| `approve-for-me` | `workspace-write` | `on-request` | 自动审查 |
+| `project-write` | `project-write` | `on-request` | 用户 |
+| `approve-for-me` | `project-write` | `on-request` | 自动审查 |
 | `full-access` | `danger-full-access` | `never` | 用户 |
 
 - **沙箱档案决定“能做到什么”**：只读档拒绝一切写与网络，命令必须能被静态证明只读；
-  工作区档区内写直接执行，区外写、删除、有写副作用的命令与网络访问走审批；
+  项目档目录内写直接执行，区外写、删除、有写副作用的命令与网络访问走审批；
   完全访问无限制。没有真实 OS 沙箱，只读档由命令证明 + 工具层路径限制兵底。
 - **审批策略决定“问了怎么办”**：`never` 不再询问，需审批的动作直接拒绝；
   计划模式（collaboration = plan）禁止一切写，`exit_plan` 必须人审。
@@ -91,7 +91,7 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 模型看到的自动上下文走 `user-message {injected:true, channel}`，每个 step
 开始时按通道刷新，内容未变则不重复发送：
 
-- `workspace-instructions`：`AGENTS.md` 全文（system-reminder 框架）
+- `project-instructions`：`AGENTS.md` 全文（system-reminder 框架）
 - `skill-catalog`：`<available_skills>` 摘要列表
 - `project-memory`：`MEMORY.md` 索引（仅主代理；子代理不注入）
 - `agent-delivery`：子代理完成通知 / 父子消息
@@ -111,9 +111,11 @@ npm start
 ```
 
 宿主默认监听 `127.0.0.1:43655`（Rust 版占用 43654，两个版本可同时运行），home 为
-`~/.denia`，与 Rust 版共用同一份会话、设置、凭据与工作区。可用环境变量覆盖：
+`~/.denia`，与 Rust 版共用同一份会话、设置与凭据；项目注册表是 Electron 版的新结构（首次启动会把旧的 `workspaces.json` 迁移为 `projects.json`）。可用环境变量覆盖：
 
-- `DENIA_HOME`：会话、配置、工作区记录的根目录
+- `DENIA_HOME`：会话、配置、项目记录的根目录
+- `DENIA_INSTALL_DIR`：程序安装目录（打包版默认取 Denia.exe 所在目录；开发版取应用包目录）
+- `DENIA_PROJECTS_ROOT`：未选择目录的项目的默认根目录（默认 `<DENIA_INSTALL_DIR>/projects`）
 - `DENIA_PORT`：监听端口（`0` 表示随机）
 - `DENIA_WEB_DIR`：前端构建产物目录（默认 `../web/dist`）
 - `DENIA_WEB_URL`：开发时改加载 Vite 地址（`web/` 的 `/api` 代理需指向本宿主）
@@ -206,7 +208,7 @@ src/
   mcp/                    协议、三种传输、客户端、进程池、设置
   subagents/              定义仓库、派遣解析、后台运行时
   skills/                 分层发现、解析、管理、内置技能
-  context/                项目记忆、工作区指令
+  context/                项目记忆、项目指令
   llm/                    三个协议适配器 + 共享 SSE/块组装
   session/store.ts        JSONL 会话日志
   tools/                  bash / 文件 / 搜索 / todo / mcp / skill
@@ -223,7 +225,7 @@ scripts/
 
 - `npm run typecheck` 通过
 - `npm test`：36 个用例通过，覆盖 agent loop、协议适配器、权限/审批、MCP
-  三种传输、父子代理派遣/完成投递/fork、技能、项目记忆、工作区指令、
+  三种传输、父子代理派遣/完成投递/fork、技能、项目记忆、项目指令、
   标题与手动压缩
 - 前端 `cd web && npx tsc -b && npx vite build` 通过
 - `DENIA_SMOKE_SHOT=<png>`：Electron 启动后自动截图退出，用于验证真实窗口

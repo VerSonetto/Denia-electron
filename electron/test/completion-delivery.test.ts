@@ -47,7 +47,7 @@ test('a settled child cancels leftover jobs and reports what was cancelled', asy
     cancel: () => false,
     isRunning: () => false,
     append: (sessionId, event) => store.append(sessionId, event),
-    permissionStateOf: () => presetState('workspace-write'),
+    permissionStateOf: () => presetState('project-write'),
   }
   runtime = new SubagentRuntime(store, profiles, port)
   runtime.setToolNames(() => [

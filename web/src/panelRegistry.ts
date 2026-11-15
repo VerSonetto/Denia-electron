@@ -6,7 +6,7 @@
  * 好测也好读。
  *
  * 关键约束:
- * - **审查与工作区文件是单例**:已经开着就不在菜单里出现(避免点两次得到
+ * - **审查与项目文件是单例**:已经开着就不在菜单里出现(避免点两次得到
  *   两个一样的面板);
  * - **终端与浏览器可多开**:菜单项永远在(只要能力支持)。
  */
@@ -14,8 +14,8 @@
 import type { SidePaneTabType } from './sidePane'
 
 export interface PanelContext {
-  /** 当前会话绑定的工作区路径;没有则为 null(空白态)。 */
-  workspacePath: string | null
+  /** 当前会话绑定的项目路径;没有则为 null(空白态)。 */
+  projectPath: string | null
   /** 该面板类型是否已经开着(单例判定用)。 */
   isOpen(type: SidePaneTabType): boolean
   /** 内嵌浏览器是否可用(缺浏览器时不可用)。 */
@@ -68,10 +68,10 @@ export const PANELS: PanelDescriptor[] = [
     type: 'files',
     labelKey: 'sidePaneFiles',
     descriptionKey: 'sidePaneFilesDesc',
-    // 单例:一棵工作区树开两个没有意义(它们必然显示同一份内容)。
-    // 也要求有工作区 —— 树是相对工作区根的,没有根就没有可看的内容,
+    // 单例:一棵项目树开两个没有意义(它们必然显示同一份内容)。
+    // 也要求有项目 —— 树是相对项目根的,没有根就没有可看的内容,
     // 此时不给入口比给一个空壳按钮诚实。
-    available: (ctx) => ctx.workspacePath !== null && !ctx.isOpen('files'),
+    available: (ctx) => ctx.projectPath !== null && !ctx.isOpen('files'),
     singleton: true,
   },
   {
@@ -86,7 +86,7 @@ export const PANELS: PanelDescriptor[] = [
     type: 'terminal',
     labelKey: 'sidePaneTerminal',
     descriptionKey: 'sidePaneTerminalDesc',
-    // 终端不依赖工作区:没有工作区时落到 home(后端兜底),
+    // 终端不依赖项目:没有项目时落到 home(后端兜底),
     // 所以永远可用。这是有意的 —— 用户可能只想开个终端看看环境。
     available: () => true,
     singleton: false,

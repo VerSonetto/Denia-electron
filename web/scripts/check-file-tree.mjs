@@ -1,5 +1,5 @@
 /**
- * 工作区文件树的回归网(纯函数 + jsdom 挂载)。
+ * 项目文件树的回归网(纯函数 + jsdom 挂载)。
  *   node scripts/check-file-tree.mjs
  *
  * # 为什么这两层都要测
@@ -7,7 +7,7 @@
  * 树这东西的 bug 几乎都藏在两个地方,而且都不是"看代码能看出来"的:
  * - **折叠语义**(纯函数层):祖先收起后后代必须整段消失、展开态要在刷新
  *   后保留、旧子项消失时节点要跟着清掉 —— 用鼠标点几下很难覆盖全;
- * - **懒加载**(组件层):展开时才发请求、重复展开不重复请求、切工作区
+ * - **懒加载**(组件层):展开时才发请求、重复展开不重复请求、切项目
  *   整棵树重来 —— 这些是"发了几个请求"级别的断言,只有真挂载才看得到。
  *
  * 组件部分 stub 掉 `fetch`:它守的是"什么时候发请求、请求哪个目录",
@@ -333,7 +333,7 @@ function setInputValue(input, value) {
 /* 1) 首屏:只拉根目录一次,列出根的两项 */
 {
   requested.length = 0
-  const { html, errors } = await mount({ workspacePath: 'D:/ws', sessionId: 's1' })
+  const { html, errors } = await mount({ projectPath: 'D:/ws', sessionId: 's1' })
   const hookError = errors.find((line) => /hook/i.test(line))
   if (hookError) fail('首屏挂载', hookError)
   else if (JSON.stringify(requested) !== JSON.stringify([''])) {
@@ -438,7 +438,7 @@ function setInputValue(input, value) {
 
 /* 6) 读盘失败:显示错误与重试入口,而不是静默空树 */
 {
-  const { root } = await mount({ workspacePath: 'D:/gone', sessionId: 's2' })
+  const { root } = await mount({ projectPath: 'D:/gone', sessionId: 's2' })
   // 换掉 fixture 让它读不到(用一个不在 fixture 里的根)。
   globalThis.fetch = async () => ({
     ok: false,

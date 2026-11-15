@@ -14,8 +14,8 @@ import { JSDOM } from 'jsdom'
 const web = fileURLToPath(new URL('..', import.meta.url))
 const src = join(web, 'src')
 const bridgeKey = '__deniaPromptOptimizerRegression'
-const workspace = { id: 'ws-test', title: 'Workspace', path: 'D:/mock-workspace', created_at: 1 }
-const session = { id: 'session-test', title: 'Conversation', cwd: workspace.path, cwd_alive: true, created_at: 1 }
+const project = { id: 'project-test', title: 'Project', dirs: ['D:/mock-project'], createdAt: 1, sessionIds: [] }
+const session = { id: 'session-test', title: 'Conversation', cwd: project.path, cwd_alive: true, created_at: 1 }
 const bridge = { calls: [], notifications: [], networkAttempts: [], pending: null, memory: new Map() }
 globalThis[bridgeKey] = bridge
 const prelude = `const b = globalThis[${JSON.stringify(bridgeKey)}];`
@@ -48,10 +48,10 @@ const stubs = new Map([
     }
   `],
   ['appStore', `${prelude}
-    const sessions = ${JSON.stringify([session])}; const workspaces = ${JSON.stringify([workspace])};
+    const sessions = ${JSON.stringify([session])}; const projects = ${JSON.stringify([project])};
     export const useSessions = () => sessions;
-    export const useWorkspaces = () => workspaces;
-    export const getActiveWorkspace = () => workspaces[0];
+    export const useProjects = () => projects;
+    export const getActiveProject = () => projects[0];
     export const useCatalogTick = () => 0;
     export const useCompactingFor = () => null;
     export const useRunningFor = () => false;
@@ -186,7 +186,7 @@ try {
   root = createRoot(document.getElementById('root'))
   await act(async () => root.render(React.createElement(SessionsPage, {
     activeId: session.id, locked: false, hasStarted: true,
-    onSelectWorkspace() {}, onOpenPicker() {}, onAddWorkspace() {},
+    onSelectProject() {}, onOpenPicker() {}, onAddProject() {},
   })))
   assert.ok(editor(), 'Real SessionsPage mounts')
   for (const [original, optimized] of [

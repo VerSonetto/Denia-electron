@@ -265,7 +265,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
 {
   routes = { '/api/git/status': () => jsonResponse(statusWithChanges) }
   requests = []
-  const { errors } = await mount({ workspacePath: 'D:/ws', sessionId: 's1', selection: null })
+  const { errors } = await mount({ projectPath: 'D:/ws', sessionId: 's1', selection: null })
   const hookError = errors.find((line) => /hook/i.test(line))
   if (hookError) fail('挂载', hookError)
   else if (!q('.review-commit')) fail('挂载', '没有渲染提交区')
@@ -286,7 +286,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
     '/api/git/commit': () => jsonResponse({ ok: true, head: 'def5678', summary: '1 file changed' }),
   }
   requests = []
-  const { root } = await mount({ workspacePath: 'D:/ws', sessionId: 's1', selection: null })
+  const { root } = await mount({ projectPath: 'D:/ws', sessionId: 's1', selection: null })
   const input = q('.review-commit-input')
   setTextareaValue(input, 'feat(web):加个提交区')
   await tick(60)
@@ -337,7 +337,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
       ),
   }
   requests = []
-  const { root } = await mount({ workspacePath: 'D:/ws', sessionId: 's1', selection: null })
+  const { root } = await mount({ projectPath: 'D:/ws', sessionId: 's1', selection: null })
   setTextareaValue(q('.review-commit-input'), 'feat(web):会被拒绝')
   await tick(60)
   click(q('.review-commit-submit'))
@@ -366,7 +366,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
   }
   requests = []
   const { root } = await mount({
-    workspacePath: 'D:/ws',
+    projectPath: 'D:/ws',
     sessionId: 's1',
     selection: { provider: 'deepseek', model: 'deepseek-v4-flash' },
   })
@@ -402,7 +402,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
     '/api/git/push': () => jsonResponse({ ok: true, upstream: 'origin/main', summary: 'To github.com' }),
   }
   requests = []
-  const { root } = await mount({ workspacePath: 'D:/ws', sessionId: 's1', selection: null })
+  const { root } = await mount({ projectPath: 'D:/ws', sessionId: 's1', selection: null })
   const push = q('.review-commit-push')
   if (push.disabled) {
     fail('推送', '正常仓库的推送按钮应当可用')
@@ -437,7 +437,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
       ),
   }
   requests = []
-  const { root } = await mount({ workspacePath: 'D:/ws', sessionId: 's1', selection: null })
+  const { root } = await mount({ projectPath: 'D:/ws', sessionId: 's1', selection: null })
   click(q('.review-commit-push'))
   await tick(160)
   const html = g.document.getElementById('root').innerHTML
@@ -458,7 +458,7 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
     '/api/git/status': () => jsonResponse({ ...statusWithChanges, detached: true, branch: null }),
   }
   requests = []
-  const { root } = await mount({ workspacePath: 'D:/ws', sessionId: 's1', selection: null })
+  const { root } = await mount({ projectPath: 'D:/ws', sessionId: 's1', selection: null })
   if (!q('.review-commit-push').disabled) {
     fail('游离 HEAD', 'detached 时推送按钮应当禁用')
   } else {
@@ -472,11 +472,58 @@ const click = (el) => el.dispatchEvent(new g.MouseEvent('click', { bubbles: true
 {
   routes = { '/api/git/status': () => jsonResponse({ isRepository: false, entries: [] }) }
   requests = []
-  const { root } = await mount({ workspacePath: 'D:/notrepo', sessionId: 's1', selection: null })
+  const { root } = await mount({ projectPath: 'D:/notrepo', sessionId: 's1', selection: null })
   if (q('.review-commit')) {
     fail('非仓库', '不是 git 仓库时不该渲染提交区')
   } else {
     ok('非仓库:不渲染提交区')
+  }
+  root.unmount()
+  await tick(30)
+}
+
+/* 8) 多目录项目:按仓库分组,提交全部目录时逐个提交 */
+{
+  const statusFor = (path) => ({
+    ...statusWithChanges,
+    repoRoot: path,
+    entries: [
+      {
+        ...statusWithChanges.entries[0],
+        path: path.endsWith('ws-b') ? 'b.ts' : 'a.ts',
+      },
+    ],
+  })
+  routes = {
+    '/api/git/status': (href) => {
+      const path = new URL(href, 'http://localhost').searchParams.get('path')
+      return jsonResponse(statusFor(path))
+    },
+    '/api/git/commit': () => jsonResponse({ ok: true, head: 'abc9999', summary: '1 file changed' }),
+  }
+  requests = []
+  const { root } = await mount({
+    projectPath: 'D:/ws-a',
+    projectDirs: ['D:/ws-a', 'D:/ws-b'],
+    sessionId: 's1',
+    selection: null,
+  })
+  const tabs = [...g.document.querySelectorAll('.review-dir-tab')]
+  const groups = [...g.document.querySelectorAll('.review-dir-group')]
+  if (tabs.length !== 3 || groups.length !== 2) {
+    fail('多目录', `目录标签/分组数量不对:${tabs.length}/${groups.length}`)
+  } else {
+    setTextareaValue(q('.review-commit-input'), 'feat(review):提交全部目录')
+    await tick(60)
+    click(q('.review-commit-submit'))
+    await tick(180)
+    const commits = requests.filter((item) => item.url.startsWith('/api/git/commit'))
+    const paths = commits.map((item) => item.body?.path).sort()
+    if (commits.length !== 2 || paths[0] !== 'D:/ws-a' || paths[1] !== 'D:/ws-b') {
+      fail('多目录', `应当提交两个仓库,实际:${JSON.stringify(commits.map((item) => item.body))}`)
+    } else {
+      ok('多目录:按仓库分组,提交全部目录逐个提交')
+    }
   }
   root.unmount()
   await tick(30)

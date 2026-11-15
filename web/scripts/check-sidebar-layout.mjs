@@ -112,7 +112,7 @@ assert.equal(value(regionDecls, 'gap', '.sidebar-region'), '6px', '区域间距�
 assert.equal(
   sidebarPadding.left + primaryPadding.left + newButtonPadding.left,
   sidebarPadding.left + regionHeadPadding.left,
-  '新建/扩展导航与工作区标题的 12px 基线不一致',
+  '新建/扩展导航与项目标题的 12px 基线不一致',
 )
 assert.equal(sidebarPadding.left, 12, '侧栏水平内边距应为 12px')
 assert.equal(primaryPadding.left, 4, '.sidebar-primary 水平内边距应为 4px')

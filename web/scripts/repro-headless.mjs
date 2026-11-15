@@ -56,7 +56,7 @@ globalThis.fetch = async (input, init) => {
   const body = (code, obj) => new g.Response(JSON.stringify(obj), { status: code, headers: { 'content-type': 'application/json' } })
   console.log('[fetch]', url)
   if (url.includes('/api/sessions?') || url.endsWith('/api/sessions')) return body(200, listSessions)
-  if (url.includes('/api/workspaces')) return body(200, { workspaces: listSessions.workspaces ?? [] })
+  if (url.includes('/api/projects')) return body(200, { projects: listSessions.projects ?? [] })
   if (url.includes('/api/sessions/c41e7b39-871a-4f04-94d6-29d304821887/follow')) return new g.Response('', { status: 200 })
   if (url.includes('/api/sessions/c41e7b39-871a-4f04-94d6-29d304821887')) return body(200, { header, events })
   if (url.includes('/api/settings')) return body(200, settings)

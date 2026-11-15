@@ -7,7 +7,7 @@
  * 视觉定位:
  * - 来源切换 = 对话区 `.view-switch` 同款胶囊(细边框 + accent-soft 选中);
  * - 文件行 = 扁平行,只有 hover 填充,不画分隔线与卡片;
- * - 分区标题 = 左侧栏「工作区」小标题(11px/600/字距);
+ * - 分区标题 = 左侧栏「项目」小标题(11px/600/字距);
  * - 提交卡 = 输入区同款 `--composer-surface` + `--composer-shadow`。 */
 
 .side-pane .review-panel {
@@ -66,7 +66,7 @@
   margin: 0;
 }
 
-/* 与左侧「工作区」分区标题同一套排版;sticky 让分组在长列表里始终可读。 */
+/* 与左侧「项目」分区标题同一套排版;sticky 让分组在长列表里始终可读。 */
 .side-pane .review-section-title {
   position: sticky;
   top: 0;
@@ -427,4 +427,83 @@
   .side-pane .review-commit-push span {
     display: none;
   }
+}
+
+/* ---- 多目录项目:目录切换与分组 ---- */
+
+.side-pane .review-dir-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.side-pane .review-dir-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.side-pane .review-dir-tab {
+  flex: none;
+  max-width: 42%;
+  padding: 4px 9px;
+  border: 1px solid var(--border-l1);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.side-pane .review-dir-tab:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.side-pane .review-dir-tab[aria-selected='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.side-pane .review-dir-group {
+  margin: 0;
+}
+
+.side-pane .review-dir-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 6px 0;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border-l1);
+  color: var(--label-primary);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.side-pane .review-dir-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-pane .review-dir-branch {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  text-align: right;
 }

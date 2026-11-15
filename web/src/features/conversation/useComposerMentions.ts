@@ -16,7 +16,7 @@ export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, sync
   const [mentionOpen, setMentionOpen] = useState(false)
   const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([])
   const [mentionLoading, setMentionLoading] = useState(false)
-  /** 当前查询串(空态提示区分工作区为空与无匹配)。 */
+  /** 当前查询串(空态提示区分项目为空与无匹配)。 */
   const [mentionQuery, setMentionQuery] = useState('')
   const [mentionActive, setMentionActive] = useState(0)
   const mentionMenuRef = useRef<HTMLDivElement | null>(null)

@@ -26,7 +26,7 @@ import type {
   TokenUsage,
   UsageRange,
   UsageSnapshot,
-  WorkspaceRecord,
+  ProjectRecord,
   WireProtocol,
 } from './types'
 import { subscribeServerEvents } from './serverEvents'
@@ -531,11 +531,11 @@ export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
 }
 
 export function createSession(options: {
-  workspaceId?: string
+  projectId?: string
   cwd?: string
   /** 会话运行的 agent preset;缺省用设置里的默认值。 */
   agentPreset?: string
-}): Promise<{ session: SessionSummary & { cwd: string } }> {
+}): Promise<{ session: SessionSummary & { cwd: string }; project?: ProjectRecord }> {
   return http('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(options),
@@ -598,22 +598,23 @@ export function setSessionAgentPreset(
   })
 }
 
-export function listWorkspaces(): Promise<{ workspaces: WorkspaceRecord[] }> {
-  return http('/api/workspaces')
+export function listProjects(): Promise<{ projects: ProjectRecord[]; managedRoot?: string }> {
+  return http('/api/projects')
 }
 
-export function createWorkspace(
-  path: string,
-  title?: string,
-): Promise<{ workspace: WorkspaceRecord }> {
-  return http('/api/workspaces', {
+/** Create a project. Empty `dirs` → the host creates a managed directory. */
+export function createProject(input: {
+  title?: string
+  dirs?: string[]
+}): Promise<{ project: ProjectRecord }> {
+  return http('/api/projects', {
     method: 'POST',
-    body: JSON.stringify({ path, title }),
+    body: JSON.stringify(input),
   })
 }
 
-export function deleteWorkspace(id: string): Promise<unknown> {
-  return http(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export function deleteProject(id: string): Promise<unknown> {
+  return http(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export interface MemoryFileInfo {
@@ -632,6 +633,8 @@ export interface MemoryProject {
   id: string
   title: string
   path: string
+  dirs: string[]
+  builtin?: 'default'
   updatedAt: number
   root: string
   index: MemoryFileInfo | null
@@ -645,7 +648,7 @@ export interface MemoryFileView {
   modifiedMs: number
 }
 
-/** 项目记忆清单(每工作区一条;无记忆的桶 files 为空)。 */
+/** 项目记忆清单(每项目一条;无记忆的桶 files 为空)。 */
 export function getMemoryProjects(): Promise<{ projects: MemoryProject[] }> {
   return http('/api/memories/projects')
 }
@@ -692,7 +695,7 @@ export interface MemorySearchResult {
   skipped: number
 }
 
-/** 记忆检索(工作区内的条目文件,按字面相关性排序)。 */
+/** 记忆检索(项目内的条目文件,按字面相关性排序)。 */
 export function searchMemories(
   id: string,
   query: string,
@@ -757,7 +760,7 @@ export function searchMentions(
   return http(`/api/fs/mentions?${params.toString()}`, { signal })
 }
 
-/** 工作区文件树的一层条目(相对根的路径,以 `/` 分隔)。 */
+/** 项目文件树的一层条目(相对根的路径,以 `/` 分隔)。 */
 export interface TreeEntry {
   name: string
   path: string
@@ -773,7 +776,7 @@ export interface TreeListing {
   truncated: boolean
 }
 
-/** 列举工作区某一层目录(dir 为空 = 根目录)。 */
+/** 列举项目某一层目录(dir 为空 = 根目录)。 */
 export function fetchTree(
   path: string,
   dir: string,
@@ -784,9 +787,9 @@ export function fetchTree(
   return http(`/api/fs/tree?${params.toString()}`, { signal })
 }
 
-/** 工作区文件的只读视图（`/api/fs/file` 响应）。 */
-export interface WorkspaceFileView {
-  /** 相对工作区根的路径（以 `/` 分隔）。 */
+/** 项目文件的只读视图（`/api/fs/file` 响应）。 */
+export interface ProjectFileView {
+  /** 相对项目根的路径（以 `/` 分隔）。 */
   path: string
   name: string
   content: string
@@ -798,16 +801,16 @@ export interface WorkspaceFileView {
 }
 
 /**
- * 读取工作区内的一个文本文件（只读）。
+ * 读取项目内的一个文本文件（只读）。
  *
  * 失败形态由后端给不同码，前端据此分别提示：路径非法/目录/二进制 400、
  * 不存在 404、无权限 403、超限 413。
  */
-export function fetchWorkspaceFile(
+export function fetchProjectFile(
   path: string,
   file: string,
   signal?: AbortSignal,
-): Promise<WorkspaceFileView> {
+): Promise<ProjectFileView> {
   const params = new URLSearchParams({ path, file })
   return http(`/api/fs/file?${params.toString()}`, { signal })
 }
@@ -824,29 +827,29 @@ export function fetchWorkspaceFile(
  * 改成 `/api/fs/preview/{rootToken}/src/a/index.html` 后，目录结构真实存在于
  * 路径里，浏览器自行拼接即命中同一个端点。
  *
- * 工作区根放在首段、base64url 编码（`D:\my proj` 这类路径含 `\`/`:`/空格，
+ * 项目根放在首段、base64url 编码（`D:\my proj` 这类路径含 `\`/`:`/空格，
  * 在 URL 路径里都得转义）。服务端解码后走与文本读取**完全相同**的路径校验，
- * 所以仍然读不到工作区外的任何字节。
+ * 所以仍然读不到项目外的任何字节。
  *
  * # 为什么不用 fetch + srcDoc
  *
  * `srcDoc` 落在 `about:srcdoc`，没有基址，相对引用一律断；图片/字体绕成
  * base64 再塞回内存也只是把同一份字节读两遍。路径式 URL 让浏览器自己管。
  *
- * @param workspacePath - 工作区根绝对路径。
+ * @param projectPath - 项目根绝对路径。
  * @param file - 相对根的路径（以 `/` 分隔）。
  * @returns 可直接赋给 `iframe.src` 的地址。
  */
-export function workspacePreviewUrl(workspacePath: string, file: string): string {
+export function projectPreviewUrl(projectPath: string, file: string): string {
   const segments = file.split('/').filter((s) => s !== '' && s !== '.')
   const encoded = segments.map(encodeURIComponent).join('/')
-  return `/api/fs/preview/${base64Url(workspacePath)}/${encoded}`
+  return `/api/fs/preview/${base64Url(projectPath)}/${encoded}`
 }
 
 /**
- * UTF-8 → base64url（无 padding），与服务端 `encode_workspace_token` 对称。
+ * UTF-8 → base64url（无 padding），与服务端的项目路径编码对称。
  *
- * 不能直接用 `btoa`：它只接受 Latin-1，中文工作区路径会抛异常。工作区路径
+ * 不能直接用 `btoa`：它只接受 Latin-1，中文项目路径会抛异常。项目路径
  * 含中文是常态（`D:\项目\app`），这里必须走 UTF-8 字节。
  */
 function base64Url(value: string): string {
@@ -1144,7 +1147,7 @@ export function resetSystemPrompt(): Promise<SystemPromptView> {
 /**
  * 全局规则(用户级 AGENTS.md,位于 `<home>/AGENTS.md`)。
  *
- * 与工作区内的 AGENTS.md 是同一套发现机制的两份文件:全局那份作用域
+ * 与项目内的 AGENTS.md 是同一套发现机制的两份文件:全局那份作用域
  * 最宽、最先注入,模型侧标签 `~/AGENTS.md`。这里只管可编辑的正文。
  */
 export interface GlobalRulesView {
@@ -1181,6 +1184,8 @@ export function getCheckpoints(id: string): Promise<{ checkpoints: Checkpoint[] 
 /** 回退确认框里的单条文件变化。 */
 export interface FileDiffEntry {
   path: string
+  /** Owning project directory (multi-directory projects only). */
+  root?: string
   action: 'restore' | 'delete'
 }
 
@@ -1444,7 +1449,7 @@ export function getOpenInAppApps(): Promise<{ apps: string[] }> {
   return http('/api/open-in-app/apps')
 }
 
-/** 用一个应用打开工作区目录;启动观察窗最长约 2s,超时放宽。 */
+/** 用一个应用打开项目目录;启动观察窗最长约 2s,超时放宽。 */
 export function openInAppOpen(app: string, path: string): Promise<{ ok: boolean }> {
   return http(
     '/api/open-in-app/open',

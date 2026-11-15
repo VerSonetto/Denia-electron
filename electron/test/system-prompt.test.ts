@@ -42,7 +42,7 @@ function prompt(overrides: Partial<Parameters<typeof buildSystemPrompt>[0]> = {}
   return buildSystemPrompt({
     cwd: '/work',
     sandbox: false,
-    permission: presetState('workspace-write'),
+    permission: presetState('project-write'),
     tools: BASE_TOOL_NAMES.map(tool),
     ...overrides,
   })
@@ -133,7 +133,7 @@ test('subagents get role and constraint sections in the parent prompt', () => {
   assert.ok(text.includes('不能派遣子代理'))
 })
 
-test('runtime context carries workspace, permission and instance facts', () => {
+test('runtime context carries project, permission and instance facts', () => {
   const runtime = buildRuntimeContext({
     cwd: 'D:/work',
     sandbox: false,
@@ -147,7 +147,7 @@ test('runtime context carries workspace, permission and instance facts', () => {
   const planned = buildRuntimeContext({
     cwd: '/work',
     sandbox: false,
-    permission: presetState('workspace-write', 'plan'),
+    permission: presetState('project-write', 'plan'),
     apiBase: 'http://127.0.0.1:43655',
   })
   assert.ok(planned.includes('当前权限模式:计划'))
@@ -166,7 +166,7 @@ test('a custom persona replaces the factory text and interpolates variables', ()
 
 test('permission presets keep their routing note distinct', () => {
   const states: Array<[PermissionState, string]> = [
-    [presetState('workspace-write'), '当前权限模式:自动编辑'],
+    [presetState('project-write'), '当前权限模式:自动编辑'],
     [presetState('approve-for-me'), '当前权限模式:自动审查'],
     [presetState('full-access'), '当前权限模式:完全访问'],
   ]

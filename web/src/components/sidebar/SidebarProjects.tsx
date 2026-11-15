@@ -16,8 +16,8 @@ import {
 import { applyManualOrder, moveId, toggleId } from '../../sidebarOrder'
 import { sessionAlias, setSessionAlias } from '../../sessionAliases'
 import { sessionDisplayTitle } from '../../sessionDisplay'
-import type { SessionSummary, WorkspaceRecord } from '../../types'
-import { IconClose, IconNewSession, IconPencil, IconPin, IconSessionSearch, IconTrash, IconWorkspace } from '../icons'
+import type { ProjectRecord, SessionSummary } from '../../types'
+import { IconClose, IconNewSession, IconPencil, IconPin, IconProject, IconSessionSearch, IconTrash } from '../icons'
 import { SidebarContextMenu, type SidebarMenuState } from '../SidebarContextMenu'
 import { ConfirmDialog } from '../ConfirmDialog'
 import type { SidebarDrag, SidebarDropTarget } from './nesting'
@@ -31,8 +31,7 @@ import {
   placementFromPointer,
   sortSessions,
   TIMELINE_LIMIT,
-  UNGROUPED_KEY,
-  WORKSPACE_DRAG_MIME,
+  PROJECT_DRAG_MIME,
 } from './nesting'
 import { SessionRow } from './SessionRow'
 
@@ -64,7 +63,7 @@ function SessionRows({
   runningIds: Record<string, boolean>
   collapsedChildren: Record<string, boolean>
   pinnedSessionIds: ReadonlySet<string>
-  confirming: { kind: 'session' | 'workspace'; id: string } | null
+  confirming: { kind: 'session' | 'project'; id: string } | null
   now: number
   onToggleCollapse: (id: string) => void
   onOpen: (session: SessionSummary) => void
@@ -101,9 +100,14 @@ function SessionRows({
   )
 }
 
-export function SidebarWorkspaces({
+/** Project title: the built-in default project is localized in the UI. */
+function projectTitle(project: ProjectRecord): string {
+  return project.builtin === 'default' ? t('defaultProject') : project.title
+}
+
+export function SidebarProjects({
   sessions,
-  workspaces,
+  projects,
   activeId,
   secondaryId,
   runningIds,
@@ -113,12 +117,11 @@ export function SidebarWorkspaces({
   onAllExpandedChange,
   onOpenSession,
   onNewSession,
-  onDeleteWorkspace,
+  onDeleteProject,
   onDeleteSession,
-  onDeleteUngrouped,
 }: {
   sessions: SessionSummary[]
-  workspaces: WorkspaceRecord[]
+  projects: ProjectRecord[]
   activeId: string | null
   /** 分屏副窗格的会话 id(弱高亮;null = 未分屏)。 */
   secondaryId?: string | null
@@ -127,11 +130,10 @@ export function SidebarWorkspaces({
   onSearchOpenChange: (open: boolean) => void
   expandAllTick: number
   onAllExpandedChange: (allExpanded: boolean) => void
-  onOpenSession: (id: string, wsId?: string) => void
-  onNewSession: (wsId?: string) => void
-  onDeleteWorkspace: (ws: WorkspaceRecord) => void
+  onOpenSession: (id: string, projectId?: string) => void
+  onNewSession: (projectId?: string) => void
+  onDeleteProject: (project: ProjectRecord) => void
   onDeleteSession: (session: SessionSummary) => void
-  onDeleteUngrouped: (sessions: SessionSummary[]) => void
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
@@ -143,14 +145,14 @@ export function SidebarWorkspaces({
   const [view, setView] = useState<SidebarView>(readSidebarView)
   const [showAllPinned, setShowAllPinned] = useState(false)
   const [timelineLimit, setTimelineLimit] = useState(TIMELINE_LIMIT)
-  const [confirming, setConfirming] = useState<{ kind: 'session' | 'workspace'; id: string } | null>(null)
+  const [confirming, setConfirming] = useState<{ kind: 'session' | 'project'; id: string } | null>(null)
   const [contextMenu, setContextMenu] = useState<SidebarMenuState | null>(null)
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [dragState, setDragState] = useState<SidebarDrag | null>(null)
   const dragRef = useRef<SidebarDrag | null>(null)
   const [dropTarget, setDropTarget] = useState<SidebarDropTarget | null>(null)
-  const pinnedWorkspaces = useMemo(() => new Set(pins.workspaces), [pins.workspaces])
+  const pinnedProjects = useMemo(() => new Set(pins.projects), [pins.projects])
   const pinnedSessionIds = useMemo(() => new Set(pins.sessions), [pins.sessions])
   const revealedSessionRef = useRef(restoredSidebarSession(activeId))
   useEffect(() => { writeCollapsedChildren(collapsedChildren) }, [collapsedChildren])
@@ -160,23 +162,15 @@ export function SidebarWorkspaces({
     () => new Map(sessions.map((session) => [session.id, session])),
     [sessions],
   )
-  const workspaceByPath = useMemo(
-    () => new Map(workspaces.map((workspace) => [workspace.path, workspace])),
-    [workspaces],
-  )
-  // 工作区路径集合:ungrouped 判定与"是否已有同路径工作区"都改走 Set,
-  // 把每次渲染的 O(会话数 × 工作区数) 比较降为 O(会话数)。
-  const workspacePaths = useMemo(
-    () => new Set(workspaces.map((workspace) => workspace.path)),
-    [workspaces],
-  )
-  // 项目顺序叠加本机手动排序;新项目(服务端 prepend)排在最前。
-  const orderedWorkspaces = useMemo(
-    () => applyManualOrder(workspaces, order.workspaces),
-    [workspaces, order.workspaces],
-  )
+  // 项目顺序叠加本机手动排序;默认项目固定排在最后,新项目(服务端 prepend)排在最前。
+  const orderedProjects = useMemo(() => {
+    const ordered = applyManualOrder(projects, order.projects)
+    const regular = ordered.filter((project) => project.builtin !== 'default')
+    const fallback = ordered.filter((project) => project.builtin === 'default')
+    return [...regular, ...fallback]
+  }, [projects, order.projects])
 
-  // 置顶任务连同它的整棵分支搬进「已置顶」,并从项目/未分组列表里隐藏。
+  // 置顶任务连同它的整棵分支搬进「已置顶」,并从项目列表里隐藏。
   const shelf = useMemo(
     () => collectPinnedSubtrees(sessions, pinnedSessionIds),
     [sessions, pinnedSessionIds],
@@ -184,18 +178,12 @@ export function SidebarWorkspaces({
   const hiddenSessionIds = shelf.hidden
 
   const membersOf = useCallback(
-    (ws: WorkspaceRecord) =>
-      ws.sessionIds
+    (project: ProjectRecord) =>
+      project.sessionIds
         .map((id) => sessionsById.get(id))
         .filter((session): session is SessionSummary =>
-          !!session && session.cwd === ws.path && !hiddenSessionIds.has(session.id)),
+          !!session && !hiddenSessionIds.has(session.id)),
     [sessionsById, hiddenSessionIds],
-  )
-
-  const ungrouped = useMemo(
-    () => sessions.filter((session) =>
-      (session.cwd === undefined || !workspacePaths.has(session.cwd)) && !hiddenSessionIds.has(session.id)),
-    [sessions, workspacePaths, hiddenSessionIds],
   )
 
   const [now, setNow] = useState(() => Date.now())
@@ -247,17 +235,17 @@ export function SidebarWorkspaces({
   }, [collapsedChildren, runningIds, searching])
 
   const projectGroups = useMemo(
-    () => orderedWorkspaces.map((ws) => ({
-      ws,
-      members: membersOf(ws).filter(matchesQuery),
+    () => orderedProjects.map((project) => ({
+      project,
+      members: membersOf(project).filter(matchesQuery),
     })),
-    [orderedWorkspaces, membersOf, matchesQuery],
+    [orderedProjects, membersOf, matchesQuery],
   )
   const visibleProjectGroups = searching
     ? projectGroups.filter((group) => group.members.length > 0)
     : projectGroups
-  const pinnedGroups = visibleProjectGroups.filter((group) => pinnedWorkspaces.has(group.ws.id))
-  const regularGroups = visibleProjectGroups.filter((group) => !pinnedWorkspaces.has(group.ws.id))
+  const pinnedGroups = visibleProjectGroups.filter((group) => pinnedProjects.has(group.project.id))
+  const regularGroups = visibleProjectGroups.filter((group) => !pinnedProjects.has(group.project.id))
 
   const visibleShelfRoots = searching || showAllPinned
     ? shelf.roots
@@ -273,12 +261,6 @@ export function SidebarWorkspaces({
   )
   const shelfView = buildNestedRows(shelfMembers)
 
-  const filteredUngrouped = ungrouped.filter(matchesQuery)
-  const ungroupedView = buildNestedRows(filteredUngrouped)
-  const ungroupedVisible = searching || showAll[UNGROUPED_KEY]
-    ? ungroupedView.rows
-    : ungroupedView.rows.slice(0, COLLAPSED_LIMIT)
-
   // 最近更新只在切到该视图时排序,避免按项目视图为每个会话重排一次。
   const timelineView = view === 'timeline'
     ? buildNestedRows(sessions.filter(matchesQuery), false)
@@ -289,18 +271,18 @@ export function SidebarWorkspaces({
 
   const projectsEmpty = shelfView.rows.length === 0 &&
     pinnedGroups.length === 0 &&
-    regularGroups.length === 0 &&
-    filteredUngrouped.length === 0
+    regularGroups.length === 0
   const timelineEmpty = timelineView.rows.length === 0
 
-  const workspaceIdFor = useCallback((session: SessionSummary): string | undefined => {
-    if (!session.cwd) return undefined
-    const workspace = workspaceByPath.get(session.cwd)
-    return workspace?.sessionIds.includes(session.id) ? workspace.id : undefined
-  }, [workspaceByPath])
+  const projectIdFor = useCallback((session: SessionSummary): string | undefined => {
+    if (session.project_id && projects.some((project) => project.id === session.project_id)) {
+      return session.project_id
+    }
+    return projects.find((project) => project.sessionIds.includes(session.id))?.id
+  }, [projects])
 
-  const openSession = useCallback((session: SessionSummary, workspaceId?: string) => {
-    onOpenSession(session.id, workspaceId)
+  const openSession = useCallback((session: SessionSummary, projectId?: string) => {
+    onOpenSession(session.id, projectId)
   }, [onOpenSession])
 
   const isGroupOpen = useCallback(
@@ -308,11 +290,7 @@ export function SidebarWorkspaces({
     [expanded],
   )
 
-  const groupKeys = useCallback(() => {
-    const keys = orderedWorkspaces.map((ws) => ws.id)
-    if (ungrouped.length > 0) keys.push(UNGROUPED_KEY)
-    return keys
-  }, [orderedWorkspaces, ungrouped.length])
+  const groupKeys = useCallback(() => orderedProjects.map((project) => project.id), [orderedProjects])
 
   useEffect(() => {
     const keys = groupKeys()
@@ -321,24 +299,22 @@ export function SidebarWorkspaces({
       return
     }
     const allOpen = keys.every((key) => {
-      if (key === UNGROUPED_KEY) return isGroupOpen(key, true)
-      const workspace = orderedWorkspaces.find((item) => item.id === key)
-      if (!workspace) return true
-      const members = membersOf(workspace)
+      const project = orderedProjects.find((item) => item.id === key)
+      if (!project) return true
+      const members = membersOf(project)
       return isGroupOpen(key, members.some((session) => session.id === activeId))
     })
     onAllExpandedChange(allOpen)
-  }, [activeId, groupKeys, isGroupOpen, membersOf, onAllExpandedChange, orderedWorkspaces])
+  }, [activeId, groupKeys, isGroupOpen, membersOf, onAllExpandedChange, orderedProjects])
 
   useEffect(() => {
     if (expandAllTick === 0 || expandAllTick === lastExpandTickRef.current) return
     lastExpandTickRef.current = expandAllTick
     const keys = groupKeys()
     const nextExpanded = keys.every((key) => {
-      if (key === UNGROUPED_KEY) return isGroupOpen(key, true)
-      const workspace = orderedWorkspaces.find((item) => item.id === key)
-      if (!workspace) return true
-      const members = membersOf(workspace)
+      const project = orderedProjects.find((item) => item.id === key)
+      if (!project) return true
+      const members = membersOf(project)
       return isGroupOpen(key, members.some((session) => session.id === activeId))
     })
     const wantExpand = !nextExpanded
@@ -347,24 +323,16 @@ export function SidebarWorkspaces({
     setExpanded((previous) => ({ ...previous, ...next }))
     // 全部展开时连带展开血缘折叠;收起只收组,不动子树。
     if (wantExpand) setCollapsedChildren({})
-  }, [activeId, expandAllTick, groupKeys, isGroupOpen, membersOf, orderedWorkspaces])
+  }, [activeId, expandAllTick, groupKeys, isGroupOpen, membersOf, orderedProjects])
 
   useEffect(() => {
     if (!activeId) return
     // 置顶任务在货架里常显,不需要再展开它所在的项目。
     if (hiddenSessionIds.has(activeId)) return
-    const workspace = orderedWorkspaces.find((item) => item.sessionIds.includes(activeId))
-    if (workspace) {
-      setExpanded((previous) => previous[workspace.id] ? previous : { ...previous, [workspace.id]: true })
-      return
-    }
-    const activeSession = sessionsById.get(activeId)
-    if (activeSession && !orderedWorkspaces.some((item) => item.path === activeSession.cwd)) {
-      setExpanded((previous) =>
-        previous[UNGROUPED_KEY] === false ? { ...previous, [UNGROUPED_KEY]: true } : previous,
-      )
-    }
-  }, [activeId, hiddenSessionIds, orderedWorkspaces, sessionsById])
+    const project = orderedProjects.find((item) => item.sessionIds.includes(activeId))
+    if (!project) return
+    setExpanded((previous) => previous[project.id] ? previous : { ...previous, [project.id]: true })
+  }, [activeId, hiddenSessionIds, orderedProjects])
 
   // 仅切换会话时展开祖先;刷新恢复与列表推送不覆盖用户的折叠选择。
   useEffect(() => {
@@ -406,57 +374,57 @@ export function SidebarWorkspaces({
     setDropTarget(null)
   }
 
-  const beginWorkspaceDrag = (event: React.DragEvent<HTMLButtonElement>, id: string) => {
-    event.dataTransfer.setData(WORKSPACE_DRAG_MIME, id)
+  const beginProjectDrag = (event: React.DragEvent<HTMLButtonElement>, id: string) => {
+    event.dataTransfer.setData(PROJECT_DRAG_MIME, id)
     event.dataTransfer.effectAllowed = 'move'
-    beginDrag({ kind: 'workspace', id })
+    beginDrag({ kind: 'project', id })
   }
 
-  const handleWorkspaceDragOver = (event: React.DragEvent<HTMLDivElement>, targetId: string) => {
+  const handleProjectDragOver = (event: React.DragEvent<HTMLDivElement>, targetId: string) => {
     const current = dragRef.current
-    if (!current || current.kind !== 'workspace' || current.id === targetId) return
-    if (pinnedWorkspaces.has(current.id) !== pinnedWorkspaces.has(targetId)) return
+    if (!current || current.kind !== 'project' || current.id === targetId) return
+    if (pinnedProjects.has(current.id) !== pinnedProjects.has(targetId)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
     const placement = placementFromPointer(event)
     setDropTarget((previous) =>
-      previous?.kind === 'workspace' &&
+      previous?.kind === 'project' &&
       previous.id === targetId &&
       previous.placement === placement
         ? previous
-        : { kind: 'workspace', id: targetId, placement },
+        : { kind: 'project', id: targetId, placement },
     )
   }
 
-  const handleWorkspaceDrop = (event: React.DragEvent<HTMLDivElement>, targetId: string) => {
+  const handleProjectDrop = (event: React.DragEvent<HTMLDivElement>, targetId: string) => {
     const current = dragRef.current
     const placement = placementFromPointer(event)
     endDrag()
-    if (!current || current.kind !== 'workspace' || current.id === targetId) return
-    if (pinnedWorkspaces.has(current.id) !== pinnedWorkspaces.has(targetId)) return
-    const ids = orderedWorkspaces.map((ws) => ws.id)
+    if (!current || current.kind !== 'project' || current.id === targetId) return
+    if (pinnedProjects.has(current.id) !== pinnedProjects.has(targetId)) return
+    const ids = orderedProjects.map((project) => project.id)
     const next = moveId(ids, current.id, targetId, placement)
     if (next === ids) return
     event.preventDefault()
-    const nextOrder = { ...order, workspaces: next }
+    const nextOrder = { ...order, projects: next }
     writeSidebarOrder(nextOrder)
     setOrder(nextOrder)
   }
 
   const closeContextMenu = useCallback(() => setContextMenu(null), [])
 
-  const togglePinned = useCallback((kind: 'session' | 'workspace', id: string) => {
+  const togglePinned = useCallback((kind: 'session' | 'project', id: string) => {
     setPins((previous) => {
       const next = kind === 'session'
         ? { ...previous, sessions: toggleId(previous.sessions, id) }
-        : { ...previous, workspaces: toggleId(previous.workspaces, id) }
+        : { ...previous, projects: toggleId(previous.projects, id) }
       writeSidebarPins(next)
       return next
     })
   }, [])
 
   /** 删除改成行内二次确认:先请求,确认按钮出现后再真正执行。 */
-  const requestDelete = (kind: 'session' | 'workspace', id: string) => {
+  const requestDelete = (kind: 'session' | 'project', id: string) => {
     closeContextMenu()
     setConfirming({ kind, id })
   }
@@ -470,8 +438,8 @@ export function SidebarWorkspaces({
       if (session) onDeleteSession(session)
       return
     }
-    const workspace = orderedWorkspaces.find((ws) => ws.id === target.id)
-    if (workspace) onDeleteWorkspace(workspace)
+    const project = orderedProjects.find((item) => item.id === target.id)
+    if (project) onDeleteProject(project)
   }
 
   // 确认按钮点下时不要被“点到外面”的清场逻辑先撤掉;其余位置/ESC 都取消。
@@ -512,8 +480,8 @@ export function SidebarWorkspaces({
     bumpCatalogTick()
   }
 
-  const createSessionInWorkspace = useCallback((workspaceId: string) => {
-    onNewSession(workspaceId)
+  const createSessionInProject = useCallback((projectId: string) => {
+    onNewSession(projectId)
   }, [onNewSession])
 
   const openSessionMenu = (event: React.MouseEvent, session: SessionSummary) => {
@@ -549,11 +517,11 @@ export function SidebarWorkspaces({
     })
   }
 
-  const openWorkspaceMenu = (event: React.MouseEvent, ws: WorkspaceRecord) => {
+  const openProjectMenu = (event: React.MouseEvent, project: ProjectRecord) => {
     event.preventDefault()
     event.stopPropagation()
     setConfirming(null)
-    const pinned = pinnedWorkspaces.has(ws.id)
+    const pinned = pinnedProjects.has(project.id)
     setContextMenu({
       x: event.clientX,
       y: event.clientY,
@@ -562,20 +530,21 @@ export function SidebarWorkspaces({
           key: 'new-session',
           label: t('newSession'),
           icon: <IconNewSession size={13} />,
-          onSelect: () => createSessionInWorkspace(ws.id),
+          onSelect: () => createSessionInProject(project.id),
         },
         {
           key: 'pin',
           label: pinned ? t('unpin') : t('pinToTop'),
           icon: <IconPin size={13} />,
-          onSelect: () => togglePinned('workspace', ws.id),
+          onSelect: () => togglePinned('project', project.id),
         },
         {
           key: 'delete',
-          label: t('deleteWorkspace'),
+          label: t('deleteProject'),
           icon: <IconTrash size={13} />,
           danger: true,
-          onSelect: () => requestDelete('workspace', ws.id),
+          disabled: project.builtin === 'default',
+          onSelect: () => requestDelete('project', project.id),
         },
       ],
     })
@@ -593,46 +562,52 @@ export function SidebarWorkspaces({
     writeSidebarView(next)
   }
 
-  const renderWorkspace = ({ ws, members }: { ws: WorkspaceRecord; members: SessionSummary[] }) => {
-    const open = searching || isGroupOpen(ws.id, members.some((session) => session.id === activeId))
+  const renderProject = ({ project, members }: { project: ProjectRecord; members: SessionSummary[] }) => {
+    const open = searching || isGroupOpen(project.id, members.some((session) => session.id === activeId))
     const nested = buildNestedRows(members)
-    const visible = searching || showAll[ws.id]
+    const visible = searching || showAll[project.id]
       ? nested.rows
       : nested.rows.slice(0, COLLAPSED_LIMIT)
-    const dragging = dragState?.kind === 'workspace' && dragState.id === ws.id
-    const drop = dropTarget?.kind === 'workspace' && dropTarget.id === ws.id
+    const dragging = dragState?.kind === 'project' && dragState.id === project.id
+    const drop = dropTarget?.kind === 'project' && dropTarget.id === project.id
       ? dropTarget.placement
       : null
+    const isDefault = project.builtin === 'default'
     return (
-      <div className={`ws-group${open ? ' open' : ''}${dragging ? ' dragging' : ''}`} key={ws.id} data-workspace-id={ws.id}>
+      <div className={`project-group${open ? ' open' : ''}${dragging ? ' dragging' : ''}`} key={project.id} data-project-id={project.id}>
         <div
-          className={`ws-group-head-row${drop ? ` drop-${drop}` : ''}`}
-          onDragOver={(event) => handleWorkspaceDragOver(event, ws.id)}
+          className={`project-group-head-row${drop ? ` drop-${drop}` : ''}`}
+          onDragOver={(event) => handleProjectDragOver(event, project.id)}
           onDragLeave={handleDragLeave}
-          onDrop={(event) => handleWorkspaceDrop(event, ws.id)}
-          onContextMenu={(event) => openWorkspaceMenu(event, ws)}
+          onDrop={(event) => handleProjectDrop(event, project.id)}
+          onContextMenu={(event) => openProjectMenu(event, project)}
         >
           <button
             type="button"
-            className={`ws-group-head${members.some((session) => session.id === activeId) ? ' active' : ''}`}
-            title={ws.path}
+            className={`project-group-head${members.some((session) => session.id === activeId) ? ' active' : ''}`}
+            title={project.dirs.join('\n')}
             aria-expanded={open}
-            draggable
-            onDragStart={(event) => beginWorkspaceDrag(event, ws.id)}
+            draggable={!isDefault}
+            onDragStart={(event) => beginProjectDrag(event, project.id)}
             onDragEnd={endDrag}
             onClick={() => {
               const fallback = members.some((session) => session.id === activeId)
               setExpanded((previous) => ({
                 ...previous,
-                [ws.id]: !(previous[ws.id] ?? fallback),
+                [project.id]: !(previous[project.id] ?? fallback),
               }))
             }}
           >
-            <span className="ws-folder">
-              <IconWorkspace size={14} />
+            <span className="project-folder">
+              <IconProject size={14} />
             </span>
-            <span className="name">{ws.title}</span>
-            {pinnedWorkspaces.has(ws.id) && (
+            <span className="name">{projectTitle(project)}</span>
+            {project.dirs.length > 1 && (
+              <span className="project-dir-count" title={project.dirs.join('\n')}>
+                {project.dirs.length}
+              </span>
+            )}
+            {pinnedProjects.has(project.id) && (
               <span className="pin-mark" title={t('pinnedLabel')} aria-label={t('pinnedLabel')} data-testid="pin-mark">
                 <IconPin size={12} />
               </span>
@@ -642,23 +617,23 @@ export function SidebarWorkspaces({
           <span className="row-actions">
             <button
               type="button"
-              className={`row-action-btn${pinnedWorkspaces.has(ws.id) ? ' active' : ''}`}
-              title={pinnedWorkspaces.has(ws.id) ? t('unpin') : t('pinToTop')}
-              aria-label={pinnedWorkspaces.has(ws.id) ? t('unpin') : t('pinToTop')}
-              aria-pressed={pinnedWorkspaces.has(ws.id)}
-              onClick={() => togglePinned('workspace', ws.id)}
+              className={`row-action-btn${pinnedProjects.has(project.id) ? ' active' : ''}`}
+              title={pinnedProjects.has(project.id) ? t('unpin') : t('pinToTop')}
+              aria-label={pinnedProjects.has(project.id) ? t('unpin') : t('pinToTop')}
+              aria-pressed={pinnedProjects.has(project.id)}
+              onClick={() => togglePinned('project', project.id)}
             >
               <IconPin size={12} />
             </button>
             <button
               type="button"
               className="row-action-btn"
-              title={t('newSessionIn', { name: ws.title })}
-              onClick={() => createSessionInWorkspace(ws.id)}
+              title={t('newSessionIn', { name: projectTitle(project) })}
+              onClick={() => createSessionInProject(project.id)}
             >
               <IconNewSession size={12} />
             </button>
-            {confirming?.kind === 'workspace' && confirming.id === ws.id ? (
+            {isDefault ? null : confirming?.kind === 'project' && confirming.id === project.id ? (
               <button
                 type="button"
                 className="confirm-delete-btn"
@@ -670,16 +645,16 @@ export function SidebarWorkspaces({
               <button
                 type="button"
                 className="row-action-btn danger"
-                title={t('deleteWorkspace')}
-                onClick={() => requestDelete('workspace', ws.id)}
+                title={t('deleteProject')}
+                onClick={() => requestDelete('project', project.id)}
               >
                 <IconTrash size={12} />
               </button>
             )}
           </span>
         </div>
-        <div className={`ws-group-body${open ? ' open' : ''}`}>
-          <div className="ws-group-body-inner">
+        <div className={`project-group-body${open ? ' open' : ''}`}>
+          <div className="project-group-body-inner">
             <SessionRows
               view={{ ...nested, rows: visible }}
               activeId={activeId}
@@ -690,7 +665,7 @@ export function SidebarWorkspaces({
               confirming={confirming}
               now={now}
               onToggleCollapse={toggleChildCollapse}
-              onOpen={(session) => openSession(session, ws.id)}
+              onOpen={(session) => openSession(session, project.id)}
               onRequestDelete={(id) => requestDelete('session', id)}
               onConfirmDelete={confirmDelete}
               onTogglePin={(id) => togglePinned('session', id)}
@@ -700,9 +675,9 @@ export function SidebarWorkspaces({
               <button
                 type="button"
                 className="expand-rest"
-                onClick={() => setShowAll((previous) => ({ ...previous, [ws.id]: !previous[ws.id] }))}
+                onClick={() => setShowAll((previous) => ({ ...previous, [project.id]: !previous[project.id] }))}
               >
-                {showAll[ws.id]
+                {showAll[project.id]
                   ? t('collapse')
                   : t('expandRest', { n: members.length - COLLAPSED_LIMIT })}
               </button>
@@ -783,7 +758,7 @@ export function SidebarWorkspaces({
                   <span className="name">{t('pinnedTasksSection')}</span>
                   <span className="count">{shelf.roots.length}</span>
                 </div>
-                <div className="ws-group-body-inner">
+                <div className="project-group-body-inner">
                   <SessionRows
                     view={shelfView}
                     activeId={activeId}
@@ -794,7 +769,7 @@ export function SidebarWorkspaces({
                     confirming={confirming}
                     now={now}
                     onToggleCollapse={toggleChildCollapse}
-                    onOpen={(session) => openSession(session, workspaceIdFor(session))}
+                    onOpen={(session) => openSession(session, projectIdFor(session))}
                     onRequestDelete={(id) => requestDelete('session', id)}
                     onConfirmDelete={confirmDelete}
                     onTogglePin={(id) => togglePinned('session', id)}
@@ -816,7 +791,7 @@ export function SidebarWorkspaces({
             )}
             {pinnedGroups.length > 0 && (
               <div className="sidebar-pinned-projects" data-testid="sidebar-pinned-projects">
-                {pinnedGroups.map(renderWorkspace)}
+                {pinnedGroups.map(renderProject)}
               </div>
             )}
             {regularGroups.length > 0 && (
@@ -825,66 +800,7 @@ export function SidebarWorkspaces({
                   <span className="name">{t('projectsSection')}</span>
                   <span className="count">{regularGroups.length}</span>
                 </div>
-                {regularGroups.map(renderWorkspace)}
-              </section>
-            )}
-            {filteredUngrouped.length > 0 && (
-              <section className="sidebar-task-section" data-testid="sidebar-tasks">
-                <div className="sidebar-section-head">
-                  <span className="name">{t('tasksSection')}</span>
-                  <span className="count">{filteredUngrouped.length}</span>
-                  <span className="sidebar-section-actions">
-                    <button
-                      type="button"
-                      className="row-action-btn"
-                      title={t('newSession')}
-                      aria-label={t('newSession')}
-                      onClick={() => onNewSession(undefined)}
-                    >
-                      <IconNewSession size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      className="ungrouped-clear"
-                      title={t('deleteUngroupedDesc', { n: filteredUngrouped.length })}
-                      onClick={() => onDeleteUngrouped(filteredUngrouped)}
-                    >
-                      {t('deleteUngrouped')}
-                    </button>
-                  </span>
-                </div>
-                <div className="ws-group-body-inner">
-                  <SessionRows
-                    view={{ ...ungroupedView, rows: ungroupedVisible }}
-                    activeId={activeId}
-                    secondaryId={secondaryId}
-                    runningIds={runningIds}
-                    collapsedChildren={collapsedChildren}
-                    pinnedSessionIds={pinnedSessionIds}
-                    confirming={confirming}
-                    now={now}
-                    onToggleCollapse={toggleChildCollapse}
-                    onOpen={(session) => openSession(session)}
-                    onRequestDelete={(id) => requestDelete('session', id)}
-                    onConfirmDelete={confirmDelete}
-                    onTogglePin={(id) => togglePinned('session', id)}
-                    onContextMenu={openSessionMenu}
-                  />
-                  {!searching && filteredUngrouped.length > COLLAPSED_LIMIT && (
-                    <button
-                      type="button"
-                      className="expand-rest"
-                      onClick={() => setShowAll((previous) => ({
-                        ...previous,
-                        [UNGROUPED_KEY]: !previous[UNGROUPED_KEY],
-                      }))}
-                    >
-                      {showAll[UNGROUPED_KEY]
-                        ? t('collapse')
-                        : t('expandRest', { n: filteredUngrouped.length - COLLAPSED_LIMIT })}
-                    </button>
-                  )}
-                </div>
+                {regularGroups.map(renderProject)}
               </section>
             )}
           </>
@@ -896,9 +812,9 @@ export function SidebarWorkspaces({
               </div>
             )}
             {!timelineEmpty && (
-              <div className="ws-group open" data-testid="sidebar-timeline">
-                <div className="ws-group-body open">
-                  <div className="ws-group-body-inner">
+              <div className="project-group open" data-testid="sidebar-timeline">
+                <div className="project-group-body open">
+                  <div className="project-group-body-inner">
                     <SessionRows
                       view={{ ...timelineView, rows: timelineVisible }}
                       activeId={activeId}
@@ -909,7 +825,7 @@ export function SidebarWorkspaces({
                       confirming={confirming}
                       now={now}
                       onToggleCollapse={toggleChildCollapse}
-                      onOpen={(session) => openSession(session, workspaceIdFor(session))}
+                      onOpen={(session) => openSession(session, projectIdFor(session))}
                       onRequestDelete={(id) => requestDelete('session', id)}
                       onConfirmDelete={confirmDelete}
                       onTogglePin={(id) => togglePinned('session', id)}

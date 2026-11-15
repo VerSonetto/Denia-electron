@@ -84,7 +84,7 @@ export function killTree(child: ChildProcess): void {
 export const BashTool = {
   schema: schema(
     'bash',
-    'Run one shell command in the session workspace and return its output. Commands run through bash when available (Git Bash on Windows), otherwise cmd.exe. Prefer non-interactive commands; long-running work should be split into smaller commands.',
+    'Run one shell command in the project and return its output. Commands run through bash when available (Git Bash on Windows), otherwise cmd.exe. The primary project directory is the cwd; every project directory is exported in DENIA_PROJECT_DIRS. Prefer non-interactive commands; long-running work should be split into smaller commands.',
     {
       type: 'object',
       properties: {
@@ -198,7 +198,11 @@ export const BashTool = {
           cwd: ctx.cwd,
           windowsHide: true,
           detached: process.platform !== 'win32',
-          env: { ...process.env },
+          env: {
+            ...process.env,
+            DENIA_PROJECT_DIRS: ctx.roots.join(process.platform === 'win32' ? ';' : ':'),
+            DENIA_PROJECT_ROOT: ctx.cwd,
+          },
         })
       } catch (spawnError) {
         error = `命令没能启动:${spawnError instanceof Error ? spawnError.message : String(spawnError)}`

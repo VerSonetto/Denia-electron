@@ -41,7 +41,7 @@ const turn = (number) => [event('user-message', { text: `turn ${number}` }),
   event('turn-start', { turn: number }), event('assistant-message', { turn: number, step: 1,
     blocks: [{ type: 'text', text: `answer ${number}` }] }),
   event('turn-end', { turn: number, reason: { kind: 'completed' } })]
-const header = { id: 'memory', cwd: 'D:/workspace' }
+const header = { id: 'memory', cwd: 'D:/project' }
 let nodes = []
 let anchors = []
 const props = { id: 'memory', pendingMessages: [], onNodesChange: (value) => { nodes = value },

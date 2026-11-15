@@ -7,7 +7,7 @@ export const CONTEXT_QUOTE_LIMIT = 64 * 1024
 export const CONTEXT_QUOTES_TOTAL_LIMIT = 256 * 1024
 const encoder = new TextEncoder()
 
-export function sameWorkspacePath(a: string | null | undefined, b: string | null | undefined): boolean {
+export function sameProjectPath(a: string | null | undefined, b: string | null | undefined): boolean {
   if (!a || !b) return false
   const normalize = (path: string) => {
     const slashes = path.replace(/\\/g, '/')
@@ -63,7 +63,7 @@ export function buildSessionContextQuote(
   })
   if (!messages.length) throw new Error(t('contextSessionEmpty'))
   const title = utf8Prefix(`${t('contextSessionQuote')}: ${sessionDisplayTitle(session)}`, 200)
-  const metadata = `${title}\nSession: ${session.id}\nWorkspace: ${session.cwd ?? ''}\n\n`
+  const metadata = `${title}\nSession: ${session.id}\nProject: ${session.cwd ?? ''}\n\n`
   const body = messages.join('\n\n')
   const truncated = hasMoreBefore || encoder.encode(metadata + body).length > CONTEXT_QUOTE_LIMIT
   const notice = truncated ? `${t('contextSessionTruncated')}\n\n` : ''

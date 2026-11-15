@@ -30,9 +30,15 @@ export interface ToolContext {
   sessionId: string
   /** The model call this execution belongs to (used by live output events). */
   callId: string
-  /** Session workspace; relative paths anchor here. */
+  /** Primary project directory; relative paths anchor here. */
   cwd: string
-  /** Confine file access to `cwd` (mirrors the Rust `confined` flag). */
+  /**
+   * Every directory of the session's project. `cwd` is always one of them.
+   * Relative paths still anchor at `cwd`; the sandbox boundary and default
+   * search scope cover all roots.
+   */
+  roots: string[]
+  /** Confine file access to the project roots (mirrors the `confined` flag). */
   confined: boolean
   cancel: AbortSignal
   /** Model selection of the current turn (subagent dispatch inherits it). */
@@ -72,22 +78,31 @@ export function textOutput(text: string, meta?: unknown): ToolOutput {
   return { content: text, isError: false, ...(meta === undefined ? {} : { meta }) }
 }
 
-/** Resolve a model-provided path and enforce the sandbox boundary. */
-export function resolvePath(cwd: string, raw: string, confined: boolean): string {
+/** Resolve a model-provided path and enforce the project boundary. */
+export function resolvePath(
+  cwd: string,
+  raw: string,
+  confined: boolean,
+  roots?: readonly string[],
+): string {
   if (!raw || raw.trim().length === 0) {
     throw new ToolArgumentError('path 不能为空')
   }
   const resolved = path.resolve(cwd, raw)
   if (!confined) return resolved
-  const relative = path.relative(cwd, resolved)
-  if (relative === '') return resolved
-  const escapes =
-    relative.startsWith('..' + path.sep) ||
-    relative === '..' ||
-    path.isAbsolute(relative) ||
-    (process.platform === 'win32' && relative.startsWith('../'))
-  if (escapes) {
-    throw new ToolArgumentError('沙箱开启时路径必须落在会话工作区内')
+  const allowed = roots && roots.length > 0 ? roots : [cwd]
+  const inside = allowed.some((root) => {
+    const relative = path.relative(root, resolved)
+    if (relative === '') return true
+    if (path.isAbsolute(relative)) return false
+    return (
+      relative !== '..' &&
+      !relative.startsWith('..' + path.sep) &&
+      !(process.platform === 'win32' && relative.startsWith('../'))
+    )
+  })
+  if (!inside) {
+    throw new ToolArgumentError('沙箱开启时路径必须落在项目目录内')
   }
   return resolved
 }

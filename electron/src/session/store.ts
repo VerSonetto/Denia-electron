@@ -353,6 +353,7 @@ export class SessionStore {
       sandbox?: boolean
       parentSession?: string
       subagent?: SubagentDescriptor
+      projectId?: string
     } = {},
   ): SessionHeader {
     const id = newSessionId()
@@ -363,6 +364,7 @@ export class SessionStore {
       created_at: Date.now(),
       cwd,
       sandbox: options.sandbox ?? false,
+      ...(options.projectId ? { project_id: options.projectId } : {}),
       ...(options.parentSession ? { parent_session: options.parentSession } : {}),
       ...(options.subagent ? { subagent: options.subagent } : {}),
     }
@@ -402,6 +404,9 @@ export class SessionStore {
     const session = this.live.get(id) ?? this.load(id)
     if (!session) return
     session.header = { ...session.header, ...patch }
+    // Summaries cache the header projection; a patched header must not keep
+    // serving the old project id / subagent descriptor.
+    this.cache.delete(id)
     session.writer.flush()
     const file = this.logFile(id)
     const raw = fs.readFileSync(file, 'utf8')
@@ -698,7 +703,10 @@ export class SessionStore {
     }
     const cached = this.cache.get(id)
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-      return { ...cached.summary, cwd_alive: cached.summary.cwd ? isDirectory(cached.summary.cwd) : undefined }
+      return {
+        ...cached.summary,
+        cwd_alive: cached.summary.cwd ? isDirectory(cached.summary.cwd) : undefined,
+      }
     }
     const liveSession = this.live.get(id)
     const header = liveSession?.header ?? this.header(id)
@@ -721,6 +729,7 @@ export class SessionStore {
       cwd: header.cwd,
       sandbox: header.sandbox,
       cwd_alive: isDirectory(header.cwd),
+      ...(header.project_id ? { project_id: header.project_id } : {}),
       ...(header.parent_session ? { parent_session: header.parent_session } : {}),
       ...(header.subagent ? { subagent: header.subagent } : {}),
       ...(header.agent_preset || preset ? { agent_preset: preset ?? header.agent_preset } : {}),

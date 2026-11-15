@@ -50,7 +50,7 @@ export type PresetTrust = "shipped" | "user";
 
 export type PresetFeatures = { 
 /**
- * AGENTS.md 工作区指令注入通道。
+ * AGENTS.md 项目指令注入通道。
  */
 agentsMd: boolean, 
 /**
@@ -515,7 +515,7 @@ export type SessionEvent = { "type": "agent-inbox", id: string, text: string, so
  */
 injected: boolean, 
 /**
- * 注入通道名(workspace-instructions / capability / skill-catalog /
+ * 注入通道名(project-instructions / capability / skill-catalog /
  * feedback / gesture-skill / file-notice / quote / runtime-context /
  * image 等);None = 真实用户消息或旧日志。通道识别以本字段优先,
  * 旧日志回退到文本前缀判断。
@@ -616,7 +616,7 @@ time: number, } & ({ "type": "agent-inbox", id: string, text: string, source: st
  */
 injected: boolean, 
 /**
- * 注入通道名(workspace-instructions / capability / skill-catalog /
+ * 注入通道名(project-instructions / capability / skill-catalog /
  * feedback / gesture-skill / file-notice / quote / runtime-context /
  * image 等);None = 真实用户消息或旧日志。通道识别以本字段优先,
  * 旧日志回退到文本前缀判断。

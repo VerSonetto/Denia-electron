@@ -1,4 +1,4 @@
-// The shared console's "open workspace with app" split button depends on three
+// The shared console's "open project with app" split button depends on three
 // host endpoints. These checks keep the contract (and the path guards) honest
 // without launching a real GUI app.
 

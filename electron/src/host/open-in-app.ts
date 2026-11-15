@@ -1,4 +1,4 @@
-// 「用应用打开」:探测本机可用于打开工作区目录的应用,提取真实图标并按需启动。
+// 「用应用打开」:探测本机可用于打开项目目录的应用,提取真实图标并按需启动。
 //
 // The endpoint contract mirrors the Rust host, so the shared web console's
 // `OpenInApp` split button works unchanged:

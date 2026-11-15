@@ -68,7 +68,7 @@ export function useComposerSlash({ activeId, inert, prompt, promptRef, setPrompt
   }, [])
 
   /**
-   * 从侧栏「工作区文件」树拖入的引用:在鼠标落点插入 `@路径`。
+   * 从侧栏「项目文件」树拖入的引用:在鼠标落点插入 `@路径`。
    *
    * 结果与手打 `@` 选中候选**完全一致**(共用 `formatFileMention` 的格式化),
    * 所以模型侧看到的引用语法只有一种形态。落点用 `caretOffsetAtPoint` 解析;

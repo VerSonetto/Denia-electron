@@ -13,7 +13,6 @@ import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
 
 import { BrowserManager } from '../browser/manager.ts'
 import { createBrowserTool } from '../tools/browser.ts'
@@ -46,13 +45,12 @@ import {
   setCredential,
   settingsDescribe,
   unsetCredential,
-  workspacesPath,
 } from '../config.ts'
 import { ExecPolicy } from '../core/exec-policy.ts'
 import { legacyModeOf, presetState, stateFromLegacy } from '../core/permission.ts'
 import type { PermissionState } from '../core/permission.ts'
 import { streamFor } from '../llm/index.ts'
-import type { Envelope, ImageData, ModelSelection, SessionEvent, ToolCallRef } from '../core/wire.ts'
+import type { Envelope, ImageData, ModelSelection, SessionEvent, SessionHeader, ToolCallRef } from '../core/wire.ts'
 import { errorMessage, isRecord } from '../core/util.ts'
 import { UsageIndex, isUsageRange } from '../session/usage.ts'
 import { SessionStore } from '../session/store.ts'
@@ -62,6 +60,14 @@ import { GoalCommandError, GoalRuntime } from '../goal/runtime.ts'
 import { ToolRegistry } from '../tools/index.ts'
 import { ServerApprovalBridge } from './approval-bridge.ts'
 import { HostServices } from './services.ts'
+import {
+  GitError,
+  gitCommit,
+  gitCommitContext,
+  gitDiff,
+  gitPush,
+  gitStatus,
+} from './git.ts'
 import { SkillTool } from '../tools/skill.ts'
 import { JOB_TOOL_NAMES } from '../tools/jobs.ts'
 import { JOB_OUTPUT_CAP, JobManager } from '../jobs/manager.ts'
@@ -85,12 +91,14 @@ import {
 import {
   deleteMemoryFile,
   memoryHealth,
-  memoryRoot,
+  projectMemoryRoot,
   readMemoryFile,
   rebuildIndex,
   scanManifest,
   searchMemories,
 } from '../context/memory.ts'
+import { isInside, ProjectStore } from '../project/store.ts'
+import type { ProjectRecord } from '../project/store.ts'
 import { ProfileError, ProfileStore } from '../subagents/profiles.ts'
 import { SubagentRuntime, subagentCapabilityNames } from '../subagents/runtime.ts'
 import {
@@ -133,6 +141,8 @@ export interface HostOptions {
   policy?: ExecPolicy
   /** Test seam: substitute the browser hub (null = no browser tool). */
   browser?: BrowserManager | null
+  /** Root for projects created without an explicit directory. */
+  projectsRoot?: string
 }
 
 export interface Host {
@@ -146,26 +156,14 @@ export interface Host {
   usage: UsageIndex
   /** 远程访问的设备台账与配对状态；测试与设置页都会读它。 */
   remote: RemoteRuntime
+  /** Project registry; tests and the settings pages read it. */
+  projects: ProjectStore
   close(): Promise<void>
-}
-
-interface WorkspaceRecord {
-  id: string
-  path: string
-  title: string
-  createdAt: number
-  sessionIds: string[]
 }
 
 interface GlobalEventEntry {
   seq: number
   event: { type: string; [key: string]: unknown }
-}
-
-interface WorkspaceFile {
-  initialized: boolean
-  order: string[]
-  workspaces: Record<string, WorkspaceRecord>
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -299,7 +297,13 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   registry.register(new SkillTool(home))
   const browser = options.browser === undefined ? new BrowserManager({ home }) : options.browser
   if (browser) registry.register(createBrowserTool(browser))
-  const workspaces = loadWorkspaces(home)
+  const projects = new ProjectStore(home, { ...(options.projectsRoot ? { managedRoot: options.projectsRoot } : {}) })
+  const projectOfHeader = (header: SessionHeader): ProjectRecord =>
+    projects.get(header.project_id) ??
+    projects.projectForPath(header.cwd) ??
+    projects.default
+  const rootsOfHeader = (header: SessionHeader): string[] =>
+    projects.rootsOf(projectOfHeader(header), header.cwd)
   const policy = options.policy ?? ExecPolicy.load(path.join(home, 'execpolicy.json'))
   const bridge = options.bridge ?? new ServerApprovalBridge()
   // Only the built-in channel knows how to settle requests from HTTP.
@@ -345,33 +349,44 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     for (const client of sseClients) writeSse(client, event)
   }
 
-  const saveWorkspaces = (): void => {
-    fs.writeFileSync(workspacesPath(home), JSON.stringify(workspaces, null, 2) + '\n', 'utf8')
-  }
-
-  /** Child sessions inherit the parent's workspace membership, like the Rust host. */
-  const attachToParentWorkspaces = (childId: string, parentId: string): void => {
-    let changed = false
-    for (const workspace of Object.values(workspaces.workspaces)) {
-      if (!workspace.sessionIds.includes(parentId)) continue
-      if (workspace.sessionIds.includes(childId)) continue
-      workspace.sessionIds = [childId, ...workspace.sessionIds]
-      changed = true
-    }
-    if (changed) saveWorkspaces()
+  /** Child sessions inherit the parent's project, like the Rust host. */
+  const attachToParentProjects = (childId: string, parentId: string): void => {
+    const parent = store.header(parentId)
+    if (!parent) return
+    const project =
+      projects.get(parent.project_id) ??
+      projects.projectForPath(parent.cwd) ??
+      projects.default
+    if (projects.attachSession(project.id, childId)) projects.save()
     broadcast({ type: 'sessions-updated' })
   }
 
-  const detachFromWorkspaces = (childId: string): void => {
-    let changed = false
-    for (const workspace of Object.values(workspaces.workspaces)) {
-      const before = workspace.sessionIds.length
-      workspace.sessionIds = workspace.sessionIds.filter((id) => id !== childId)
-      if (workspace.sessionIds.length !== before) changed = true
-    }
-    if (changed) saveWorkspaces()
+  const detachFromProjects = (childId: string): void => {
+    if (projects.detachSession(childId)) projects.save()
     broadcast({ type: 'sessions-updated' })
   }
+
+  /**
+   * Give every session a project: legacy logs may predate `project_id`, and
+   * legacy sessions imported from before projects have no membership.
+   */
+  const reconcileProjectSessions = (): void => {
+    let changed = false
+    for (const summary of store.list()) {
+      if (!summary.cwd) continue
+      const project =
+        projects.get(summary.project_id) ??
+        projects.projectForPath(summary.cwd) ??
+        projects.default
+      if (projects.attachSession(project.id, summary.id)) changed = true
+      if (summary.project_id !== project.id) {
+        store.updateHeader(summary.id, { project_id: project.id })
+        changed = true
+      }
+    }
+    if (changed) projects.save()
+  }
+  reconcileProjectSessions()
 
   const driver = new SessionDriver(
     store,
@@ -408,8 +423,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
   }, {
     maxConcurrentRuns: subagentPolicyConcurrency(home),
-    childCreated: attachToParentWorkspaces,
-    childRemoved: detachFromWorkspaces,
+    childCreated: attachToParentProjects,
+    childRemoved: detachFromProjects,
     definitionsChanged: () => broadcast({ type: 'subagents-updated' }),
     config: () => config,
   })
@@ -461,6 +476,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     jobs,
     home,
     store,
+    projects,
     fileHistory,
     goal: goalRuntime,
     permissionStateOf: (sessionId) => driver.permissionStateOf(sessionId),
@@ -584,8 +600,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     // —— permissions ——
     if (pathname === '/api/permissions/catalog' && method === 'GET') {
       json(res, 200, {
-        modes: ['read-only', 'workspace-write', 'approve-for-me', 'full-access'],
-        default: 'workspace-write',
+        modes: ['read-only', 'project-write', 'approve-for-me', 'full-access'],
+        default: 'project-write',
       })
       return
     }
@@ -593,23 +609,49 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     // —— sessions ——
     if (pathname === '/api/sessions') {
       if (method === 'GET') {
-        json(res, 200, { sessions: store.list() })
+        json(res, 200, {
+          sessions: store.list().map((summary) => {
+            const project =
+              projects.get(summary.project_id) ??
+              (summary.cwd ? projects.projectForPath(summary.cwd) : undefined) ??
+              projects.default
+            return { ...summary, project_id: project.id }
+          }),
+        })
         return
       }
       if (method === 'POST') {
         const body = await readJson(req)
-        const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : undefined
-        let cwd = typeof body.cwd === 'string' ? body.cwd.trim() : ''
-        if (workspaceId) {
-          const workspace = workspaces.workspaces[workspaceId]
-          if (!workspace) {
-            apiError(res, 404, 'workspace/not-found', 'workspace not found')
+        const projectId = typeof body.projectId === 'string' ? body.projectId : undefined
+        const requestedCwd = typeof body.cwd === 'string' ? body.cwd.trim() : ''
+        let project: ProjectRecord | undefined
+        if (projectId) {
+          project = projects.get(projectId)
+          if (!project) {
+            apiError(res, 404, 'project/not-found', 'project not found')
             return
           }
-          cwd = workspace.path
+        } else if (requestedCwd) {
+          if (!isDirectory(requestedCwd)) {
+            apiError(res, 400, 'session/bad-cwd', `'${requestedCwd}' 不是目录`)
+            return
+          }
+          // Bare `cwd` callers (tests, integrations) still get a project:
+          // every session must belong to exactly one project.
+          project =
+            projects.projectForPath(requestedCwd) ??
+            projects.create({ dirs: [requestedCwd] })
+        } else {
+          project = projects.default
         }
-        if (!cwd) {
-          apiError(res, 400, 'session/workspace-required', '先选择工作区,再开始会话')
+        let cwd = requestedCwd
+        if (cwd && projectId && !project.dirs.some((dir) => isInside(dir, cwd))) {
+          apiError(res, 400, 'session/cwd-outside-project', '会话目录必须位于项目目录内')
+          return
+        }
+        if (!cwd) cwd = project.dirs[0]!
+        if (projectId && !project.dirs.some((dir) => isDirectory(dir))) {
+          apiError(res, 400, 'project/no-directory', '项目没有可用目录')
           return
         }
         if (!isDirectory(cwd)) {
@@ -622,7 +664,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         // 每次创建都重新读设置:进程启动后才改的默认档位必须对这个会话生效,
         // 不能沿用启动时的快照。
         const initial = permissionPresetState(consolePermissionMode(home))
-        const header = store.create(cwd, { sandbox: true })
+        const header = store.create(cwd, { sandbox: true, projectId: project.id })
         store.append(header.id, { type: 'permission-mode', mode: legacyModeOf(initial) })
         store.append(header.id, {
           type: 'permission-selection',
@@ -632,13 +674,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           collaboration: initial.collaboration,
         })
         store.append(header.id, { type: 'agent-preset', preset })
-        if (workspaceId) {
-          const workspace = workspaces.workspaces[workspaceId]
-          if (workspace) {
-            workspace.sessionIds = [header.id, ...workspace.sessionIds.filter((id) => id !== header.id)]
-            saveWorkspaces()
-          }
-        }
+        if (projects.attachSession(project.id, header.id)) projects.save()
         broadcast({ type: 'sessions-updated' })
         json(res, 201, {
           session: {
@@ -647,8 +683,10 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
             excerpt: null,
             cwd: header.cwd,
             sandbox: header.sandbox,
+            project_id: project.id,
             agent_preset: preset,
           },
+          project,
         })
         return
       }
@@ -689,10 +727,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         store.flush(sessionId)
         store.delete(sessionId)
         fileHistory.forget(sessionId)
-        for (const workspace of Object.values(workspaces.workspaces)) {
-          workspace.sessionIds = workspace.sessionIds.filter((id) => id !== sessionId)
-        }
-        saveWorkspaces()
+        if (projects.detachSession(sessionId)) projects.save()
         broadcast({ type: 'sessions-updated' })
         json(res, 200, { ok: true })
         return
@@ -805,7 +840,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         }
         // Preset-level write (the agent-mode selector).
         const agentMode = body.agentMode
-        if (agentMode === 'read-only' || agentMode === 'workspace-write' || agentMode === 'approve-for-me' || agentMode === 'full-access') {
+        if (agentMode === 'read-only' || agentMode === 'project-write' || agentMode === 'approve-for-me' || agentMode === 'full-access') {
           const next = presetState(agentMode)
           store.append(sessionId, { type: 'permission-mode', mode: legacyModeOf(next) })
           store.append(sessionId, {
@@ -993,7 +1028,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         const header = store.header(sessionId)!
         const seq = Number(checkpointDiff[1])
         try {
-          json(res, 200, { changes: fileHistory.diff(sessionId, header.cwd, seq) })
+          json(res, 200, { changes: fileHistory.diff(sessionId, rootsOfHeader(header), seq) })
         } catch (error) {
           apiError(res, 400, 'file-history/diff', errorMessage(error))
         }
@@ -1011,7 +1046,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
           return
         }
         // Validate the target before touching files: a rejected rewind must not
-        // restore half the workspace.
+        // restore half the project.
         const target = store.read(sessionId)?.events.find((event) => event.seq === toSeq)
         if (!target || target.type !== 'user-message' || target.injected) {
           apiError(res, 400, 'session/not-rewind-point', '只能回退到用户消息')
@@ -1021,7 +1056,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         let changedFiles: string[]
         try {
           // Files first: if restoring fails the conversation log is untouched.
-          changedFiles = fileHistory.rewind(sessionId, header.cwd, toSeq)
+          changedFiles = fileHistory.rewind(sessionId, rootsOfHeader(header), toSeq)
         } catch (error) {
           apiError(res, 400, 'file-history/rewind', errorMessage(error))
           return
@@ -1049,7 +1084,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       }
       if (rest === '/skills' && method === 'GET') {
         const header = store.header(sessionId)
-        const skills = header ? discoverSkills(home, header.cwd).skills : []
+        const skills = header ? discoverSkills(home, rootsOfHeader(header)).skills : []
         json(res, 200, {
           skills: skills.map((skill) => ({
             name: skill.name,
@@ -1144,42 +1179,76 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       }
     }
 
-    // —— workspaces ——
-    if (pathname === '/api/workspaces') {
+    // —— projects ——
+    if (pathname === '/api/projects') {
       if (method === 'GET') {
-        json(res, 200, { workspaces: workspaceList(workspaces) })
+        json(res, 200, { projects: projects.list(), managedRoot: projects.managedRoot() })
         return
       }
       if (method === 'POST') {
         const body = await readJson(req)
-        const dir = typeof body.path === 'string' ? body.path.trim() : ''
-        if (!dir || !isDirectory(dir)) {
-          apiError(res, 400, 'workspace/bad-path', '工作区路径不是目录')
-          return
+        const rawDirs = Array.isArray(body.dirs)
+          ? body.dirs.filter((entry): entry is string => typeof entry === 'string')
+          : []
+        const dirs: string[] = []
+        for (const dir of rawDirs) {
+          const trimmed = dir.trim()
+          if (trimmed === '') continue
+          if (!isDirectory(trimmed)) {
+            apiError(res, 400, 'project/bad-dir', `'${trimmed}' 不是目录`)
+            return
+          }
+          if (!dirs.includes(trimmed)) dirs.push(trimmed)
         }
-        const record: WorkspaceRecord = {
-          id: randomUUID(),
-          path: dir,
-          title: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : path.basename(dir),
-          createdAt: Date.now(),
-          sessionIds: [],
-        }
-        workspaces.workspaces[record.id] = record
-        workspaces.order = [record.id, ...workspaces.order.filter((id) => id !== record.id)]
-        saveWorkspaces()
+        const title = typeof body.title === 'string' ? body.title.trim() : ''
+        const project = projects.create({ ...(title ? { title } : {}), dirs })
         broadcast({ type: 'sessions-updated' })
-        json(res, 201, { workspace: record })
+        json(res, 201, { project })
         return
       }
     }
-    const workspaceMatch = /^\/api\/workspaces\/([^/]+)$/.exec(pathname)
-    if (workspaceMatch && method === 'DELETE') {
-      const id = workspaceMatch[1]!
-      delete workspaces.workspaces[id]
-      workspaces.order = workspaces.order.filter((entry) => entry !== id)
-      saveWorkspaces()
+    const projectMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname)
+    if (projectMatch && method === 'DELETE') {
+      const id = projectMatch[1]!
+      const project = projects.get(id)
+      if (!project) {
+        apiError(res, 404, 'project/not-found', 'project not found')
+        return
+      }
+      if (project.builtin === 'default') {
+        apiError(res, 400, 'project/default', '默认项目不能删除')
+        return
+      }
+      // Deleting a project deletes its sessions (the UI says so); refuse
+      // halfway states instead of leaving orphaned logs.
+      const ids = new Set(project.sessionIds)
+      for (const summary of store.list()) {
+        if (summary.project_id === id) ids.add(summary.id)
+      }
+      for (const sessionId of ids) {
+        if (driver.isRunning(sessionId)) {
+          apiError(res, 409, 'session/running', '项目里还有会话在运行,请先取消')
+          return
+        }
+        try {
+          subagents.ensureRemovable(sessionId)
+        } catch (error) {
+          apiError(res, 409, 'session/agents-running', errorMessage(error))
+          return
+        }
+      }
+      for (const sessionId of ids) {
+        subagents.removeOwner(sessionId)
+        jobs.removeOwner(sessionId)
+        goalStore.remove(sessionId)
+        driver.forgetCacheWarm(sessionId)
+        store.flush(sessionId)
+        store.delete(sessionId)
+        fileHistory.forget(sessionId)
+      }
+      projects.remove(id)
       broadcast({ type: 'sessions-updated' })
-      json(res, 200, { ok: true })
+      json(res, 200, { ok: true, deletedSessions: [...ids] })
       return
     }
 
@@ -1391,7 +1460,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     if (pathname === '/api/fs/file' && method === 'GET') {
       const root = url.searchParams.get('path') ?? ''
       const file = url.searchParams.get('file') ?? ''
-      jsonOrError(res, () => workspaceFile(root, file))
+      jsonOrError(res, () => projectFile(root, file))
       return
     }
     if (pathname.startsWith('/api/fs/preview/')) {
@@ -1585,10 +1654,14 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       if (sessionId) {
         const header = store.header(sessionId)
         if (!header) throw new ProfileError('subagent/profile-not-found', `未知的会话:${sessionId}`)
-        if (!isDirectory(header.cwd)) {
-          throw new ProfileError('subagent/cwd-missing', `会话 ${sessionId} 的工作目录已不存在：${header.cwd}`)
+        const dir = rootsOfHeader(header).find((root) => isDirectory(root))
+        if (!dir) {
+          throw new ProfileError(
+            'subagent/cwd-missing',
+            `会话 ${sessionId} 的项目目录都已不存在：${rootsOfHeader(header).join('、')}`,
+          )
         }
-        return ProfileStore.projectRoot(header.cwd)
+        return ProfileStore.projectRoot(dir)
       }
       if (cwd) {
         if (!isDirectory(cwd)) {
@@ -1976,32 +2049,34 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
 
     // —— project memory ——
     if (pathname === '/api/memories/projects' && method === 'GET') {
-      const projects = workspaceList(workspaces).map((workspace) => {
-        const root = memoryRoot(home, workspace.path)
+      const rows = projects.list().map((project) => {
+        const root = projectMemoryRoot(home, project)
         const manifest = scanManifest(root)
         return {
-          id: workspace.id,
-          title: workspace.title,
-          path: workspace.path,
+          id: project.id,
+          title: project.title,
+          path: project.dirs[0] ?? '',
+          dirs: project.dirs,
+          ...(project.builtin ? { builtin: project.builtin } : {}),
           updatedAt: manifest.updatedAt,
           root: manifest.root,
           index: manifest.index,
           files: manifest.files,
         }
       })
-      json(res, 200, { projects })
+      json(res, 200, { projects: rows })
       return
     }
     const memoryIdMatch = /^\/api\/memories\/projects\/([^/]+)(\/.*)$/.exec(pathname)
     if (memoryIdMatch) {
       const id = safeDecode(memoryIdMatch[1]!)
       const restPath = memoryIdMatch[2]!
-      const workspace = workspaces.workspaces[id]
-      if (!workspace) {
-        apiError(res, 404, 'memory/workspace-not-found', 'workspace not found')
+      const project = projects.get(id)
+      if (!project) {
+        apiError(res, 404, 'memory/project-not-found', 'project not found')
         return
       }
-      const root = memoryRoot(home, workspace.path)
+      const root = projectMemoryRoot(home, project)
       if (restPath === '/search' && method === 'GET') {
         const query = url.searchParams.get('q') ?? ''
         const kindRaw = url.searchParams.get('kind')
@@ -2188,8 +2263,93 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       }
       return
     }
+    const gitFailure = (error: unknown): void => {
+      if (error instanceof GitError) apiError(res, error.status, error.code, error.message)
+      else apiError(res, 500, 'git/internal', errorMessage(error))
+    }
     if (pathname === '/api/git/status' && method === 'GET') {
-      json(res, 200, { isRepository: false, entries: [] })
+      try {
+        json(res, 200, await gitStatus(url.searchParams.get('path') ?? ''))
+      } catch (error) {
+        gitFailure(error)
+      }
+      return
+    }
+    if (pathname === '/api/git/diff' && method === 'GET') {
+      const source = url.searchParams.get('source')
+      try {
+        json(
+          res,
+          200,
+          await gitDiff(
+            url.searchParams.get('path') ?? '',
+            url.searchParams.get('file') ?? '',
+            source === 'staged' || source === 'branch' ? source : 'unstaged',
+          ),
+        )
+      } catch (error) {
+        gitFailure(error)
+      }
+      return
+    }
+    if (pathname === '/api/git/commit' && method === 'POST') {
+      const body = await readJson(req)
+      try {
+        const result = await gitCommit(
+          typeof body.path === 'string' ? body.path : '',
+          typeof body.message === 'string' ? body.message : '',
+        )
+        broadcast({ type: 'sessions-updated' })
+        json(res, 200, result)
+      } catch (error) {
+        gitFailure(error)
+      }
+      return
+    }
+    if (pathname === '/api/git/push' && method === 'POST') {
+      const body = await readJson(req)
+      try {
+        json(res, 200, await gitPush(typeof body.path === 'string' ? body.path : ''))
+      } catch (error) {
+        gitFailure(error)
+      }
+      return
+    }
+    if (pathname === '/api/git/commit-message' && method === 'POST') {
+      const body = await readJson(req)
+      const providerId = typeof body.provider === 'string' ? body.provider : ''
+      const modelId = typeof body.model === 'string' ? body.model : ''
+      const provider = findProvider(config, providerId)
+      if (!provider) {
+        apiError(res, 400, 'git/unknown-provider', `未知的模型提供商:${providerId}`)
+        return
+      }
+      try {
+        const context = await gitCommitContext(typeof body.path === 'string' ? body.path : '')
+        const parts: string[] = []
+        for await (const chunk of streamFor({
+          provider,
+          model: modelId,
+          system:
+            '你是一个 Git 提交信息生成器。根据用户给出的改动内容与近期提交历史,生成**一条**提交信息。\n\n严格遵守以下格式:\ntype(scope): 描述\n\n要求:\n1. type 取 feat / fix / refactor / perf / docs / test / chore / style / build / ci 之一。\n2. scope 必须是近期提交历史里出现过的模块名;无法判断时省略括号。\n3. 描述用中文,动宾结构,不超过 50 字。\n4. 只输出提交信息本身,不要解释、不要代码块、不要引号。',
+          messages: [
+            {
+              role: 'user',
+              content: `近期提交历史:\n${context.log || '(无)'}\n\n当前改动:\n${context.diff || '(无)'}`,
+            },
+          ],
+          tools: [],
+          ...(typeof body.reasoning_effort === 'string'
+            ? { reasoningEffort: body.reasoning_effort }
+            : {}),
+          signal: AbortSignal.timeout(120_000),
+        })) {
+          if (chunk.type === 'text-delta') parts.push(chunk.text)
+        }
+        json(res, 200, { message: parts.join('').trim() })
+      } catch (error) {
+        gitFailure(error)
+      }
       return
     }
 
@@ -2284,6 +2444,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     driver,
     usage,
     remote,
+    projects,
     async close() {
       await stopRemoteListener()
       clearInterval(heartbeatTimer)
@@ -2331,66 +2492,6 @@ function isDirectory(dir: string): boolean {
   } catch {
     return false
   }
-}
-
-function loadWorkspaces(home: string): WorkspaceFile {
-  const empty: WorkspaceFile = { initialized: true, order: [], workspaces: {} }
-  const file = workspacesPath(home)
-  if (!fs.existsSync(file)) return empty
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown
-  } catch {
-    return empty
-  }
-  if (!isRecord(parsed)) return empty
-  const rawWorkspaces = parsed.workspaces
-  if (Array.isArray(rawWorkspaces)) {
-    // Legacy TypeScript shape: plain array.
-    const map: Record<string, WorkspaceRecord> = {}
-    const order: string[] = []
-    for (const entry of rawWorkspaces) {
-      const record = normalizeWorkspace(entry)
-      if (!record) continue
-      map[record.id] = record
-      order.push(record.id)
-    }
-    return { initialized: true, order, workspaces: map }
-  }
-  if (!isRecord(rawWorkspaces)) return empty
-  const map: Record<string, WorkspaceRecord> = {}
-  for (const [id, entry] of Object.entries(rawWorkspaces)) {
-    const record = normalizeWorkspace(entry, id)
-    if (record) map[record.id] = record
-  }
-  const order = Array.isArray(parsed.order)
-    ? parsed.order.filter((id): id is string => typeof id === 'string' && id in map)
-    : []
-  for (const id of Object.keys(map)) {
-    if (!order.includes(id)) order.push(id)
-  }
-  return { initialized: true, order, workspaces: map }
-}
-
-function normalizeWorkspace(raw: unknown, fallbackId?: string): WorkspaceRecord | null {
-  if (!isRecord(raw)) return null
-  const id = typeof raw.id === 'string' && raw.id !== '' ? raw.id : fallbackId
-  if (!id || typeof raw.path !== 'string' || raw.path === '') return null
-  return {
-    id,
-    path: raw.path,
-    title: typeof raw.title === 'string' && raw.title !== '' ? raw.title : path.basename(raw.path),
-    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
-    sessionIds: Array.isArray(raw.sessionIds)
-      ? raw.sessionIds.filter((entry): entry is string => typeof entry === 'string')
-      : [],
-  }
-}
-
-function workspaceList(file: WorkspaceFile): WorkspaceRecord[] {
-  return file.order
-    .map((id) => file.workspaces[id])
-    .filter((record): record is WorkspaceRecord => record !== undefined)
 }
 
 function parseImages(value: unknown): ImageData[] {
@@ -2650,9 +2751,9 @@ function listMentions(root: string, query: string): { path: string; kind: 'file'
 
 function treeListing(root: string, dir: string): unknown {
   const base = path.resolve(root)
-  if (!isDirectory(base)) throw new Error('工作区路径不是目录')
+  if (!isDirectory(base)) throw new Error('项目路径不是目录')
   const target = path.resolve(base, dir || '.')
-  if (!target.startsWith(base)) throw new Error('路径越出工作区')
+  if (!target.startsWith(base)) throw new Error('路径越出项目目录')
   if (!isDirectory(target)) throw new Error('不是目录')
   const entries = fs
     .readdirSync(target, { withFileTypes: true })
@@ -2669,10 +2770,10 @@ function treeListing(root: string, dir: string): unknown {
   return { root: base, dir, entries: entries.slice(0, 500), truncated: entries.length > 500 }
 }
 
-function workspaceFile(root: string, file: string): unknown {
+function projectFile(root: string, file: string): unknown {
   const base = path.resolve(root)
   const target = path.resolve(base, file)
-  if (!target.startsWith(base)) throw new Error('路径越出工作区')
+  if (!target.startsWith(base)) throw new Error('路径越出项目目录')
   const stat = fs.statSync(target)
   if (!stat.isFile()) throw new Error('不是文件')
   if (stat.size > 4 * 1024 * 1024) throw new Error('文件超过 4MB,无法预览')

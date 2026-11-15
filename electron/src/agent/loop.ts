@@ -131,9 +131,11 @@ export interface SessionServices {
   /** Turn queued agent-inbox events into model-visible deliveries. */
   drainInbox?(sessionId: string): void
   /** Pin file state to a user message so it can be rewound to later. */
-  fileSnapshot?(sessionId: string, cwd: string, messageSeq: number): void
+  fileSnapshot?(sessionId: string, scope: string | readonly string[], messageSeq: number): void
   /** Backup handle handed to write/edit for the current turn. */
-  fileHistory?(sessionId: string, cwd: string): FileHistoryBackend
+  fileHistory?(sessionId: string, scope: string | readonly string[]): FileHistoryBackend
+  /** Every directory of the session's project (primary first). */
+  projectRoots?(sessionId: string, header: SessionHeader): string[]
   /** A human-initiated turn started: reset completion-wake budgets. */
   onTurnStart?(sessionId: string): void
   /** A turn closed; settle subagents, goal accounting and pending inboxes. */
@@ -311,6 +313,12 @@ export class SessionDriver {
   /** The session's permission state, projected from its event log. */
   permissionStateOf(sessionId: string): PermissionState {
     return permissionStateFromEvents(this.store.read(sessionId)?.events ?? [])
+  }
+
+  /** Project directories for a session; hosts without projects use the cwd. */
+  private rootsOf(sessionId: string, header: SessionHeader): string[] {
+    const roots = this.services?.projectRoots?.(sessionId, header)
+    return roots && roots.length > 0 ? roots : [header.cwd]
   }
 
   /** Session-level grants for approval-free reruns of the same action. */
@@ -604,7 +612,11 @@ export class SessionDriver {
       // not abort the turn (the checkpoint simply has no file history).
       if (userEnvelope && !injectedTurn) {
         try {
-          this.services?.fileSnapshot?.(sessionId, session.header.cwd, userEnvelope.seq)
+          this.services?.fileSnapshot?.(
+            sessionId,
+            this.rootsOf(sessionId, session.header),
+            userEnvelope.seq,
+          )
         } catch (error) {
           console.warn('[denia] 文件历史快照失败:', errorMessage(error))
         }
@@ -839,9 +851,11 @@ export class SessionDriver {
           })
         }
 
+        const roots = this.rootsOf(sessionId, session.header)
         const batch = await this.executeCalls(calls, {
           sessionId,
           cwd: session.header.cwd,
+          roots,
           sandbox: session.header.sandbox,
           cancel: controller.signal,
           selection,
@@ -851,7 +865,7 @@ export class SessionDriver {
           outputStore: this.outputStore,
           ...(this.services?.jobs ? { jobs: this.services.jobs } : {}),
           ...(this.services?.fileHistory
-            ? { fileHistory: this.services.fileHistory(sessionId, session.header.cwd) }
+            ? { fileHistory: this.services.fileHistory(sessionId, roots) }
             : {}),
           emit: (event) => {
             append(event)
@@ -1234,7 +1248,7 @@ export class SessionDriver {
           started = true
           continue
         }
-        const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot)
+        const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
         if (gate.decision.kind === 'forbid') {
           outputs[next] = toolError(gate.decision.reason)
           next += 1
@@ -1367,7 +1381,7 @@ export class SessionDriver {
             : '用户拒绝了该计划。请修订计划后重新提交;不确定用户的顾虑时,先用 ask 工具询问。'
           return { output: { content: text, isError: false }, abort: false }
         }
-        return { output: toolError('用户拒绝了该操作;请改用工作区内的方案,或先询问用户。'), abort: false }
+        return { output: toolError('用户拒绝了该操作;请改用项目目录内的方案,或先询问用户。'), abort: false }
       case 'cancel':
         return { output: toolError('审批已被取消(用户中断了本轮)。'), abort: true }
     }
@@ -1388,7 +1402,7 @@ export class SessionDriver {
     if (call.name === 'exit_plan') {
       return this.applyPlanApproval(ctx.sessionId, answer, ctx.emit, onSelectionChange)
     }
-    const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot)
+    const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
     if (recheck.decision.kind === 'forbid') {
       return toolError(`批准后重新判权被拒绝:${recheck.decision.reason}`)
     }
@@ -1407,7 +1421,7 @@ export class SessionDriver {
     append: (event: SessionEvent) => void,
     onSelectionChange: (next: ModelSelection) => void,
   ): ToolOutput {
-    const executeMode = answer.plan?.executeMode === 'full' ? 'full-access' : 'workspace-write'
+    const executeMode = answer.plan?.executeMode === 'full' ? 'full-access' : 'project-write'
     const next = presetState(executeMode, 'default')
     append({
       type: 'permission-selection',

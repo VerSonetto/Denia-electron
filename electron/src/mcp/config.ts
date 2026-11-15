@@ -25,7 +25,8 @@ export interface McpServerConfig {
   enabled: boolean
   disabledTools: string[]
   scope: McpServerScope
-  workspaceId?: string | null
+  /** Project this server is scoped to (`scope: project`). */
+  projectId?: string | null
   protocolVersion: string
   callTimeoutMs?: number | null
 }
@@ -149,7 +150,11 @@ export function normalizeServerConfig(raw: unknown): McpServerConfig {
     enabled: record.enabled !== false,
     disabledTools: stringArray(record.disabledTools),
     scope: record.scope === 'project' ? 'project' : 'user',
-    ...(typeof record.workspaceId === 'string' ? { workspaceId: record.workspaceId } : {}),
+    ...(typeof record.projectId === 'string'
+      ? { projectId: record.projectId }
+      : typeof record.workspaceId === 'string'
+        ? { projectId: record.workspaceId }
+        : {}),
     protocolVersion:
       typeof record.protocolVersion === 'string' && record.protocolVersion.trim() !== ''
         ? record.protocolVersion
@@ -194,8 +199,8 @@ export function validateServer(server: McpServerConfig): string | null {
   if (server.cwd !== null && !isAbsolutePath(server.cwd)) {
     return `服务器 '${server.id}' 的 cwd 必须是绝对路径,当前是 '${server.cwd}'`
   }
-  if (server.scope === 'project' && !server.workspaceId) {
-    return `服务器 '${server.id}' 选了「项目」作用域却没指定 workspaceId`
+  if (server.scope === 'project' && !server.projectId) {
+    return `服务器 '${server.id}' 选了「项目」作用域却没指定 projectId`
   }
   if (server.callTimeoutMs !== null && server.callTimeoutMs !== undefined) {
     if (server.callTimeoutMs < 1 || server.callTimeoutMs > 600_000) {
@@ -259,7 +264,7 @@ export function mergeServerConfig(
     env,
     headers,
     scope: existing.scope,
-    workspaceId: existing.workspaceId ?? null,
+    projectId: existing.projectId ?? null,
     protocolVersion: existing.protocolVersion,
     callTimeoutMs: existing.callTimeoutMs,
   }

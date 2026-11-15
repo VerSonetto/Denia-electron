@@ -10,12 +10,12 @@ import { usePermissions } from '../features/conversation/usePermissions';
 import { usePromptOptimize } from '../features/conversation/usePromptOptimize';
 import { useMessageQueue, type PostMessageFn } from '../features/conversation/useMessageQueue';
 import { peekQueueDefaultAction } from '../features/conversation/queueDefaults';
-import { SessionHeader, HeroWorkspaceRow } from '../components/SessionHeader';
+import { SessionHeader, HeroProjectRow } from '../components/SessionHeader';
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent } from 'react';
 import * as api from '../api';
 import { flushSync } from 'react-dom'
 
-import { addSessionLocal, ensureSession, getActiveWorkspace, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useSessions, useWorkspaces } from '../appStore';
+import { addSessionLocal, ensureSession, getActiveProject, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useProjects, useSessions } from '../appStore';
 import { t } from '../i18n';
 import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
 import { subagentModelLabel, subagentSnapshotFacts, subagentSnapshotText } from '../sessionDisplay';
@@ -50,7 +50,7 @@ import type { SessionEnvelope } from '../types';
 import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
-import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, QueuedMessage, SessionSummary, SessionTotals, TodoItem, UserMessageImage, WorkspaceRecord } from '../types';
+import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, QueuedMessage, SessionSummary, SessionTotals, TodoItem, UserMessageImage, ProjectRecord } from '../types';
 import { isGenericImageName } from '../userImages';
 import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
 
@@ -58,9 +58,9 @@ export default function SessionsPage({
   activeId,
   locked,
   hasStarted,
-  onSelectWorkspace,
+  onSelectProject,
   onOpenPicker,
-  onAddWorkspace,
+  onAddProject,
   sidePaneOpen = false,
   onToggleSidePane,
   secondary = false,
@@ -71,14 +71,14 @@ export default function SessionsPage({
   activeId: string | null
   locked: boolean
   hasStarted: boolean
-  onSelectWorkspace: (ws: WorkspaceRecord) => void
+  onSelectProject: (project: ProjectRecord) => void
   onOpenPicker: () => void
-  onAddWorkspace: () => void
+  onAddProject: () => void
   /** 右侧面板是否展开(切换按钮的激活态)。 */
   sidePaneOpen?: boolean
   /** 切换右侧面板。 */
   onToggleSidePane?: () => void
-  /** 分屏副窗格:不渲染工作区选择这类会触发全局动作的入口。 */
+  /** 分屏副窗格:不渲染项目选择这类会触发全局动作的入口。 */
   secondary?: boolean
   /**
    * 组件内切换会话的出口。默认切全局 activeId;分屏副窗格由 App 注入,
@@ -90,7 +90,7 @@ export default function SessionsPage({
   onPlanReviewChange?: (review: { title?: string; planText: string } | null) => void
 }) {
   const sessions = useSessions()
-  const workspaces = useWorkspaces()
+  const projects = useProjects()
   const catalogTick = useCatalogTick()
   // 切换会话的统一出口:主窗格走全局 activeId,分屏副窗格由 App 注入
   // navigate 把切换约束在本窗格内(窗格语义见 splitView.ts)。
@@ -130,7 +130,7 @@ export default function SessionsPage({
   const catalogRef = useRef<ModelCatalog | null>(null)
   const [prompt, setPrompt] = useState('')
   const [selection, setSelection] = useState<ModelSelection | null>(null)
-  const [wsMenuOpen, setWsMenuOpen] = useState(false)
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [sending, setSending] = useState(false)
   const [planPreviewDismissed, setPlanPreviewDismissed] = useState(false)
   // 提示词优化状态在 usePromptOptimize 里;applyDraft 由 useComposerSlash
@@ -249,7 +249,7 @@ export default function SessionsPage({
   const resetFollow = follower.reset
   const follow = follower.follow
 
-  const activeWs: WorkspaceRecord | null = getActiveWorkspace()
+  const activeProject: ProjectRecord | null = getActiveProject()
 
   const syncPromptHeight = useCallback(() => {
     const el = promptRef.current
@@ -258,7 +258,7 @@ export default function SessionsPage({
     el.style.height = `${el.scrollHeight}px`
   }, [])
 
-  const inert = !activeId && !activeWs
+  const inert = !activeId && !activeProject
 
   /* 占位提示跟内容走,不跟 DOM 结构走:浏览器删掉最后一段文字后会补一个
    * 占位 `<br>`,`:empty` 因此不再匹配、提示消失。看观察器而不是只改输入
@@ -284,8 +284,8 @@ export default function SessionsPage({
     setOptimizedPrompt(null)
     originalPromptRef.current = ''
   }, [inputHistory.resetBrowse])
-  const contextWorkspacePath = activeId ? activeSession?.cwd ?? null : activeWs?.path ?? null
-  const mentionCwd = activeSession?.cwd_alive === false ? null : contextWorkspacePath
+  const contextProjectPath = activeId ? activeSession?.cwd ?? null : activeProject?.dirs[0] ?? null
+  const mentionCwd = activeSession?.cwd_alive === false ? null : contextProjectPath
   const { mentionOpen, mentionItems, mentionLoading, mentionQuery, mentionActive, setMentionActive,
     mentionMenuRef, closeMention, refreshMentions, pickMention } = useComposerMentions({
       mentionCwd, promptRef, onDraftChange, syncPromptHeight,
@@ -297,7 +297,7 @@ export default function SessionsPage({
     })
   applyDraftRef.current = applyDraft
 
-  /* ---- 从侧栏「工作区文件」树拖入的引用 ---- */
+  /* ---- 从侧栏「项目文件」树拖入的引用 ---- */
 
   /** 拖拽悬停:只有本应用树里拖来的引用才接受,其余(外部文本/文件)交回浏览器。 */
   const onEditorDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
@@ -356,7 +356,7 @@ export default function SessionsPage({
   //
   // 依赖只挂 activeId —— 这是一次"换会话"的复位,不是"回调换了个引用"的
   // 复位。closeMention / resetFollow 走 ref 转发:它们挂在别的 hook 上,
-  // 身份会随着工作区、cwd、运行状态在挂载过程中变化,一旦进了依赖数组,
+  // 身份会随着项目、cwd、运行状态在挂载过程中变化,一旦进了依赖数组,
   // 这个 effect 会在会话加载**之后**再跑一次,把刚收到的 transcriptNodes
   // 清空 —— 表现就是输入框下方的状态栏(StatsBar)整场不再出现(它只吃
   // nodes,而此刻已无新节点推送)。
@@ -533,7 +533,7 @@ export default function SessionsPage({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
-  const composerScope = activeId ? `session:${activeId}` : activeWs?.path ? `workspace:${activeWs.path}` : null
+  const composerScope = activeId ? `session:${activeId}` : activeProject ? `project:${activeProject.id}` : null
   const composerSnapshotRef = useRef<ComposerSnapshot>({ text: '', images: [], attachments: [], quotes: [], queue: [] })
   const composerReadyRef = useRef(false)
   // postMessage 镜像:每渲染重赋(赋值处在 postMessage 定义之后),
@@ -979,9 +979,9 @@ export default function SessionsPage({
       forkBusyRef.current = true
       try {
         const { session } = await api.forkSession(activeId, seq)
-        // 子会话挂同一工作区(fork 后立即 open 子会话)。
-        addSessionLocal({ ...session, cwd_alive: true }, activeWs?.id)
-        go(session.id, activeWs?.id ?? null)
+        // 子会话挂同一项目(fork 后立即 open 子会话)。
+        addSessionLocal({ ...session, cwd_alive: true }, activeProject?.id)
+        go(session.id, activeProject?.id ?? null)
         void refreshList()
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
@@ -989,7 +989,7 @@ export default function SessionsPage({
         forkBusyRef.current = false
       }
     },
-    [activeId, activeWs, go],
+    [activeId, activeProject, go],
   )
 
   /* ---- 轨迹引用:芯片挂到输入框上方,随消息注入(与粘贴图片一致) ---- */
@@ -1227,7 +1227,7 @@ export default function SessionsPage({
       // 从欢迎页发首条消息时,活动会话尚未创建;把当前选择的权限带到新会话。
       const wasHero = !activeId
       await flushComposer()
-      const id = activeId ?? await ensureSession(activeWs, false)
+      const id = activeId ?? await ensureSession(activeProject, false)
       if (!activeId) createdId = id
       if (!id) {
         onOpenPicker()
@@ -1355,7 +1355,7 @@ export default function SessionsPage({
             await flushComposer()
           }
           if (composerScope) await saveComposer(composerScope, empty)
-          if (mountedRef.current) go(createdId, activeWs?.id)
+          if (mountedRef.current) go(createdId, activeProject?.id)
         } catch (error) { notify('err', String(error)) }
       } else if (ok && options?.clearInput !== false && !mountedRef.current && composerScope) {
         await saveComposer(composerScope, { ...composerSnapshotRef.current, text: '', images: [], attachments: [], quotes: [] })
@@ -1547,25 +1547,25 @@ export default function SessionsPage({
 
   const promptScrollRef = useContainedWheel<HTMLDivElement>()
 
-  const workspaceRow = (
-    <HeroWorkspaceRow
-      workspaces={workspaces}
-      activeWs={activeWs}
+  const projectRow = (
+    <HeroProjectRow
+      projects={projects}
+      activeProject={activeProject}
       locked={locked}
       inert={inert}
-      wsMenuOpen={wsMenuOpen}
-      setWsMenuOpen={setWsMenuOpen}
+      projectMenuOpen={projectMenuOpen}
+      setProjectMenuOpen={setProjectMenuOpen}
       agentPresetCatalog={agentPresetCatalog}
       agentPresetId={agentPresetId}
       agentPresetBusy={agentPresetBusy}
       changeAgentPreset={changeAgentPreset}
-      onSelectWorkspace={onSelectWorkspace}
-      onAddWorkspace={onAddWorkspace}
+      onSelectProject={onSelectProject}
+      onAddProject={onAddProject}
       onOpenPicker={onOpenPicker}
     />
   )
 
-  const placeholderText = inert ? t('placeholderWorkspace') : t('chatPlaceholder')
+  const placeholderText = inert ? t('placeholderProject') : t('chatPlaceholder')
 
   const composerCard = (
     <div
@@ -1646,7 +1646,7 @@ export default function SessionsPage({
           aria-autocomplete="list"
           aria-controls={mentionOpen ? 'file-mention-results' : undefined}
           aria-activedescendant={mentionOpen && !mentionLoading && mentionItems.length > 0 ? `file-mention-option-${mentionActive}` : undefined}
-          aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
+          aria-label={inert ? t('heroChooseProject') : t('chatPlaceholder')}
           aria-readonly={inert || optimizing || !composerReady}
           spellCheck={false}
           onInput={() => {
@@ -1814,7 +1814,7 @@ export default function SessionsPage({
           <ComposerContextMenu
             panelAnchorRef={composerPanelRef}
             disabled={inert || optimizing || sending}
-            workspacePath={contextWorkspacePath}
+            projectPath={contextProjectPath}
             filesAvailable={activeSession?.cwd_alive !== false}
             activeId={activeId}
             sessions={sessions}
@@ -1926,7 +1926,7 @@ export default function SessionsPage({
       data-compact={layoutFit !== 'wide' || undefined}
       data-tight={layoutFit === 'tight' || undefined}
     >
-      {phase === 'hero' && !secondary && activeWs && onToggleSidePane && (
+      {phase === 'hero' && !secondary && activeProject && onToggleSidePane && (
         <button
           type="button"
           className={`icon-btn session-pane-btn hero-pane-btn${sidePaneOpen ? ' active' : ''}`}
@@ -1958,7 +1958,7 @@ export default function SessionsPage({
           setExportBusy={setExportBusy}
         />
       )}
-      <div className="runtime-workspace" data-runtime-visible={runtimeCounts.agents + runtimeCounts.jobs > 0 && !runtimeCollapsed || undefined}
+      <div className="runtime-view" data-runtime-visible={runtimeCounts.agents + runtimeCounts.jobs > 0 && !runtimeCollapsed || undefined}
         data-plan-preview={planReview && (!planPreviewInPane || planPreviewDismissed) ? 'local' : undefined}>
       <div
         className="conversation-scroll"
@@ -2029,7 +2029,7 @@ export default function SessionsPage({
         {(phase === 'hero' || view === 'chat') && (
           <div className="composer-seat" ref={seatRef} data-composer-seat="">
             <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
-              {phase === 'hero' && !secondary && workspaceRow}
+              {phase === 'hero' && !secondary && projectRow}
               {phase === 'active' && (
                 <QueuedMessagePanel
                   messages={queuedMessages}
@@ -2159,7 +2159,11 @@ export default function SessionsPage({
                   <span className={`rewind-file-action ${change.action}`}>
                     {change.action === 'restore' ? t('rewindRestore') : t('rewindDelete')}
                   </span>
-                  <code>{change.path}</code>
+                  <code title={change.root}>
+                    {change.root
+                      ? `${change.root.split(/[\\/]/).filter(Boolean).pop() ?? change.root}/${change.path}`
+                      : change.path}
+                  </code>
                 </div>
               ))}
             </div>

@@ -3,9 +3,10 @@
  *
  * 这里有两处**有意的简化**:
  *
- * 1. **不做虚拟列表**。denia 的定位是单机单仓库,一次几百个文件已是极端情况,
+ * 1. **不做虚拟列表**。denia 的定位是单机项目,一次几百个文件已是极端情况,
  *    而虚拟列表会带来"展开状态与虚拟窗口不同步"的一类 bug。先做朴素列表,
  *    真遇到性能问题再换 —— 数据结构已经按"按需懒加载 diff"设计好了。
+ *    项目有多个目录时按目录分组；同一 Git 仓库只展示一次。
  * 2. **Diff 用 `<pre>` + 行着色**,不引 diff 渲染库。patch 本身已经是
  *    带 `+`/`-`/` ` 前缀的文本,按前缀上色就够读;引库会带来主题适配、
  *    大文件卡顿、包体积三个负担。
@@ -25,7 +26,6 @@ import {
   failureHint,
   fetchGitDiff,
   fetchGitStatus,
-  flattenSections,
   generateCommitMessage,
   pushChanges,
   sectionize,
@@ -58,22 +58,69 @@ interface ActionFeedback {
 }
 
 export interface ReviewPanelProps {
-  /** 工作区绝对路径。 */
-  workspacePath: string
+  /** 项目主目录。保留给单目录项目和「本轮」来源。 */
+  projectPath: string
+  /** 项目的全部目录；缺省时只审查 projectPath。 */
+  projectDirs?: string[]
   /** 会话 id:状态按会话缓存,切会话重拉。 */
   sessionId: string | null
   /** 当前对话选择的模型(AI 生成提交信息复用同一条链路);未选则禁用该入口。 */
   selection?: { provider: string; model: string; reasoningEffort?: string } | null
 }
 
-export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanelProps) {
-  const [status, setStatus] = useState<GitStatus | null>(null)
+interface DirectoryStatus {
+  /** Git operation root (repo root when available). */
+  dir: string
+  /** Project directory label the user picked. */
+  label: string
+  status: GitStatus | null
+  error?: string
+}
+
+/** Display labels for project directories; duplicate basenames get an index. */
+function directoryLabels(dirs: readonly string[]): string[] {
+  const counts = new Map<string, number>()
+  for (const dir of dirs) {
+    const base = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+    counts.set(base, (counts.get(base) ?? 0) + 1)
+  }
+  const seen = new Map<string, number>()
+  return dirs.map((dir) => {
+    const base = dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
+    if ((counts.get(base) ?? 0) <= 1) return base
+    const index = (seen.get(base) ?? 0) + 1
+    seen.set(base, index)
+    return `${base} (${index})`
+  })
+}
+
+function branchLine(status: GitStatus): string {
+  const branch = status.detached
+    ? `${t('sidePaneReviewDetached')} ${status.head ?? ''}`.trim()
+    : (status.branch ?? t('sidePaneReviewNoBranch'))
+  const counts =
+    status.ahead != null && status.behind != null
+      ? ` · ↑${status.ahead} ↓${status.behind}`
+      : ''
+  return `${branch}${counts}`
+}
+
+export function ReviewPanel({ projectPath, projectDirs, sessionId, selection }: ReviewPanelProps) {
+  const dirs = useMemo(() => {
+    const list = [projectPath, ...(projectDirs ?? [])]
+      .map((dir) => dir.trim())
+      .filter((dir) => dir !== '')
+    return [...new Set(list)]
+  }, [projectPath, projectDirs])
+  const dirsKey = dirs.join('\u0000')
+  const [statuses, setStatuses] = useState<DirectoryStatus[]>([])
+  const [selectedDir, setSelectedDir] = useState<string>('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   /**
    * 来源。`turn` 是**不依赖 git** 的那一个:数据来自对话里那张变更卡片
-   * (工具参数算出的行级 diff),工作区不是仓库时它是唯一还能看到 diff
-   * 的地方。三个 git 来源覆盖工作区全量改动,两者并存不替代。
+   * (工具参数算出的行级 diff),项目不是仓库时它是唯一还能看到 diff
+   * 的地方。三个 git 来源覆盖项目全量改动,两者并存不替代。
    */
   const [source, setSource] = useState<GitSource | 'turn'>('unstaged')
   const [rows, setRows] = useState<Record<string, RowState>>({})
@@ -89,14 +136,25 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
   /** 正在跑的写操作:提交与推送互斥,期间按钮禁用。 */
   const [busy, setBusy] = useState<'commit' | 'push' | 'generate' | null>(null)
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'error'; text: string; hint?: string } | null>(null)
-  /** 生成请求的中止句柄(切工作区/卸载时取消在途请求)。 */
+  /** 生成请求的中止句柄(切项目/卸载时取消在途请求)。 */
   const generateAbortRef = useRef<AbortController | null>(null)
 
-  const isRepo = status?.isRepository === true
-
-  // 工作区不是仓库时,三个 git 来源全是空的:默认落在「本轮」,否则用户点
-  // 开面板只看到一个"不是 Git 仓库"的空态,而本轮改动就在手边。
-  // 有本轮数据时才这么落;否则维持原样(空态里由 turn 按钮兜底)。
+  const dirLabels = useMemo(() => directoryLabels(dirs), [dirs])
+  const dirOptions = useMemo(
+    () =>
+      statuses.length > 0
+        ? statuses.map((entry) => ({ value: entry.dir, label: entry.label }))
+        : dirs.map((dir, index) => ({ value: dir, label: dirLabels[index] ?? dir })),
+    [statuses, dirs, dirLabels],
+  )
+  const selectedStatuses = useMemo(
+    () => (selectedDir === 'all' ? statuses : statuses.filter((entry) => entry.dir === selectedDir)),
+    [statuses, selectedDir],
+  )
+  const nonRepoCount = selectedStatuses.filter(
+    (entry) => entry.status !== null && !entry.status.isRepository,
+  ).length
+  const isRepo = selectedStatuses.some((entry) => entry.status?.isRepository === true)
   const onTurn = source === 'turn'
   const hasTurn = turnChanges !== null && turnChanges.files.length > 0
   const effectiveGitSource: GitSource = source === 'turn' ? 'unstaged' : source
@@ -106,43 +164,73 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
     const revision = revisionRef.current
     setLoading(true)
     setError('')
-    try {
-      const next = await fetchGitStatus(workspacePath)
-      if (revisionRef.current !== revision) return
-      setStatus(next)
-      // 状态变了:丢弃所有已缓存的 diff(行内容可能已过期)。
-      setRows({})
-    } catch (cause) {
-      if (revisionRef.current !== revision) return
-      setError(cause instanceof Error ? cause.message : String(cause))
-      setStatus(null)
-    } finally {
-      if (revisionRef.current === revision) setLoading(false)
+    const results = await Promise.all(
+      dirs.map(async (dir): Promise<DirectoryStatus> => {
+        try {
+          return {
+            dir,
+            label: dirLabels[dirs.indexOf(dir)] ?? dir,
+            status: await fetchGitStatus(dir),
+          }
+        } catch (cause) {
+          return {
+            dir,
+            label: dirLabels[dirs.indexOf(dir)] ?? dir,
+            status: null,
+            error: cause instanceof Error ? cause.message : String(cause),
+          }
+        }
+      }),
+    )
+    if (revisionRef.current !== revision) return
+    // Two project directories can live in the same repository. Review once,
+    // from the repository root, so commit/push do not run twice.
+    const seen = new Set<string>()
+    const unique: DirectoryStatus[] = []
+    for (const entry of results) {
+      const key = (entry.status?.repoRoot ?? entry.dir).toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      unique.push({
+        ...entry,
+        dir: entry.status?.repoRoot ?? entry.dir,
+      })
     }
-  }, [workspacePath])
+    setStatuses(unique)
+    // 状态变了:丢弃所有已缓存的 diff(行内容可能已过期)。
+    setRows({})
+    setLoading(false)
+  }, [dirsKey])
 
   useEffect(() => {
     void refresh()
   }, [refresh, sessionId])
 
-  // 非仓库工作区:自动落到「本轮」。git 状态到位后才知道是不是仓库,而三个
+  // 非仓库项目:自动落到「本轮」。git 状态到位后才知道是不是仓库,而三个
   // git 来源在非仓库里必然是空的 —— 停在默认的"未暂存"就等于对着空面板。
   // 有本轮数据才落;没有就维持原样,让"不是 Git 仓库"的空态说话。
   useEffect(() => {
-    if (!loading && status !== null && !status.isRepository && hasTurn && source !== 'turn') {
+    if (!loading && statuses.length > 0 && !isRepo && hasTurn && source !== 'turn') {
       setSource('turn')
     }
-  }, [loading, status, hasTurn, source])
+  }, [loading, statuses.length, isRepo, hasTurn, source])
 
-  // 切会话:来源回到默认。原因有两个 —— 新会话的「本轮」数据还没写进来,
-  // 停在 turn 上只会看到一句"本轮没有文件改动";而且上一个会话选的是
-  // 「已暂存」之类,直接套到新工作区是错位的默认。
+  // 切会话/切目录:来源回到默认。原因有两个 —— 新会话的「本轮」数据还没
+  // 写进来,停在 turn 上只会看到一句"本轮没有文件改动";而且上一个会话
+  // 选的是「已暂存」之类,直接套到新项目是错位的默认。
   useEffect(() => {
     setSource('unstaged')
     setFilter('')
     setTurnOpen({})
     setRows({})
-  }, [sessionId, workspacePath])
+    setSelectedDir('all')
+  }, [sessionId, dirsKey])
+
+  useEffect(() => {
+    if (selectedDir !== 'all' && !dirOptions.some((entry) => entry.value === selectedDir)) {
+      setSelectedDir('all')
+    }
+  }, [dirOptions, selectedDir])
 
   /* ---- 提交 / 推送 / AI 生成 ---- */
 
@@ -153,58 +241,150 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
     return () => window.clearTimeout(timer)
   }, [feedback])
 
-  // 卸载/切工作区时取消在途的生成请求。
+  // 卸载/切项目时取消在途的生成请求。
   useEffect(() => {
     return () => generateAbortRef.current?.abort()
-  }, [workspacePath])
+  }, [dirsKey])
 
-  const hasChanges = useMemo(
-    () => (status?.isRepository ? status.entries.length > 0 : false),
-    [status],
+  const groups = useMemo(
+    () =>
+      selectedStatuses
+        .filter((entry): entry is DirectoryStatus & { status: GitStatus } =>
+          entry.status?.isRepository === true)
+        .map((entry) => ({
+          dir: entry.dir,
+          status: entry.status,
+          sections: sectionize(entry.status.entries, effectiveGitSource),
+        })),
+    [selectedStatuses, effectiveGitSource],
   )
 
-  /** 提交:成功后就地刷新(改动列表清空、ahead 计数 +1)。 */
+  const totalFiles = useMemo(
+    () => groups.reduce((sum, group) => sum + group.sections.reduce((n, section) => n + section.entries.length, 0), 0),
+    [groups],
+  )
+  const hasChanges = totalFiles > 0
+
+  const visibleGroups = useMemo(() => {
+    const query = filter.trim().toLowerCase()
+    if (!query) return groups
+    return groups
+      .map((group) => ({
+        ...group,
+        sections: group.sections
+          .map((section) => ({
+            ...section,
+            entries: section.entries.filter((entry) =>
+              entry.path.toLowerCase().includes(query),
+            ),
+          }))
+          .filter((section) => section.entries.length > 0),
+      }))
+      .filter((group) => group.sections.length > 0)
+  }, [groups, filter])
+
+  /** 本轮来源的文件列表(按当前筛选词过滤,空筛选即全量)。 */
+  const visibleTurnFiles = useMemo<readonly TurnProducedFile[]>(() => {
+    if (turnChanges === null) return []
+    const query = filter.trim().toLowerCase()
+    if (!query) return turnChanges.files
+    return turnChanges.files.filter((file) => file.path.toLowerCase().includes(query))
+  }, [turnChanges, filter])
+
+  const selectedLabel =
+    selectedDir === 'all'
+      ? t('reviewAllDirs')
+      : (dirOptions.find((entry) => entry.value === selectedDir)?.label ?? selectedDir)
+  const commitDirs = useMemo(
+    () =>
+      selectedStatuses
+        .filter((entry) => entry.status?.isRepository && entry.status.entries.length > 0)
+        .map((entry) => entry.dir),
+    [selectedStatuses],
+  )
+  const pushDirs = useMemo(
+    () =>
+      selectedStatuses
+        .filter((entry) => entry.status?.isRepository)
+        .map((entry) => entry.dir),
+    [selectedStatuses],
+  )
+
+  /** 提交:成功后刷新(改动列表清空、ahead 计数 +1)。 */
   const submit = useCallback(async () => {
     if (busy) return
+    if (commitDirs.length === 0) {
+      setFeedback({ kind: 'error', text: t('reviewNothingToCommit') })
+      return
+    }
     setBusy('commit')
     setFeedback(null)
+    const done: string[] = []
+    let current = ''
     try {
-      const result = await commitChanges(workspacePath, message)
+      for (const dir of commitDirs) {
+        current = dir
+        const result = await commitChanges(dir, message)
+        done.push(result.head)
+      }
       setMessage('')
-      setFeedback({ kind: 'ok', text: t('reviewCommitted', { head: result.head }) })
-      // 重新拉状态:提交后的改动列表、分支领先数都变了。
+      setFeedback({
+        kind: 'ok',
+        text: done.length > 1
+          ? t('reviewCommittedDirs', { n: done.length })
+          : t('reviewCommitted', { head: done[0] ?? '' }),
+      })
       await refresh()
     } catch (cause) {
       const code = cause instanceof GitApiError ? cause.code : ''
+      const label = dirOptions.find((entry) => entry.value === current)?.label ?? current
       setFeedback({
         kind: 'error',
-        text: cause instanceof Error ? cause.message : String(cause),
+        text: `${label}: ${cause instanceof Error ? cause.message : String(cause)}`,
         hint: failureHint(code),
       })
+      await refresh()
     } finally {
       setBusy(null)
     }
-  }, [busy, message, workspacePath, refresh])
+  }, [busy, commitDirs, message, refresh, dirOptions])
 
   const runPush = useCallback(async () => {
     if (busy) return
+    if (pushDirs.length === 0) {
+      setFeedback({ kind: 'error', text: t('reviewNothingToPush') })
+      return
+    }
     setBusy('push')
     setFeedback(null)
+    const upstreams: string[] = []
+    let current = ''
     try {
-      const result = await pushChanges(workspacePath)
-      setFeedback({ kind: 'ok', text: `${t('reviewPushSuccess')} · ${result.upstream}` })
+      for (const dir of pushDirs) {
+        current = dir
+        const result = await pushChanges(dir)
+        upstreams.push(result.upstream)
+      }
+      setFeedback({
+        kind: 'ok',
+        text: upstreams.length > 1
+          ? t('reviewPushedDirs', { n: upstreams.length })
+          : `${t('reviewPushSuccess')} · ${upstreams[0] ?? ''}`,
+      })
       await refresh()
     } catch (cause) {
       const code = cause instanceof GitApiError ? cause.code : ''
+      const label = dirOptions.find((entry) => entry.value === current)?.label ?? current
       setFeedback({
         kind: 'error',
-        text: cause instanceof Error ? cause.message : String(cause),
+        text: `${label}: ${cause instanceof Error ? cause.message : String(cause)}`,
         hint: failureHint(code),
       })
+      await refresh()
     } finally {
       setBusy(null)
     }
-  }, [busy, workspacePath, refresh])
+  }, [busy, pushDirs, refresh, dirOptions])
 
   /** AI 生成:结果填入编辑框,用户可改后再提交(不自动提交)。 */
   const generate = useCallback(async () => {
@@ -213,6 +393,8 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
       setFeedback({ kind: 'error', text: t('reviewGenerateNeedsModel') })
       return
     }
+    const target = selectedDir !== 'all' ? selectedDir : commitDirs[0] ?? dirs[0]
+    if (!target) return
     generateAbortRef.current?.abort()
     const controller = new AbortController()
     generateAbortRef.current = controller
@@ -221,7 +403,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
     try {
       const result = await generateCommitMessage(
         {
-          path: workspacePath,
+          path: target,
           provider: selection.provider,
           model: selection.model,
           reasoningEffort: selection.reasoningEffort,
@@ -242,47 +424,20 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
       if (generateAbortRef.current === controller) generateAbortRef.current = null
       setBusy(null)
     }
-  }, [busy, selection, workspacePath])
-
-  const sections = useMemo(
-    () => (isRepo ? sectionize(status!.entries, effectiveGitSource) : []),
-    [isRepo, status, effectiveGitSource],
-  )
-
-  const visibleSections = useMemo(() => {
-    const query = filter.trim().toLowerCase()
-    if (!query) return sections
-    return sections
-      .map((section) => ({
-        ...section,
-        entries: section.entries.filter((entry) =>
-          entry.path.toLowerCase().includes(query),
-        ),
-      }))
-      .filter((section) => section.entries.length > 0)
-  }, [sections, filter])
-
-  const totalFiles = useMemo(() => flattenSections(sections).length, [sections])
-
-  /** 本轮来源的文件列表(按当前筛选词过滤,空筛选即全量)。 */
-  const visibleTurnFiles = useMemo<readonly TurnProducedFile[]>(() => {
-    if (turnChanges === null) return []
-    const query = filter.trim().toLowerCase()
-    if (!query) return turnChanges.files
-    return turnChanges.files.filter((file) => file.path.toLowerCase().includes(query))
-  }, [turnChanges, filter])
+  }, [busy, selection, selectedDir, commitDirs, dirs])
 
   /** 展开/收起一行,首次展开时懒加载 diff。 */
   const toggle = useCallback(
-    (entry: GitEntry) => {
-      const current = rows[entry.path]
+    (dir: string, entry: GitEntry) => {
+      const key = `${dir}\u0000${entry.path}`
+      const current = rows[key]
       if (current?.expanded) {
-        setRows((prev) => ({ ...prev, [entry.path]: { ...current, expanded: false } }))
+        setRows((prev) => ({ ...prev, [key]: { ...current, expanded: false } }))
         return
       }
       setRows((prev) => ({
         ...prev,
-        [entry.path]: {
+        [key]: {
           expanded: true,
           // 已经有 diff 就不重复拉(收起再展开是常见操作)。
           loading: !current?.diff,
@@ -292,20 +447,20 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
       }))
       if (current?.diff) return
       const revision = revisionRef.current
-      fetchGitDiff(workspacePath, entry.path, effectiveGitSource)
+      fetchGitDiff(dir, entry.path, effectiveGitSource)
         .then((diff) => {
           // 期间刷新过状态:结果已过期,丢弃。
           if (revisionRef.current !== revision) return
           setRows((prev) => ({
             ...prev,
-            [entry.path]: { expanded: true, loading: false, diff, error: '' },
+            [key]: { expanded: true, loading: false, diff, error: '' },
           }))
         })
         .catch((cause: unknown) => {
           if (revisionRef.current !== revision) return
           setRows((prev) => ({
             ...prev,
-            [entry.path]: {
+            [key]: {
               expanded: true,
               loading: false,
               diff: null,
@@ -314,7 +469,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
           }))
         })
     },
-    [rows, workspacePath, source],
+    [rows, effectiveGitSource],
   )
 
   const sourceLabel = (value: GitSource) =>
@@ -324,20 +479,13 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         ? t('sidePaneReviewBranch')
         : t('sidePaneReviewUnstaged')
 
-  const branchText = status?.detached
-    ? `${t('sidePaneReviewDetached')} ${status.head ?? ''}`.trim()
-    : (status?.branch ?? t('sidePaneReviewNoBranch'))
-  const aheadBehind =
-    status?.ahead != null && status?.behind != null
-      ? ` · ↑${status.ahead} ↓${status.behind}`
-      : ''
   const subtitle = onTurn
     ? t('reviewSourceTurn')
-    : status === null
+    : loading && statuses.length === 0
       ? undefined
-      : isRepo
-        ? <span title={`${branchText}${aheadBehind}`}>{branchText}{aheadBehind}</span>
-        : t('sidePaneReviewNotRepo')
+      : selectedDir === 'all'
+        ? t('reviewDirsSummary', { dirs: dirs.length, files: totalFiles })
+        : branchLine(selectedStatuses.find((entry) => entry.status)?.status ?? { isRepository: false, entries: [] })
 
   return (
     <div className="review-panel pane-panel">
@@ -361,7 +509,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
 
       <PanelToolbar className="review-toolbar">
         <div className="pane-seg review-sources" role="tablist" aria-label={t('sidePaneReviewSource')}>
-          {/* 「本轮」排在最前:它是变更卡片的直达入口,也是非仓库工作区里
+          {/* 「本轮」排在最前:它是变更卡片的直达入口,也是非仓库项目里
               唯一有内容的来源。 */}
           <button
             type="button"
@@ -403,11 +551,49 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         )}
       </PanelToolbar>
 
+      {dirOptions.length > 1 && !onTurn && (
+        <div className="review-dir-tabs" role="tablist" aria-label={t('reviewProjectDirs')}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={selectedDir === 'all'}
+            className="review-dir-tab"
+            onClick={() => setSelectedDir('all')}
+          >
+            {t('reviewAllDirs')}
+          </button>
+          {dirOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="tab"
+              aria-selected={selectedDir === option.value}
+              className="review-dir-tab"
+              title={option.value}
+              onClick={() => setSelectedDir(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {!onTurn && isRepo && nonRepoCount > 0 && (
+        <p className="review-empty-line">
+          {t('reviewSomeDirsNotRepo', { n: nonRepoCount })}
+        </p>
+      )}
+
       {error && (
         <p className="review-error" role="alert">
           {error}
         </p>
       )}
+      {!onTurn && statuses.filter((entry) => entry.error).map((entry) => (
+        <p className="review-error" role="alert" key={entry.dir}>
+          {directoryLabels([entry.dir])[0]}: {entry.error}
+        </p>
+      ))}
 
       {onTurn && (
         <TurnChangesList
@@ -424,8 +610,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         />
       )}
 
-      {/* 非仓库 + 未选本轮来源:给一条能走过去的路,而不是只说"不是仓库"。 */}
-      {status && !isRepo && !loading && !onTurn && (
+      {!onTurn && !loading && statuses.length === 0 && (
         <div className="review-empty">
           <IconFile size={26} />
           <p className="review-empty-title">{t('sidePaneReviewNotRepo')}</p>
@@ -433,7 +618,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         </div>
       )}
 
-      {isRepo && !onTurn && totalFiles === 0 && !loading && (
+      {!onTurn && visibleGroups.length === 0 && totalFiles === 0 && !loading && statuses.some((entry) => entry.status?.isRepository) && (
         <div className="review-empty">
           <IconFile size={26} />
           <p className="review-empty-title">{t('sidePaneReviewClean')}</p>
@@ -441,74 +626,94 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         </div>
       )}
 
-      {isRepo && !onTurn && totalFiles > 0 && (
+      {!onTurn && visibleGroups.length > 0 && (
         <div className="review-list">
-          {visibleSections.length === 0 && (
-            <p className="review-empty-line">{t('sidePaneReviewNoMatch')}</p>
+          {visibleGroups.map((group) => (
+        <section className="review-dir-group" key={group.dir}>
+          {dirs.length > 1 && (
+            <h3 className="review-dir-title">
+              <span className="review-dir-name" title={group.dir}>
+                {dirOptions.find((entry) => entry.value === group.dir)?.label ?? group.dir}
+              </span>
+              {group.status.isRepository && (
+                <span className="review-dir-branch">{branchLine(group.status)}</span>
+              )}
+            </h3>
           )}
-          {visibleSections.map((section) => (
-            <section key={section.id} className="review-section">
-              <h3 className="review-section-title">
-                {section.id === 'staged'
-                  ? t('sidePaneReviewSectionStaged')
-                  : section.id === 'untracked'
-                    ? t('sidePaneReviewSectionUntracked')
-                    : section.id === 'conflicted'
-                      ? t('sidePaneReviewSectionConflicted')
-                      : t('sidePaneReviewSectionUnstaged')}
-                <span className="review-section-count">{section.entries.length}</span>
-              </h3>
-              {section.entries.map((entry) => {
-                const state = rows[entry.path]
-                const expanded = state?.expanded ?? false
-                return (
-                  <div className="review-row" key={`${section.id}:${entry.path}`}>
-                    <button
-                      type="button"
-                      className="review-row-head"
-                      aria-expanded={expanded}
-                      onClick={() => toggle(entry)}
-                    >
-                      <span className="review-row-icon" aria-hidden="true">
-                        <IconFile size={14} />
-                      </span>
-                      <span className="review-row-path" title={entry.path}>
-                        {entry.path}
-                        {entry.renamedFrom && (
-                          <span className="review-row-renamed"> ← {entry.renamedFrom}</span>
-                        )}
-                      </span>
-                      <span className="review-row-status" aria-hidden="true">
-                        {statusLabel(entry)}
-                      </span>
-                      <IconChevronDown
-                        size={14}
-                        className={`review-row-chevron${expanded ? ' open' : ''}`}
-                      />
-                    </button>
-                    {expanded && (
-                      <div className="review-diff">
-                        {state?.loading && (
-                          <div className="review-diff-hint">
-                            <IconSpinner size={14} />
-                            {t('loading')}
-                          </div>
-                        )}
-                        {state?.error && (
-                          <div className="review-diff-hint error">{state.error}</div>
-                        )}
-                        {state?.diff && <DiffBody diff={state.diff} />}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </section>
+          {group.sections.length === 0 ? (
+            <p className="review-empty-line">{t('sidePaneReviewClean')}</p>
+          ) : (
+            group.sections.map((section) => (
+              <div key={`${group.dir}:${section.id}`} className="review-section">
+                <h4 className="review-section-title">
+                  {section.id === 'staged'
+                    ? t('sidePaneReviewSectionStaged')
+                    : section.id === 'untracked'
+                      ? t('sidePaneReviewSectionUntracked')
+                      : section.id === 'conflicted'
+                        ? t('sidePaneReviewSectionConflicted')
+                        : t('sidePaneReviewSectionUnstaged')}
+                  <span className="review-section-count">{section.entries.length}</span>
+                </h4>
+                {section.entries.map((entry) => {
+                  const key = `${group.dir}\u0000${entry.path}`
+                  const state = rows[key]
+                  const expanded = state?.expanded ?? false
+                  return (
+                    <div className="review-row" key={`${section.id}:${key}`}>
+                      <button
+                        type="button"
+                        className="review-row-head"
+                        aria-expanded={expanded}
+                        onClick={() => toggle(group.dir, entry)}
+                      >
+                        <span className="review-row-icon" aria-hidden="true">
+                          <IconFile size={14} />
+                        </span>
+                        <span className="review-row-path" title={entry.path}>
+                          {entry.path}
+                          {entry.renamedFrom && (
+                            <span className="review-row-renamed"> ← {entry.renamedFrom}</span>
+                          )}
+                        </span>
+                        <span className="review-row-status" aria-hidden="true">
+                          {statusLabel(entry)}
+                        </span>
+                        <IconChevronDown
+                          size={14}
+                          className={`review-row-chevron${expanded ? ' open' : ''}`}
+                        />
+                      </button>
+                      {expanded && (
+                        <div className="review-diff">
+                          {state?.loading && (
+                            <div className="review-diff-hint">
+                              <IconSpinner size={14} />
+                              {t('loading')}
+                            </div>
+                          )}
+                          {state?.error && (
+                            <div className="review-diff-hint error">{state.error}</div>
+                          )}
+                          {state?.diff && <DiffBody diff={state.diff} />}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            ))
+          )}
+        </section>
           ))}
         </div>
       )}
 
-      {loading && !status && (
+      {!onTurn && visibleGroups.length === 0 && filter.trim() !== '' && totalFiles > 0 && (
+        <p className="review-empty-line">{t('sidePaneReviewNoMatch')}</p>
+      )}
+
+      {loading && statuses.length === 0 && (
         <PanelEmpty icon={<IconSpinner size={22} />} title={t('loading')} />
       )}
 
@@ -523,12 +728,28 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
           busy={busy}
           feedback={feedback}
           commitEnabled={canCommit({ hasChanges, message, busy: busy !== null })}
-          pushEnabled={canPush(status, busy !== null)}
+          pushEnabled={
+            busy === null &&
+            pushDirs.length > 0 &&
+            selectedStatuses
+              .filter((entry) => entry.status?.isRepository)
+              .every((entry) => canPush(entry.status, busy !== null))
+          }
           canGenerate={selection != null}
+          dirLabel={selectedLabel}
+          allDirs={selectedDir === 'all'}
           onSubmit={() => void submit()}
           onPush={() => void runPush()}
           onGenerate={() => void generate()}
         />
+      )}
+
+      {!onTurn && !isRepo && !loading && statuses.length > 0 && statuses.every((entry) => !entry.error) && (
+        <div className="review-empty">
+          <IconFile size={26} />
+          <p className="review-empty-title">{t('sidePaneReviewNotRepo')}</p>
+          <p className="review-empty-desc">{t('sidePaneReviewNotRepoHint')}</p>
+        </div>
       )}
     </div>
   )
@@ -543,6 +764,8 @@ function CommitArea({
   commitEnabled,
   pushEnabled,
   canGenerate,
+  dirLabel,
+  allDirs,
   onSubmit,
   onPush,
   onGenerate,
@@ -554,6 +777,8 @@ function CommitArea({
   commitEnabled: boolean
   pushEnabled: boolean
   canGenerate: boolean
+  dirLabel: string
+  allDirs: boolean
   onSubmit(): void
   onPush(): void
   onGenerate(): void
@@ -609,7 +834,7 @@ function CommitArea({
         <button
           type="button"
           className="review-commit-submit"
-          title={t('reviewCommitAll')}
+          title={allDirs ? t('reviewCommitAllDirs') : t('reviewCommitIn', { name: dirLabel })}
           disabled={!commitEnabled}
           onClick={onSubmit}
         >
@@ -793,7 +1018,7 @@ function diffLines(left: string[], right: string[]): DiffRow[] {
  *
  * 复用面板既有的行样式(`.review-row*`),但 diff 不用 git 的 patch 渲染,
  * 而是直接用对话流算出的 `EditDiff[]` —— 那些数据在点击卡片时就交过来了,
- * 不必再问后端要一次,也不必要求工作区是 git 仓库。
+ * 不必再问后端要一次,也不必要求项目是 git 仓库。
  *
  * 行内不重复显示路径(外层标题已有),与卡片内的悬停预览同一种取舍。
  */

@@ -13,6 +13,7 @@ function context(events: SessionEvent[]): ToolContext {
     sessionId: 's1',
     callId: 'c1',
     cwd: process.cwd(),
+    roots: [process.cwd()],
     confined: false,
     cancel: new AbortController().signal,
     emit: (event) => {

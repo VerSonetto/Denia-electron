@@ -60,22 +60,22 @@ async function prompt(host: Host, id: string, text: string): Promise<void> {
   assert.equal(response.status, 202)
 }
 
-async function createWorkspace(host: Host, cwd: string): Promise<string> {
-  const response = await fetch(`${host.baseUrl}/api/workspaces`, {
+async function createProject(host: Host, cwd: string): Promise<string> {
+  const response = await fetch(`${host.baseUrl}/api/projects`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path: cwd }),
+    body: JSON.stringify({ dirs: [cwd] }),
   })
   assert.equal(response.status, 201)
-  const body = (await response.json()) as { workspace: { id: string } }
-  return body.workspace.id
+  const body = (await response.json()) as { project: { id: string } }
+  return body.project.id
 }
 
-async function createSession(host: Host, cwd: string, workspaceId?: string): Promise<string> {
+async function createSession(host: Host, cwd: string, projectId?: string): Promise<string> {
   const response = await fetch(`${host.baseUrl}/api/sessions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(workspaceId ? { workspaceId } : { cwd }),
+    body: JSON.stringify(projectId ? { projectId } : { cwd }),
   })
   const body = (await response.json()) as { session: { id: string } }
   return body.session.id
@@ -563,8 +563,8 @@ test('runtime: spawn explore, deliver completion, list/wait and parent-child mes
   writeConfig(home, mock.baseURL)
   const host = await startHost({ home, webDir, port: 0 })
   try {
-    const workspaceId = await createWorkspace(host, cwd)
-    const parentId = await createSession(host, cwd, workspaceId)
+    const projectId = await createProject(host, cwd)
+    const parentId = await createSession(host, cwd, projectId)
     await prompt(host, parentId, 'delegate')
     const parentEvents = await waitFor(async () => {
       const current = await snapshot(host, parentId)
@@ -582,13 +582,13 @@ test('runtime: spawn explore, deliver completion, list/wait and parent-child mes
     assert.ok(childDescriptor, 'the child summary must carry the subagent descriptor')
     assert.equal(child.excerpt, childDescriptor.label, 'the sidebar row falls back to the descriptor label')
 
-    const workspaceRows = (await (await fetch(`${host.baseUrl}/api/workspaces`)).json()) as {
-      workspaces: { id: string; sessionIds: string[] }[]
+    const projectRows = (await (await fetch(`${host.baseUrl}/api/projects`)).json()) as {
+      projects: { id: string; sessionIds: string[] }[]
     }
-    const workspace = workspaceRows.workspaces.find((entry) => entry.id === workspaceId)
-    assert.ok(workspace, 'the workspace must exist')
-    assert.ok(workspace.sessionIds.includes(parentId), 'the parent must stay in its workspace')
-    assert.ok(workspace.sessionIds.includes(childId), 'the child must join the parent workspace')
+    const project = projectRows.projects.find((entry) => entry.id === projectId)
+    assert.ok(project, 'the project must exist')
+    assert.ok(project.sessionIds.includes(parentId), 'the parent must stay in its project')
+    assert.ok(project.sessionIds.includes(childId), 'the child must join the parent project')
 
     const childSnapshot = await snapshot(host, childId)
     assert.ok(childSnapshot.header.subagent, 'the child header must carry the descriptor')

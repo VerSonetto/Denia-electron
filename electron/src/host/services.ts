@@ -40,15 +40,16 @@ import type { SessionStore } from '../session/store.ts'
 import type { FileHistoryStore } from '../session/file-history.ts'
 import { discoverSkills, loadSkill, renderEmptySkillCatalog, renderSkillCatalog } from '../skills/skills.ts'
 import {
-  memoryRoot,
+  projectMemoryRoot,
   readIndexForInjection,
   renderIndexBlock,
   renderMemorySection,
 } from '../context/memory.ts'
 import {
-  discoverWorkspaceInstructions,
-  renderWorkspaceInstructions,
-} from '../context/workspace-instructions.ts'
+  discoverProjectInstructions,
+  renderProjectInstructions,
+} from '../context/project-instructions.ts'
+import type { ProjectRecord, ProjectStore } from '../project/store.ts'
 
 export interface HostServicesOptions {
   mcp: McpManager
@@ -57,6 +58,8 @@ export interface HostServicesOptions {
   jobs?: JobManager
   home: string
   store: SessionStore
+  /** Project registry: directories, membership and the default fallback. */
+  projects: ProjectStore
   /** File rewind history shared by tool backups and the HTTP rewind routes. */
   fileHistory: FileHistoryStore
   /** Current permission state for runtime-context snapshots. */
@@ -65,7 +68,7 @@ export interface HostServicesOptions {
   goal?: GoalRuntime
   memoryEnabled?: boolean
   memoryIndexMaxBytes?: number
-  workspaceInstructionsMaxBytes?: number
+  projectInstructionsMaxBytes?: number
   skillCatalogDescriptionMaxChars?: number
   /** This instance's HTTP base URL; resolved lazily once the server listens. */
   apiBase?: () => string
@@ -81,11 +84,12 @@ export class HostServices implements SessionServices {
   private readonly jobTools: Tool[]
   private readonly home: string
   private readonly store: SessionStore
+  private readonly projects: ProjectStore
   private readonly fileHistoryStore: FileHistoryStore
   private readonly permissionStateOf: (sessionId: string) => PermissionState
   private readonly memoryEnabled: boolean
   private readonly memoryIndexMaxBytes: number
-  private readonly workspaceInstructionsMaxBytes: number
+  private readonly projectInstructionsMaxBytes: number
   private readonly skillCatalogDescriptionMaxChars: number
   private readonly apiBase: (() => string) | undefined
   /** Cached SYSTEM.md text; undefined = not read yet, null = factory persona. */
@@ -103,17 +107,36 @@ export class HostServices implements SessionServices {
     this.jobTools = options.jobs ? createJobTools(options.jobs) : []
     this.home = options.home
     this.store = options.store
+    this.projects = options.projects
     this.fileHistoryStore = options.fileHistory
     this.permissionStateOf = options.permissionStateOf
     this.memoryEnabled = options.memoryEnabled ?? true
     this.memoryIndexMaxBytes = options.memoryIndexMaxBytes ?? 25_600
-    this.workspaceInstructionsMaxBytes = options.workspaceInstructionsMaxBytes ?? 65_536
+    this.projectInstructionsMaxBytes = options.projectInstructionsMaxBytes ?? 65_536
     this.skillCatalogDescriptionMaxChars = options.skillCatalogDescriptionMaxChars ?? 500
     this.apiBase = options.apiBase
     this.systemPrompt = undefined
     this.listTool = new McpListTool(this.mcp, (sessionId) => this.subagents.grantOf(sessionId))
     this.goalRuntime = options.goal
     this.goalReadTool = options.goal ? new GoalReadTool(options.goal) : undefined
+  }
+
+  /** Project owning a session; legacy headers fall back by cwd/default. */
+  projectOf(header: SessionHeader): ProjectRecord {
+    return (
+      this.projects.get(header.project_id) ??
+      this.projects.projectForPath(header.cwd) ??
+      this.projects.default
+    )
+  }
+
+  /** Every directory the model may touch for this session. */
+  rootsOf(header: SessionHeader): string[] {
+    return this.projects.rootsOf(this.projectOf(header), header.cwd)
+  }
+
+  projectRoots(_sessionId: string, header: SessionHeader): string[] {
+    return this.rootsOf(header)
   }
 
   private loadedOf(sessionId: string): Set<string> {
@@ -215,12 +238,12 @@ export class HostServices implements SessionServices {
     this.subagents.drainInbox(sessionId)
   }
 
-  fileSnapshot(sessionId: string, cwd: string, messageSeq: number): void {
-    this.fileHistoryStore.snapshot(sessionId, cwd, messageSeq)
+  fileSnapshot(sessionId: string, scope: string | readonly string[], messageSeq: number): void {
+    this.fileHistoryStore.snapshot(sessionId, scope, messageSeq)
   }
 
-  fileHistory(sessionId: string, cwd: string): FileHistoryBackend {
-    return this.fileHistoryStore.backend(sessionId, cwd)
+  fileHistory(sessionId: string, scope: string | readonly string[]): FileHistoryBackend {
+    return this.fileHistoryStore.backend(sessionId, scope)
   }
 
   onTurnStart(sessionId: string): void {
@@ -244,7 +267,7 @@ export class HostServices implements SessionServices {
     if (!header.subagent && this.memoryEnabled) {
       sections.push({
         name: 'memory',
-        text: renderMemorySection(memoryRoot(this.home, header.cwd)),
+        text: renderMemorySection(projectMemoryRoot(this.home, this.projectOf(header))),
       })
     }
     const mcp = this.mcpDiscipline()
@@ -296,26 +319,30 @@ export class HostServices implements SessionServices {
   injections(sessionId: string, header: SessionHeader): { channel: string; text: string }[] {
     const out: { channel: string; text: string }[] = []
     const events = this.store.read(sessionId)?.events ?? []
-    const previous = (channel: string): string | null => {
+    const previous = (channel: string, legacy?: string): string | null => {
       for (let index = events.length - 1; index >= 0; index -= 1) {
         const event = events[index]!
-        if (event.type === 'user-message' && event.channel === channel) return event.text
+        if (event.type !== 'user-message') continue
+        if (event.channel === channel || (legacy !== undefined && event.channel === legacy)) {
+          return event.text
+        }
       }
       return null
     }
-    const files = discoverWorkspaceInstructions(
+    const roots = this.rootsOf(header)
+    const files = discoverProjectInstructions(
       this.home,
-      header.cwd,
-      touchedPathsOf(events, header.cwd),
+      roots,
+      touchedPathsOf(events, roots[0]!),
       1_048_576,
       header.subagent ? 'project-only' : 'global-and-project',
     )
-    const workspace = renderWorkspaceInstructions(
+    const instructions = renderProjectInstructions(
       files,
-      this.workspaceInstructionsMaxBytes,
-      previous('workspace-instructions'),
+      this.projectInstructionsMaxBytes,
+      previous('project-instructions', 'workspace-instructions'),
     )
-    if (workspace) out.push({ channel: 'workspace-instructions', text: workspace })
+    if (instructions) out.push({ channel: 'project-instructions', text: instructions })
 
     out.push({
       channel: 'capability',
@@ -323,7 +350,7 @@ export class HostServices implements SessionServices {
     })
 
     if (this.allowed(header, 'skill')) {
-      const skills = discoverSkills(this.home, header.cwd).skills
+      const skills = discoverSkills(this.home, roots).skills
       const catalog = renderSkillCatalog(skills, this.skillCatalogDescriptionMaxChars)
       if (catalog) out.push({ channel: 'skill-catalog', text: catalog })
       else if (previous('skill-catalog') !== null) {
@@ -332,7 +359,7 @@ export class HostServices implements SessionServices {
     }
 
     if (!header.subagent && this.memoryEnabled) {
-      const root = memoryRoot(this.home, header.cwd)
+      const root = projectMemoryRoot(this.home, this.projectOf(header))
       const index = readIndexForInjection(root, this.memoryIndexMaxBytes)
       if (index) out.push({ channel: 'project-memory', text: renderIndexBlock(root, index) })
     }
@@ -353,6 +380,7 @@ export class HostServices implements SessionServices {
       channel: 'runtime-context',
       text: buildRuntimeContext({
         cwd: header.cwd,
+        roots,
         sandbox: header.sandbox,
         permission: this.permissionStateOf(sessionId),
         ...(this.apiBase ? { apiBase: this.apiBase() } : {}),
@@ -364,7 +392,7 @@ export class HostServices implements SessionServices {
   memoryRoot(sessionId: string, header: SessionHeader): string | null {
     if (header.subagent || !this.memoryEnabled) return null
     void sessionId
-    return memoryRoot(this.home, header.cwd)
+    return projectMemoryRoot(this.home, this.projectOf(header))
   }
 
   context(sessionId: string): SubagentPromptContext | null {
@@ -379,7 +407,7 @@ export class HostServices implements SessionServices {
   userSkill(sessionId: string, name: string): { name: string; source: string; body: string } | null {
     const header = this.store.header(sessionId)
     if (!header) return null
-    const skills = discoverSkills(this.home, header.cwd).skills
+    const skills = discoverSkills(this.home, this.rootsOf(header)).skills
     try {
       const loaded = loadSkill(skills, name, true)
       return { name: loaded.skill.name, source: loaded.skill.source, body: loaded.body }
@@ -427,7 +455,7 @@ export class HostServices implements SessionServices {
   }
 }
 
-/** Paths touched by file tools in this session (workspace instructions). */
+/** Paths touched by file tools in this session (project instructions). */
 function touchedPathsOf(events: Envelope[], cwd: string): string[] {
   const out: string[] = []
   for (const event of events) {

@@ -42,6 +42,23 @@ function webDist(): string {
 }
 
 /**
+ * Where Denia is installed. Default projects live in `<install dir>/projects`,
+ * so they sit next to the application rather than inside the user home.
+ * Development uses the app package directory; packaged builds use the folder
+ * containing Denia.exe.
+ */
+function installRoot(): string {
+  const override = process.env.DENIA_INSTALL_DIR?.trim()
+  if (override) return path.resolve(override)
+  return app.isPackaged ? path.dirname(app.getPath('exe')) : app.getAppPath()
+}
+
+function projectsRoot(): string {
+  const override = process.env.DENIA_PROJECTS_ROOT?.trim()
+  return override ? path.resolve(override) : path.join(installRoot(), 'projects')
+}
+
+/**
  * Splash page shown while the host starts up. The window opens on this local
  * file immediately, plays the ink animation, then navigates to the real UI;
  * a failed startup is injected into the same page instead of a blank window.
@@ -135,6 +152,7 @@ async function main(): Promise<void> {
     version: app.getVersion(),
     ...(process.env.DENIA_HOST ? { host: process.env.DENIA_HOST } : {}),
     port: Number(process.env.DENIA_PORT ?? DEFAULT_PORT),
+    projectsRoot: projectsRoot(),
   })
 
   mainWindow = await windowPromise

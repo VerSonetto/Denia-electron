@@ -14,7 +14,7 @@ import {
   type SplitState,
   type SplitView,
 } from '../splitView'
-import type { SessionSummary, WorkspaceRecord } from '../types'
+import type { ProjectRecord, SessionSummary } from '../types'
 
 /**
  * 分屏:拖动侧栏会话到会话窗口。
@@ -25,11 +25,11 @@ export function useSplitView(options: {
   activeId: string | null
   sessions: SessionSummary[]
   sessionsLoaded: boolean
-  workspaces: WorkspaceRecord[]
+  projects: ProjectRecord[]
   isMobile: boolean
   extensionTab: ExtensionTab | null
 }) {
-  const { activeId, sessions, sessionsLoaded, workspaces, isMobile, extensionTab } = options
+  const { activeId, sessions, sessionsLoaded, projects, isMobile, extensionTab } = options
   const [split, setSplit] = useState<SplitState | null>(null)
   const [splitRatio, setSplitRatio] = useState(() => readSplitRatio())
   // 会话拖入时的落点提示(left/right),松开或离开即清除。
@@ -69,23 +69,26 @@ export function useSplitView(options: {
    * 主窗格会话变化走 setActiveId,副窗格变化只落在 split 上。
    */
   const applySplitView = useCallback(
-    (next: SplitView, wsId?: string | null) => {
+    (next: SplitView, projectId?: string | null) => {
       if (next.primaryId !== null && next.primaryId !== activeId) {
-        setActiveId(next.primaryId, wsId ?? null)
+        setActiveId(next.primaryId, projectId ?? null)
       }
       setSplit(next.split)
     },
     [activeId],
   )
 
-  /** 会话所属工作区 id(drop 时与会话头一致地更新 pendingWsId)。 */
-  const workspaceIdForSession = useCallback(
+  /** 会话所属项目 id(drop 时与会话头一致地更新 pendingProjectId)。 */
+  const projectIdForSession = useCallback(
     (id: string): string | null => {
       const session = sessions.find((s) => s.id === id)
       if (!session) return null
-      return workspaces.find((w) => w.path === session.cwd)?.id ?? null
+      if (session.project_id && projects.some((project) => project.id === session.project_id)) {
+        return session.project_id
+      }
+      return projects.find((project) => project.sessionIds.includes(id))?.id ?? null
     },
-    [sessions, workspaces],
+    [sessions, projects],
   )
 
   /** 指针落在容器的哪一侧(拖放落点)。 */
@@ -116,7 +119,7 @@ export function useSplitView(options: {
     if (!id) return
     event.preventDefault()
     const next = dropSessionOnSide({ primaryId: activeId, split }, id, sideFromPointer(event))
-    applySplitView(next, workspaceIdForSession(id))
+    applySplitView(next, projectIdForSession(id))
   }
 
   /* 分隔条:拖动调宽 + 退出分屏。 */

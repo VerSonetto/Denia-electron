@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
-import { IconArrowLeft, IconChevron, IconClose, IconWorkspace } from './icons'
+import { IconArrowLeft, IconChevron, IconClose, IconProject } from './icons'
 
 interface BrowseState {
   path: string
@@ -19,10 +19,13 @@ function baseName(path: string): string {
  * current directory. A collapsed manual-path row covers paste-from-anywhere.
  */
 export function DirPicker({
+  title,
   onPick,
   onClose,
   onError,
 }: {
+  /** Dialog heading; defaults to the project-directory picker title. */
+  title?: string
   onPick: (path: string) => Promise<void>
   onClose: () => void
   onError: (message: string) => void
@@ -157,8 +160,8 @@ export function DirPicker({
       >
         <div className="picker-titlebar">
           <h2 className="picker-title" id={titleId}>
-            <IconWorkspace size={20} />
-            {t('selectWorkspace')}
+            <IconProject size={20} />
+            {title ?? t('selectProjectDir')}
           </h2>
           <button className="picker-close" ref={closeButtonRef} onClick={onClose} aria-label={t('close')}>
             <IconClose size={18} />
@@ -199,7 +202,7 @@ export function DirPicker({
                   )
                 }
               >
-                <IconWorkspace size={18} />
+                <IconProject size={18} />
                 <span>{name.replace(/\\+$/, '')}</span>
                 <IconChevron size={12} />
               </button>
@@ -234,8 +237,8 @@ export function DirPicker({
               <input
                 type="text"
                 autoFocus
-                placeholder={t('workspacePathPlaceholder')}
-                aria-label={t('workspacePathPlaceholder')}
+                placeholder={t('projectPathPlaceholder')}
+                aria-label={t('projectPathPlaceholder')}
                 value={manualPath}
                 onChange={(event) => setManualPath(event.target.value)}
                 onKeyDown={(event) => {

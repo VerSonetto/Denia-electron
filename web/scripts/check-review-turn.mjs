@@ -4,7 +4,7 @@
  *
  * # 它守什么
  *
- * 审查面板其余三个来源全走 `git status`/`git diff`,工作区不是仓库时它们
+ * 审查面板其余三个来源全走 `git status`/`git diff`,项目不是仓库时它们
  * 全是空的。曾经的后果是:对话末尾的变更卡片点「查看变更」会打开一个只有
  * "不是 Git 仓库"的空面板 —— 而本轮改动的路径、±行数、diff 就在卡片里。
  *
@@ -168,7 +168,7 @@ const turnFiles = [
   // 种数据要放进 act:它会触发订阅者重渲染,与组件挂载是同一次提交。
   await act(async () => {
     store.__seed('s1', { turn: 3, files: turnFiles, at: Date.now() })
-    root.render(H(mod.default, { workspacePath: 'D:/work', sessionId: 's1' }))
+    root.render(H(mod.default, { projectPath: 'D:/work', sessionId: 's1' }))
     await settle()
   })
   await act(async () => { await settle() })
@@ -198,7 +198,7 @@ const turnFiles = [
     // s1 的数据不会串进来。不卸载重挂 —— 那反而丢掉"面板在同一位置被
     // 复用"这条真实路径。
     store.__seed('s2', null)
-    root.render(H(mod.default, { workspacePath: 'D:/work', sessionId: 's2' }))
+    root.render(H(mod.default, { projectPath: 'D:/work', sessionId: 's2' }))
     await settle()
   })
   check(
@@ -224,7 +224,7 @@ const turnFiles = [
   }
   await act(async () => {
     store.__seed('s3', { turn: 4, files: turnFiles, at: Date.now() })
-    root.render(H(mod.default, { workspacePath: 'D:/work', sessionId: 's3' }))
+    root.render(H(mod.default, { projectPath: 'D:/work', sessionId: 's3' }))
     await settle()
   })
   const tabs = [...rootEl.querySelectorAll('.review-source')]

@@ -31,12 +31,12 @@ const reviewStub = join(outDir, 'reviewOpen.stub.mjs')
  */
 writeFileSync(fileOpenStub, `
 export function registerOpenFile() { return () => {} }
-export function openWorkspaceFile(path) {
+export function openProjectFile(path) {
   const bag = (globalThis.__turnDiffOpens ??= { files: [], review: 0 })
   bag.files.push(path)
   return true
 }
-export function useFileOpen() { return openWorkspaceFile }
+export function useFileOpen() { return openProjectFile }
 `)
 writeFileSync(reviewStub, `
 export function registerOpenReview() { return () => {} }

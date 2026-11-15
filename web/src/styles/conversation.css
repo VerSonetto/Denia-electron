@@ -122,7 +122,7 @@
   flex: none;
 }
 
-.runtime-workspace {
+.runtime-view {
   display: flex;
   flex: 1;
   min-height: 0;
@@ -141,12 +141,12 @@
 }
 
 /* 任务卡占据右列时，对话滚动条会夹在两列之间；保留滚动能力但隐藏轨道。 */
-.runtime-workspace[data-runtime-visible] > .conversation-scroll {
+.runtime-view[data-runtime-visible] > .conversation-scroll {
   scrollbar-width: none;
   scrollbar-gutter: auto;
 }
 
-.runtime-workspace[data-runtime-visible] > .conversation-scroll::-webkit-scrollbar {
+.runtime-view[data-runtime-visible] > .conversation-scroll::-webkit-scrollbar {
   display: none;
 }
 
@@ -446,12 +446,12 @@
   /* 状态栏只随 active 渲染;hero 不预留其高度,输入框贴底与 active 一致。 */
 }
 
-.hero-ws-row {
+.hero-project-row {
   padding-left: 4px;
 }
 
 @media (max-width: 820px) {
-  .runtime-workspace { flex-direction: column-reverse; }
+  .runtime-view { flex-direction: column-reverse; }
   .runtime-panel { flex: none; width: auto; max-height: 30vh; align-self: stretch; margin: 8px 12px; }
   .runtime-header-entry { max-width: 38vw; }
 }

@@ -66,14 +66,14 @@ test('a new session takes the default permission mode as it is configured now', 
     assert.equal(secondSelection.sandbox, 'danger-full-access')
 
     // `approve-for-me` is a preset of its own: it must survive the round trip
-    // instead of collapsing into plain workspace-write.
+    // instead of collapsing into plain project-write.
     writeSettings(home, 'approve-for-me')
     const third = await createSession(host, cwd)
     const thirdSelection = (await events(host, third)).find(
       (event) => event.type === 'permission-selection',
     ) as { sandbox: string; reviewer: string } | undefined
     assert.ok(thirdSelection)
-    assert.equal(thirdSelection.sandbox, 'workspace-write')
+    assert.equal(thirdSelection.sandbox, 'project-write')
     assert.equal(thirdSelection.reviewer, 'auto-review')
   } finally {
     await host.close()

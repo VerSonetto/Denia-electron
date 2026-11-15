@@ -18,7 +18,7 @@
 .tabs button:hover { color: var(--label-primary); }
 .tabs button[aria-selected='true'] { background: var(--bg-base); color: var(--label-primary); border-color: var(--border-l2); font-weight: 600; }
 .tabs button:focus-visible { outline: 2px solid var(--label-primary); outline-offset: 3px; }
-.workspace { font-size: 12px; color: var(--label-secondary); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project { font-size: 12px; color: var(--label-secondary); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel { min-width: 0; }
 @media (max-width: 600px) {
   .content { padding-top: 24px; }

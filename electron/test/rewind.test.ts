@@ -121,7 +121,7 @@ test('buffered events are written one per line and survive a reload', () => {
   store.append(header.id, { type: 'permission-mode', mode: 'auto-edit' })
   store.append(header.id, {
     type: 'permission-selection',
-    sandbox: 'workspace-write',
+    sandbox: 'project-write',
     approval: 'on-request',
     reviewer: 'user',
     collaboration: 'default',

@@ -1,9 +1,9 @@
 /**
- * 工作区文件面板:相对工作区根的文件系统目录树。
+ * 项目文件面板:相对项目根的文件系统目录树。
  *
  * # 与「审查」面板的分工
  *
- * 审查面板看的是 **Git 工作区**(暂存/未暂存/分支差异),只显示被 git 跟踪
+ * 审查面板看的是 **Git 项目**(暂存/未暂存/分支差异),只显示被 git 跟踪
  * 或有改动的文件;本面板看的是**文件系统本身** —— 未跟踪的、被 .gitignore
  * 排除的、甚至不在仓库里的目录都照常列出。两者解决的是不同问题,所以不做
  * 任何互相过滤。
@@ -41,9 +41,9 @@ import { PanelHead, PanelSearch, PanelToolbar } from './PanelChrome'
 import './FileTreePanel.css'
 
 export interface FileTreePanelProps {
-  /** 工作区绝对路径(树的根)。 */
-  workspacePath: string
-  /** 会话 id:切会话时重新从根加载(不同会话可能绑定不同工作区)。 */
+  /** 项目绝对路径(树的根)。 */
+  projectPath: string
+  /** 会话 id:切会话时重新从根加载(不同会话可能绑定不同项目)。 */
   sessionId: string | null
   /**
    * 点击文件行:在「文件读取」标签页里打开该文件。
@@ -53,8 +53,8 @@ export interface FileTreePanelProps {
   onOpenFile?: (path: string) => void
 }
 
-export function FileTreePanel({ workspacePath, sessionId, onOpenFile }: FileTreePanelProps) {
-  const [tree, setTree] = useState<FileTreeState>(() => emptyTree(workspacePath))
+export function FileTreePanel({ projectPath, sessionId, onOpenFile }: FileTreePanelProps) {
+  const [tree, setTree] = useState<FileTreeState>(() => emptyTree(projectPath))
   const [filter, setFilter] = useState('')
   /**
    * 每个目录一个请求代号:防止慢响应覆盖新状态。
@@ -82,7 +82,7 @@ export function FileTreePanel({ workspacePath, sessionId, onOpenFile }: FileTree
       const revision = (revisionsRef.current.get(dir) ?? 0) + 1
       revisionsRef.current.set(dir, revision)
       setTree((current) => markLoading(current, dir))
-      return fetchTree(workspacePath, dir)
+      return fetchTree(projectPath, dir)
         .then((listing) => {
           // 过期响应直接丢弃:同一目录被连续重拉时,先发的可能后到。
           if (!aliveRef.current || revisionsRef.current.get(dir) !== revision) return
@@ -94,16 +94,16 @@ export function FileTreePanel({ workspacePath, sessionId, onOpenFile }: FileTree
           setTree((current) => withError(current, dir, message))
         })
     },
-    [workspacePath],
+    [projectPath],
   )
 
-  // 工作区或会话变化:整棵树重来(旧根的子项在新根下毫无意义)。
+  // 项目或会话变化:整棵树重来(旧根的子项在新根下毫无意义)。
   useEffect(() => {
     setFilter('')
     revisionsRef.current.clear()
-    setTree(emptyTree(workspacePath))
+    setTree(emptyTree(projectPath))
     void load('')
-  }, [workspacePath, sessionId, load])
+  }, [projectPath, sessionId, load])
 
   /**
    * 刷新:根目录与**已展开的目录**一起重拉。
@@ -154,15 +154,15 @@ export function FileTreePanel({ workspacePath, sessionId, onOpenFile }: FileTree
     return rows.filter((row) => row.entry.path.toLowerCase().includes(query))
   }, [rows, filter])
 
-  const workspaceName =
-    workspacePath.split(/[\\/]/).filter(Boolean).pop() ?? workspacePath
+  const projectName =
+    projectPath.split(/[\\/]/).filter(Boolean).pop() ?? projectPath
 
   return (
     <div className="file-tree pane-panel" data-file-tree-root={tree.root}>
       <PanelHead
         icon={<IconFolder size={16} />}
         title={t('sidePaneFiles')}
-        subtitle={<span title={workspacePath}>{workspaceName}</span>}
+        subtitle={<span title={projectPath}>{projectName}</span>}
         actions={
           <button
             type="button"

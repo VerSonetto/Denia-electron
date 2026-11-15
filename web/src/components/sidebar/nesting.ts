@@ -3,19 +3,18 @@ import { relativeTime } from '../../relativeTime'
 import type { DropPlacement } from '../../sidebarOrder'
 import type { SessionSummary } from '../../types'
 
-export const UNGROUPED_KEY = 'ungrouped'
 export const COLLAPSED_LIMIT = 5
 /** 置顶任务货架的首屏条数;超过后由「显示更多」展开。 */
 export const PINNED_LIMIT = 20
 /** 最近更新视图的首屏条数。 */
 export const TIMELINE_LIMIT = 20
-export const WORKSPACE_DRAG_MIME = 'application/x-denia-workspace'
+export const PROJECT_DRAG_MIME = 'application/x-denia-project'
 
 /** 侧栏拖拽中的源:项目行可以手动排序。 */
-export type SidebarDrag = { kind: 'workspace'; id: string }
+export type SidebarDrag = { kind: 'project'; id: string }
 
 /** 拖拽落点与插入方向;仅在当前拖拽类型匹配时渲染指示线。 */
-export type SidebarDropTarget = { kind: 'workspace'; id: string; placement: DropPlacement }
+export type SidebarDropTarget = { kind: 'project'; id: string; placement: DropPlacement }
 
 /** 指针在行内上半/下半:上半插到目标前,下半插到目标后。 */
 export function placementFromPointer(event: { currentTarget: HTMLElement; clientY: number }): DropPlacement {
@@ -79,7 +78,7 @@ export function sessionUpdatedAt(session: SessionSummary): number {
 
 /**
  * 侧栏任务排序:运行中(含运行中的后代)优先,然后最近更新倒序。
- * 置顶货架、项目任务和未分组任务共用同一口径;最近更新视图关掉活跃优先。
+ * 置顶货架、项目任务与最近更新共用同一口径;最近更新视图关掉活跃优先。
  */
 export function sortSessions(
   members: SessionSummary[],
@@ -118,7 +117,7 @@ function childrenByParent(
 
 /**
  * 置顶任务的单次归属:置顶一个会话时,连同它的整棵分支一起搬进「已置顶」,
- * 并从项目/未分组列表里整体隐藏。这样父子血缘不会在搬动后散掉;取消置顶
+ * 并从项目列表里整体隐藏。这样父子血缘不会在搬动后散掉;取消置顶
  * 时整棵分支原样回到原来的项目。
  */
 export function collectPinnedSubtrees(

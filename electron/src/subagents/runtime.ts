@@ -266,6 +266,7 @@ export class SubagentRuntime {
       sandbox: parentHeader.sandbox,
       parentSession: owner,
       subagent: descriptor,
+      ...(parentHeader.project_id ? { projectId: parentHeader.project_id } : {}),
     })
     try {
       this.store.writeAuxiliary(
@@ -1441,7 +1442,7 @@ function buildForkSeed(
     switch (event.type) {
       case 'user-message':
         if (event.injected) {
-          mark('workspace-and-runtime-injections')
+          mark('project-and-runtime-injections')
           continue
         }
         out.push({ type: 'user-message', text: event.text, injected: false })

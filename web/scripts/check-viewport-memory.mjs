@@ -105,7 +105,7 @@ globalThis.fetch = async (url, options) => {
     size: 32, language: '', path: 'file' }) }
 }
 const files = Array.from({ length: 20 }, (_, index) => ({ path: `file-${index}.txt` }))
-const fileProps = { workspacePath: 'D:/workspace', files, onActivate() {}, onCloseFile() {} }
+const fileProps = { projectPath: 'D:/project', files, onActivate() {}, onCloseFile() {} }
 await act(async () => root.render(element(FileReaderPanel, { ...fileProps, activeFile: files[0].path })))
 assert.equal(requests.length, 1)
 await act(async () => root.render(element(FileReaderPanel, { ...fileProps, activeFile: files[1].path })))

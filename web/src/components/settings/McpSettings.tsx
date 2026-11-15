@@ -19,7 +19,7 @@ type TransportValue = 'stdio' | 'http' | 'sse'
 /** 编辑态:同时容纳两种模式(`mode === 'json'` 时只看 `rawJson`)。 */
 type ServerDraft = api.McpServerDraft & {
   scope?: ScopeValue
-  workspaceId?: string | null
+  projectId?: string | null
   protocolVersion?: string
   callTimeoutMs?: number | null
 }
@@ -220,7 +220,7 @@ function parseDshJson(raw: string): { draft: ServerDraft; error: string | null }
     draft: {
       id,
       scope: cfg.scope as ScopeValue | undefined,
-      workspaceId: cfg.workspaceId as string | null | undefined,
+      projectId: cfg.projectId as string | null | undefined,
       protocolVersion: cfg.protocolVersion as string | undefined,
       callTimeoutMs: cfg.callTimeoutMs as number | null | undefined,
       transport: type,
@@ -268,7 +268,7 @@ function draftToJson(draft: ServerDraft): string {
     command: draft.command,
     args: draft.args,
     scope: draft.scope,
-    workspaceId: draft.workspaceId,
+    projectId: draft.projectId,
     protocolVersion: draft.protocolVersion,
     callTimeoutMs: draft.callTimeoutMs,
   }

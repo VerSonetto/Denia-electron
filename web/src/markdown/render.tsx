@@ -21,7 +21,7 @@ import { normalizeUri } from 'micromark-util-sanitize-uri'
 import { CodeBlock } from './CodeBlock'
 import { renderTexToReact } from './katex'
 import type { PositionedBlock } from './incremental'
-import { openWorkspaceFile } from '../fileOpen'
+import { openProjectFile } from '../fileOpen'
 
 /** Copy-button labels forwarded to fence CodeBlocks (localized by the owner). */
 export interface MarkdownCodeLabels {
@@ -222,7 +222,7 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
       // Only path-shaped values with a recognized file extension become links;
       // ordinary identifiers such as `config` remain inert code.
       if (looksLikeInlineFileReference(value)) {
-        return renderWorkspaceFileLink(value, [<code key="code">{value}</code>], key)
+        return renderProjectFileLink(value, [<code key="code">{value}</code>], key)
       }
       return <code key={key}>{value}</code>
     }
@@ -423,15 +423,15 @@ function renderTableRow(
 function renderSafeLink(href: string, children: ReactNode[], key: Key): ReactNode {
   const safeHref = sanitizeUrl(href)
   if (safeHref === '') {
-    // 协议白名单挡下来的相对路径：它可能指向工作区内的文件。
+    // 协议白名单挡下来的相对路径：它可能指向项目内的文件。
     //
     // 相对链接被禁用是有意的（它会变成一次同源导航，控制台就此丢失），
     // 但用户明确要求这类路径可点开到「文件读取」标签页 —— 所以这里渲染成
     // span + role=button 而不是 `<a href>`：没有 href 就不存在任何导航可能
     // （包括右键“在新标签页打开”），比“设了 href 再 preventDefault”更彻底。
-    if (!looksLikeWorkspacePath(href)) return <Fragment key={key}>{children}</Fragment>
+    if (!looksLikeProjectPath(href)) return <Fragment key={key}>{children}</Fragment>
     const filePath = decodeFileHref(href)
-    return renderWorkspaceFileLink(filePath, children, key)
+    return renderProjectFileLink(filePath, children, key)
   }
   const external = ['http:', 'https:'].includes(new URL(safeHref).protocol)
   // 外部链接保持默认行为（新标签打开），不拦截。
@@ -450,16 +450,16 @@ function renderSafeLink(href: string, children: ReactNode[], key: Key): ReactNod
 }
 
 /**
- * 这个 href 看起来像工作区内的文件路径吗？
+ * 这个 href 看起来像项目内的文件路径吗？
  *
  * 与 [`sanitizeUrl`] 互补：那个负责放行已知安全协议，这个负责在“剩下的一堆
  * 里”认出可当文件路径处理的那些。排除三类：
  * - 锚点（`#foo`）—— 文档内跳转，不是文件；
  * - 协议相对（`//host/x`）—— 实际是跨站资源；
  * - 带冒号的（`javascript:`、`file:`、`C:\…`）—— 这些要么本来就危险，
- *   要么是绝对路径，而文件读取标签页用的是**相对工作区根**的坐标。
+ *   要么是绝对路径，而文件读取标签页用的是**相对项目根**的坐标。
  */
-function looksLikeWorkspacePath(href: string): boolean {
+function looksLikeProjectPath(href: string): boolean {
   const raw = href.trim()
   if (!raw || raw.startsWith('#') || raw.startsWith('//')) return false
   if (raw.includes(':')) return false
@@ -638,7 +638,7 @@ const INLINE_FILE_EXTENSIONS = new Set([
   'tsx', 'txt', 'vim', 'vue', 'xml', 'yaml', 'yml', 'zsh',
 ])
 
-function renderWorkspaceFileLink(filePath: string, children: ReactNode[], key: Key): ReactNode {
+function renderProjectFileLink(filePath: string, children: ReactNode[], key: Key): ReactNode {
   return (
     <span
       key={key}
@@ -648,13 +648,13 @@ function renderWorkspaceFileLink(filePath: string, children: ReactNode[], key: K
       onClick={(event: ReactMouseEvent<HTMLSpanElement>) => {
         event.preventDefault()
         event.stopPropagation()
-        openWorkspaceFile(filePath)
+        openProjectFile(filePath)
       }}
       onKeyDown={(event: ReactKeyboardEvent<HTMLSpanElement>) => {
         if (event.key !== 'Enter' && event.key !== ' ') return
         event.preventDefault()
         event.stopPropagation()
-        openWorkspaceFile(filePath)
+        openProjectFile(filePath)
       }}
     >
       {children}

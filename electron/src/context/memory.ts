@@ -1,4 +1,4 @@
-// Project memory: one Markdown bucket per workspace.
+// Project memory: one Markdown bucket per project.
 //
 // Layout: `<home>/memories/projects/<slug>-<sha16>/memory/`.
 // MEMORY.md is a pure index; every other `.md` is one entry. Injection is
@@ -15,8 +15,8 @@ export const SECTION_HISTORY = '## 历史（superseded，不注入）'
 export const MAX_FILE_BYTES = 5 * 1024 * 1024
 const INDEX_MAX_LINES = 200
 
-export function memoryRoot(home: string, workspacePath: string): string {
-  const normalized = normalizePath(workspacePath)
+export function memoryRoot(home: string, projectPath: string): string {
+  const normalized = normalizePath(projectPath)
   const digest = crypto.createHash('sha256').update(normalized, 'utf8').digest()
   const hash = digest.subarray(0, 8).toString('hex')
   let base = path.basename(normalized).toLowerCase()
@@ -26,6 +26,19 @@ export function memoryRoot(home: string, workspacePath: string): string {
   base = base.replace(/-+$/g, '').slice(0, 48).replace(/[-_]+$/g, '')
   if (base === '') base = 'project'
   return path.join(home, 'memories', 'projects', `${base}-${hash}`, 'memory')
+}
+
+/**
+ * Memory bucket for a project. Single-directory projects keep the historical
+ * path-derived bucket so existing memory survives the workspace→project
+ * migration; multi-directory projects get one stable bucket keyed by id.
+ */
+export function projectMemoryRoot(
+  home: string,
+  project: { id: string; dirs: readonly string[] },
+): string {
+  if (project.dirs.length === 1) return memoryRoot(home, project.dirs[0]!)
+  return memoryRoot(home, path.join(home, 'projects', project.id))
 }
 
 function normalizePath(target: string): string {

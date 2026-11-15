@@ -43,6 +43,7 @@ function ctxFor(cwd: string, readState: ReadStateStore, emit: (event: unknown) =
     sessionId: 's1',
     callId: 'c1',
     cwd,
+    roots: [cwd],
     confined: true,
     cancel: new AbortController().signal,
     emit: emit as ToolContext['emit'],

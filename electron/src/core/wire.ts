@@ -197,7 +197,7 @@ export type SessionEvent =
   | { type: 'permission-mode'; mode: PermissionMode }
   | {
       type: 'permission-selection'
-      sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'
+      sandbox: 'read-only' | 'project-write' | 'danger-full-access'
       approval: 'untrusted' | 'on-request' | 'never' | { granular: unknown }
       reviewer: 'user' | 'auto-review'
       collaboration: 'default' | 'plan'
@@ -265,6 +265,8 @@ export interface SessionHeader {
   created_at: number
   cwd: string
   sandbox: boolean
+  /** Project this session belongs to; absent on legacy logs. */
+  project_id?: string
   parent_session?: string
   agent_preset?: string
   subagent?: SubagentDescriptor
@@ -280,6 +282,7 @@ export interface SessionSummary {
   cwd?: string
   sandbox?: boolean
   cwd_alive?: boolean
+  project_id?: string
   parent_session?: string
   subagent?: SubagentDescriptor
   agent_preset?: string

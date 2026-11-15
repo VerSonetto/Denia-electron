@@ -239,7 +239,6 @@ export interface QueuedMessage {
 
 /** 旧日志三档值 → 新四档的显示映射(serde alias 的前端对应)。 */
 export function normalizePermissionMode(raw: string): PermissionMode {
-  if (raw === 'workspace-write') return 'auto-edit'
   if (raw === 'danger-full-access') return 'full'
   if (raw === 'read-only' || raw === 'auto-edit' || raw === 'plan' || raw === 'full') {
     return raw
@@ -272,6 +271,8 @@ export interface SessionSummary {
   cwd?: string
   sandbox?: boolean
   cwd_alive?: boolean
+  /** Project this session belongs to. */
+  project_id?: string
   /** 分支血缘:父会话 id;侧栏据此把子会话嵌套在源会话之下。 */
   parent_session?: string
   /** 会话运行的 agent preset(id);创建时写入,缺省表示后端未提供。 */
@@ -429,18 +430,15 @@ export interface AgentPresetsView {
   presets: AgentPresetRow[]
 }
 
-export interface WorkspaceEntry {
-  path: string
-  name?: string
-}
-
-/** 工作区注册表记录。 */
-export interface WorkspaceRecord {
+/** Project registry record: one name, one or more directories. */
+export interface ProjectRecord {
   id: string
-  path: string
   title: string
+  dirs: string[]
   createdAt: number
   sessionIds: string[]
+  /** The built-in fallback project; it cannot be deleted. */
+  builtin?: 'default'
 }
 
 /* ---- 内嵌浏览器(与 browser 工具同款命令面) ---- */

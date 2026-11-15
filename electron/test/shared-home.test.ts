@@ -1,6 +1,6 @@
 // Shared-home compatibility: the Electron host must read and write the same
 // `~/.denia` documents the Rust build uses — settings.yaml, .credentials.yaml,
-// workspaces.json and session logs (header version 0, UUID ids).
+// projects.json and session logs (header version 0, UUID ids).
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -66,18 +66,18 @@ test('settings.yaml providers and .credentials.yaml keys are picked up', () => {
   assert.ok(describe.namespaces.some((entry) => entry.ns === 'console'))
 })
 
-test('workspaces.json keeps the Rust map+order shape and presets match shipped ones', async () => {
+test('projects.json keeps the Rust map+order shape and presets match shipped ones', async () => {
   const home = tempHome()
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'denia-cwd-'))
   const webDir = fs.mkdtempSync(path.join(os.tmpdir(), 'denia-web-'))
   fs.writeFileSync(path.join(home, 'settings.yaml'), SETTINGS)
   const existingId = '11111111-2222-3333-4444-555555555555'
   fs.writeFileSync(
-    path.join(home, 'workspaces.json'),
+    path.join(home, 'projects.json'),
     JSON.stringify({
       initialized: true,
       order: [existingId],
-      workspaces: {
+      projects: {
         [existingId]: {
           id: existingId,
           path: cwd,
@@ -90,27 +90,29 @@ test('workspaces.json keeps the Rust map+order shape and presets match shipped o
   )
   const host = await startHost({ home, webDir, port: 0 })
   try {
-    const list = (await (await fetch(`${host.baseUrl}/api/workspaces`)).json()) as {
-      workspaces: { id: string; title: string }[]
+    const list = (await (await fetch(`${host.baseUrl}/api/projects`)).json()) as {
+      projects: { id: string; title: string }[]
     }
-    assert.equal(list.workspaces.length, 1)
-    assert.equal(list.workspaces[0]?.id, existingId)
+    assert.equal(list.projects.length, 2)
+    assert.equal(list.projects[0]?.id, existingId)
+    assert.equal(list.projects[1]?.id, 'default')
 
-    const created = await fetch(`${host.baseUrl}/api/workspaces`, {
+    const created = await fetch(`${host.baseUrl}/api/projects`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: cwd, title: 'New' }),
+      body: JSON.stringify({ dirs: [cwd], title: 'New' }),
     })
     assert.equal(created.status, 201)
-    const { workspace } = (await created.json()) as { workspace: { id: string } }
-    const file = JSON.parse(fs.readFileSync(path.join(home, 'workspaces.json'), 'utf8')) as {
-      initialized: boolean
+    const { project } = (await created.json()) as { project: { id: string } }
+    const file = JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8')) as {
+      version: number
       order: string[]
-      workspaces: Record<string, { id: string; title: string }>
+      projects: Record<string, { id: string; title: string; dirs: string[] }>
     }
-    assert.equal(file.initialized, true)
-    assert.equal(file.order[0], workspace.id)
-    assert.ok(file.workspaces[workspace.id])
+    assert.equal(file.version, 1)
+    assert.equal(file.order[0], project.id)
+    assert.ok(file.projects[project.id])
+    assert.deepEqual(file.projects[project.id]?.dirs, [cwd])
 
     const presets = (await (await fetch(`${host.baseUrl}/api/agent-presets`)).json()) as {
       default: string

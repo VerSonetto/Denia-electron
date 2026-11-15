@@ -80,7 +80,7 @@ export interface CredentialInfo {
 export function resolveHome(): string {
   const fromEnv = process.env.DENIA_HOME?.trim()
   if (fromEnv) return path.resolve(fromEnv)
-  // Same home as the Rust build: sessions, settings, credentials, workspaces.
+  // Same home as the Rust build: sessions, settings, credentials, projects.
   return path.join(os.homedir(), '.denia')
 }
 
@@ -94,10 +94,6 @@ export function settingsPath(home: string): string {
 
 export function credentialsPath(home: string): string {
   return path.join(home, '.credentials.yaml')
-}
-
-export function workspacesPath(home: string): string {
-  return path.join(home, 'workspaces.json')
 }
 
 function readYamlFile(file: string): unknown {

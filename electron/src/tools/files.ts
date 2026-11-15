@@ -55,11 +55,11 @@ function backupBeforeWrite(file: string, ctx: ToolContext): ToolOutput | null {
 export const ReadFileTool = {
   schema: schema(
     'read_file',
-    '读取会话工作区中的一个 UTF-8 文本文件。相对路径锚定会话工作区;大文件用 offset/limit 分页读取。',
+    '读取项目目录中的一个 UTF-8 文本文件。相对路径锚定项目主目录;大文件用 offset/limit 分页读取。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '文件路径;相对路径锚定会话工作区。' },
+        path: { type: 'string', description: '文件路径;相对路径锚定项目主目录。' },
         offset: { type: 'integer', minimum: 1, default: 1, description: '1-based 起始行号,默认 1。' },
         limit: { type: 'integer', minimum: 1, default: DEFAULT_READ_LIMIT, description: '本次最多读取的行数,默认 400。' },
       },
@@ -73,9 +73,9 @@ export const ReadFileTool = {
     const limit = Math.max(1, Math.round(optionalNumber(args, 'limit') ?? DEFAULT_READ_LIMIT))
     let file: string
     try {
-      file = resolvePath(ctx.cwd, raw, ctx.confined)
+      file = resolvePath(ctx.cwd, raw, ctx.confined, ctx.roots)
     } catch (error) {
-      return toolError(error instanceof Error ? error.message : String(error), '相对路径锚定会话工作区')
+      return toolError(error instanceof Error ? error.message : String(error), '相对路径锚定项目主目录')
     }
     // A repeat read of an unchanged view is a wasted call: the earlier result is
     // still on the model surface, so only a pointer to it is worth the tokens.
@@ -122,11 +122,11 @@ export const ReadFileTool = {
 export const WriteFileTool = {
   schema: schema(
     'write_file',
-    '在会话工作区写入一个 UTF-8 文本文件:自动创建父目录,已存在的文件会被整体覆盖。新建文件或全量重写用本工具;对现有文件做局部修改请优先用 edit。',
+    '在项目目录写入一个 UTF-8 文本文件:自动创建父目录,已存在的文件会被整体覆盖。新建文件或全量重写用本工具;对现有文件做局部修改请优先用 edit。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '目标文件路径;相对路径锚定会话工作区。' },
+        path: { type: 'string', description: '目标文件路径;相对路径锚定项目主目录。' },
         content: { type: 'string', description: '完整文件内容(整体覆盖写入)。' },
       },
       required: ['path', 'content'],
@@ -138,11 +138,11 @@ export const WriteFileTool = {
     const content = expectString(args, 'content')
     let file: string
     try {
-      file = resolvePath(ctx.cwd, raw, ctx.confined)
+      file = resolvePath(ctx.cwd, raw, ctx.confined, ctx.roots)
     } catch (error) {
       return toolError(
         error instanceof Error ? error.message : String(error),
-        '相对路径锚定会话工作区;沙箱开启时不能写工作区之外的路径',
+        '相对路径锚定项目主目录;沙箱开启时不能写项目目录之外的路径',
       )
     }
     const backupError = backupBeforeWrite(file, ctx)
@@ -211,13 +211,13 @@ function lineOfIndex(text: string, index: number): number {
 export const EditTool = {
   schema: schema(
     'edit',
-    '对工作区内的一个 UTF-8 文本文件做精确字符串替换。推荐两种参数形式之一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次。多处编辑按数组顺序应用,任一项失败则整次不写入。',
+    '对项目内的一个 UTF-8 文本文件做精确字符串替换。推荐两种参数形式之一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次。多处编辑按数组顺序应用,任一项失败则整次不写入。',
     {
       type: 'object',
       required: ['path'],
       additionalProperties: false,
       properties: {
-        path: { type: 'string', description: '要编辑的文件路径;相对路径锚定会话工作区。' },
+        path: { type: 'string', description: '要编辑的文件路径;相对路径锚定项目主目录。' },
         old_string: { type: 'string', minLength: 1, description: '要被替换的原文,必须与文件内容逐字符一致。' },
         new_string: { type: 'string', description: '替换成的新文本;删除内容时给空串。' },
         replace_all: { type: 'boolean', description: 'true 时替换 old_string 的全部出现,默认只允许恰好出现一次。' },
@@ -254,7 +254,7 @@ export const EditTool = {
     if (specs.length === 0) return toolError('至少需要一个编辑项')
     let file: string
     try {
-      file = resolvePath(ctx.cwd, raw, ctx.confined)
+      file = resolvePath(ctx.cwd, raw, ctx.confined, ctx.roots)
     } catch (error) {
       return toolError(error instanceof Error ? error.message : String(error))
     }

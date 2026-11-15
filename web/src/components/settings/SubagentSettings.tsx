@@ -64,8 +64,8 @@ function modelSummary(profile: SubagentProfile): string {
 }
 
 export function SubagentSettings({ notify }: { notify: Notify }) {
-  const [workspaces, setWorkspaces] = useState<{ id: string; title: string; path: string }[]>([])
-  const [workspaceId, setWorkspaceId] = useState('')
+  const [projects, setProjects] = useState<{ id: string; title: string; path: string }[]>([])
+  const [projectId, setProjectId] = useState('')
   const [catalog, setCatalog] = useState<SubagentCatalogView | null>(null)
   const [models, setModels] = useState<ModelCatalog | null>(null)
   const [tools, setTools] = useState<SubagentToolsView | null>(null)
@@ -86,7 +86,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
   const [policyOpen, setPolicyOpen] = useState(false)
   const editorRef = useRef<HTMLElement | null>(null)
 
-  const cwd = workspaces.find((entry) => entry.id === workspaceId)?.path ?? ''
+  const cwd = projects.find((entry) => entry.id === projectId)?.path ?? ''
   const scope = cwd ? { cwd } : {}
   const requestIdRef = useRef(0)
 
@@ -96,24 +96,24 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     setLoading(true)
     setError('')
     try {
-      const [profileView, toolView, settings, workspaceList, modelCatalog] = await Promise.all([
+      const [profileView, toolView, settings, projectList, modelCatalog] = await Promise.all([
         api.listSubagentProfiles(requestedScope),
         api.listSubagentTools(requestedScope),
         api.getSettings(),
-        api.listWorkspaces(),
+        api.listProjects(),
         api.getCatalog().catch(() => null),
       ])
       if (requestId !== requestIdRef.current) return
       setCatalog(profileView)
       setTools(toolView)
       setModels(modelCatalog)
-      const rows = workspaceList.workspaces.map((entry) => ({
+      const rows = projectList.projects.map((entry) => ({
         id: entry.id,
-        title: entry.title,
-        path: entry.path,
+        title: entry.builtin === 'default' ? t('defaultProject') : entry.title,
+        path: entry.dirs[0] ?? '',
       }))
-      setWorkspaces(rows)
-      setWorkspaceId((current) => (current && rows.some((row) => row.id === current) ? current : ''))
+      setProjects(rows)
+      setProjectId((current) => (current && rows.some((row) => row.id === current) ? current : ''))
       setSelectedId((current) => {
         const all = [...profileView.effective, ...profileView.shadowed]
         return current && all.some((view) => view.qualifiedId === current)
@@ -135,7 +135,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     } finally {
       if (requestId === requestIdRef.current) setLoading(false)
     }
-  }, [workspaceId])
+  }, [projectId])
 
   useEffect(() => {
     void load()
@@ -366,16 +366,16 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     return map
   }, [rows])
 
-  const workspaceOptions = useMemo<SelectOption<string>[]>(
+  const projectOptions = useMemo<SelectOption<string>[]>(
     () => [
       { id: '', label: t('subagentsScopeUser'), hint: t('subagentsSessionHint') },
-      ...workspaces.map((entry) => ({
+      ...projects.map((entry) => ({
         id: entry.id,
         label: (entry.title || entry.path).split(/[\\/]/).filter(Boolean).pop() ?? entry.path,
         hint: entry.path,
       })),
     ],
-    [workspaces],
+    [projects],
   )
 
   const update = (patch: Partial<SubagentProfile>) => {
@@ -406,13 +406,13 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
       <div className={styles.scopeBar}>
         <DropdownField
           label={t('subagentsSessionLabel')}
-          value={workspaceId}
-          options={workspaceOptions}
+          value={projectId}
+          options={projectOptions}
           disabled={saving}
           onChange={(next) => {
-            if (next === workspaceId) return
+            if (next === projectId) return
             requestProfileChange(() => {
-              setWorkspaceId(next)
+              setProjectId(next)
               setSelectedId(null)
               setCatalog(null)
             })

@@ -1,4 +1,4 @@
-/* 工作区文件面板:一行搜索 + 目录树。
+/* 项目文件面板:一行搜索 + 目录树。
  *
  * 面板头 / 工具条 / 搜索框的共享视觉在 SidePane.css;这里只写树本身。
  * 所有选择器以 `.side-pane` 作用域收口,懒加载顺序不影响结果。
@@ -75,7 +75,7 @@
   color: var(--label-caption);
 }
 
-/* 折叠指示:默认朝右,展开时旋转朝下(与侧栏工作区树同一套语言)。 */
+/* 折叠指示:默认朝右,展开时旋转朝下(与侧栏项目树同一套语言)。 */
 .side-pane .file-tree-caret-icon {
   display: inline-flex;
   transition: transform 0.12s var(--ease);

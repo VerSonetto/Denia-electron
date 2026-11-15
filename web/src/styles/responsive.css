@@ -238,7 +238,7 @@
 @media (max-width: 820px) {
   /* 抽屉打开时遮罩要盖住整屏(桌面用的是无样式透明层)。
      背景对全部 menu-backdrop 生效是安全的(桌面那层本来就在菜单之下),
-     但 z-index 必须**只给这四个选择器**:其余菜单(.ws-menu 41、
+     但 z-index 必须**只给这四个选择器**:其余菜单(.project-menu 41、
      .mention-menu 51、.ui-dropdown-menu 41)都低于 55,统一抬高遮罩会把
      它们盖住。 */
   .menu-backdrop {
@@ -370,7 +370,7 @@
  *
  * 卡片**不画边框**:轮廓完全由底色 + 一层极淡阴影(--composer-shadow,
  * 浅/深两套见 foundation.css)成形,圆角 22px。`border: 0 !important` 是
- * 刻意写死的 —— 任何按状态补边框的规则(焦点、优化中、选工作区)都别再
+ * 刻意写死的 —— 任何按状态补边框的规则(焦点、优化中、选项目)都别再
  * 加回来,状态差异一律走阴影。
  *
  * 这块是 composer 外观的**唯一真相**:composer.css / controls.css 里同名选择器

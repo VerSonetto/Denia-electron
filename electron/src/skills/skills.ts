@@ -46,13 +46,22 @@ interface Metadata {
   userInvocable?: boolean
 }
 
-export function discoverSkills(home: string, cwd?: string | null): SkillDiscovery {
+export function discoverSkills(
+  home: string,
+  cwd?: string | readonly string[] | null,
+): SkillDiscovery {
   const diagnostics: SkillDiagnostic[] = []
   const disabled = readDisabled(home)
   const found = new Map<string, Skill>()
   const roots: { dir: string; source: string }[] = []
-  if (cwd && fs.existsSync(cwd)) {
-    const projectRoot = projectRootOf(cwd)
+  const projectDirs = (typeof cwd === 'string' ? [cwd] : cwd ? [...cwd] : [])
+    .filter((dir) => dir.trim() !== '' && fs.existsSync(dir))
+  const seenProjects = new Set<string>()
+  for (const dir of projectDirs) {
+    const projectRoot = projectRootOf(dir)
+    const key = process.platform === 'win32' ? projectRoot.toLowerCase() : projectRoot
+    if (seenProjects.has(key)) continue
+    seenProjects.add(key)
     roots.push(
       { dir: path.join(projectRoot, '.denia', 'skills'), source: 'project-denia' },
       { dir: path.join(projectRoot, '.dsh', 'skills'), source: 'project-dsh' },

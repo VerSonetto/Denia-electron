@@ -33,7 +33,7 @@ import type { PlanReviewDecision, ToolCallRef } from '../core/wire.ts'
 /** One tool call's policy-relevant facts. */
 export interface CallFacts {
   action: ActionClass
-  insideWorkspace: boolean
+  insideProject: boolean
   shell?: {
     command: string
     certifiedReadonly: boolean
@@ -89,17 +89,21 @@ export function classifyCall(
   call: ToolCallRef,
   sandboxRestricted: boolean,
   memoryRoot?: string | null,
+  roots?: readonly string[],
 ): CallFacts {
   if (call.name === 'exit_plan') {
-    return { action: 'plan-submit', insideWorkspace: true }
+    return { action: 'plan-submit', insideProject: true }
   }
   if (FILE_WRITE_TOOLS.has(call.name)) {
     const target = touchedPath(cwd, call)
-    if (target === undefined) return { action: 'write', insideWorkspace: true }
+    if (target === undefined) return { action: 'write', insideProject: true }
     if (memoryRoot && isInside(memoryRoot, target) && target.toLowerCase().endsWith('.md')) {
-      return { action: 'memory-write', insideWorkspace: false }
+      return { action: 'memory-write', insideProject: false }
     }
-    return { action: 'write', insideWorkspace: isInside(cwd, target) }
+    return {
+      action: 'write',
+      insideProject: (roots && roots.length > 0 ? roots : [cwd]).some((root) => isInside(root, target)),
+    }
   }
   if (call.name === 'bash' || call.name === 'job_start') {
     const command = argumentText(call.arguments, 'command')
@@ -108,7 +112,7 @@ export function classifyCall(
     const mayNetwork = bashMayNetwork(command)
     return {
       action: isDelete ? 'delete' : mayWrite ? 'write' : mayNetwork ? 'network' : 'read',
-      insideWorkspace: true,
+      insideProject: true,
       shell: {
         command,
         // In a restricted sandbox an unprovable command counts as a write.
@@ -120,9 +124,9 @@ export function classifyCall(
     }
   }
   if (call.name === 'run_checks') {
-    return { action: 'write', insideWorkspace: true }
+    return { action: 'write', insideProject: true }
   }
-  return { action: 'read', insideWorkspace: true }
+  return { action: 'read', insideProject: true }
 }
 
 /** Session-cache key: the normalized action, not just its coarse class. */
@@ -152,14 +156,15 @@ export function gateCall(
   policy: ExecPolicy,
   grants: ApprovalGrants,
   memoryRoot?: string | null,
+  roots?: readonly string[],
 ): GateResult {
   const restricted = state.sandbox !== 'danger-full-access'
-  const facts = classifyCall(cwd, call, restricted, memoryRoot)
+  const facts = classifyCall(cwd, call, restricted, memoryRoot, roots)
   const rule = facts.shell ? policy.evaluate(facts.shell.command) : undefined
   const decision = decideAction({
     state,
     action: facts.action,
-    insideWorkspace: facts.insideWorkspace,
+    insideProject: facts.insideProject,
     ...(facts.shell ? { shell: facts.shell } : {}),
     ...(rule ? { rule } : {}),
   })

@@ -6,7 +6,7 @@
 // appears when that tool is actually on the table, so a subagent never reads
 // rules for tools it cannot call.
 //
-// Runtime facts (workspace, platform, permissions) live in an injected
+// Runtime facts (project, platform, permissions) live in an injected
 // conversation snapshot instead of the system prompt, so the transcript can
 // show the same facts the model sees.
 
@@ -93,7 +93,7 @@ const TOOL_GREP =
   '- grep 搜大目录可用 include，命中上限后收窄 pattern；命中文件读上下文，不用 shell 重搜。'
 
 const FILE_REFERENCE =
-  '- 用户消息中 @ 明确引用工作区根目录相对路径；需要其内容时，末尾带“/”的用 ls，其余用 read_file；含空格写 @\"...\"。'
+  '- 用户消息中 @ 明确引用项目目录内的相对路径；需要其内容时，末尾带“/”的用 ls，其余用 read_file；含空格写 @\"...\"。'
 
 const TOOL_READ = '- 读取前不声称已看过、不猜内容。同一分页未变更的重复读取只返回提示。'
 
@@ -235,19 +235,19 @@ function permissionSection(permission: PermissionState): string {
         '当前权限模式:只读。只开放 ls、read_file、glob、grep 等只读类工具,bash 与写文件工具不可用;请只做阅读、检索与分析,或请用户切换权限模式。',
       )
       break
-    case 'workspace-write':
+    case 'project-write':
       lines.push(
-        '当前权限模式:自动编辑。工作区内的文件编辑(write_file/edit)自动放行;三类操作会先弹用户审批再执行:写工作区之外的文件、删除文件(rm/del 等,删除不可逆)、用 bash 增删改写文件。审批被拒时改用工作区内的方案。',
+        '当前权限模式:自动编辑。项目目录内的文件编辑(write_file/edit)自动放行;三类操作会先弹用户审批再执行:写项目目录之外的文件、删除文件(rm/del 等,删除不可逆)、用 bash 增删改写文件。审批被拒时改用项目目录内的方案。',
       )
       break
     case 'approve-for-me':
       lines.push(
-        '当前权限模式:自动审查。工作区内的文件编辑自动放行;写工作区之外、删除文件与有写副作用的 bash 命令先交自动审查者裁决,不确定或高风险的再转用户审批。审批被拒时改用工作区内的方案。',
+        '当前权限模式:自动审查。项目目录内的文件编辑自动放行;写项目目录之外、删除文件与有写副作用的 bash 命令先交自动审查者裁决,不确定或高风险的再转用户审批。审批被拒时改用项目目录内的方案。',
       )
       break
     case 'full-access':
       lines.push(
-        '当前权限模式:完全访问。所有操作自动放行、无需审批,文件写入可以离开工作区;破坏性操作仍要先说明再执行。',
+        '当前权限模式:完全访问。所有操作自动放行、无需审批,文件写入可以离开项目目录;破坏性操作仍要先说明再执行。',
       )
       break
   }
@@ -276,12 +276,22 @@ function shellNote(): string {
  * receives, so the UI never has to invent a separate "runtime" view.
  */
 export function buildRuntimeContext(
-  options: Pick<SystemPromptOptions, 'cwd' | 'sandbox' | 'permission' | 'apiBase'>,
+  options: Pick<SystemPromptOptions, 'cwd' | 'sandbox' | 'permission' | 'apiBase'> & {
+    /** Every directory of the session's project, primary first. */
+    roots?: readonly string[]
+  },
 ): string {
   const platform = `${process.platform} ${os.arch()}`
   const date = new Date().toISOString().slice(0, 10)
+  const roots = options.roots && options.roots.length > 0 ? options.roots : [options.cwd]
+  const projectLine =
+    roots.length > 1
+      ? `项目目录（${roots.length} 个，模型对整个项目工作）:\n${roots
+          .map((root, index) => `  ${index + 1}. ${root}${index === 0 ? '（主目录，相对路径以它为根）' : ''}`)
+          .join('\n')}\n跨目录工作时用绝对路径；grep/glob/ls 不给 path 时会搜索全部项目目录。`
+      : `工作目录:${roots[0]}（相对路径以它为根）。`
   const blocks = [
-    `工作目录:${options.cwd}（相对路径以它为根）。平台:${platform}。日期:${date}。${shellNote()}`,
+    `${projectLine} 平台:${platform}。日期:${date}。${shellNote()}`,
     permissionSection(options.permission),
   ]
   if (options.apiBase && options.apiBase.trim() !== '') {
@@ -322,7 +332,7 @@ function subagentSections(sub: SubagentPromptContext): string[] {
   const constraints = [
     '# 子代理约束',
     '- 你是子代理，**不能派遣子代理**，也不能使用宿主配置或会话主控工具；',
-    '- 不会自动加载全局 AGENTS.md，只自动发现项目级规则；工作目录、权限模式与工作区沙箱与父代理一致；',
+    '- 不会自动加载全局 AGENTS.md，只自动发现项目级规则；项目目录、权限模式与项目沙箱与父代理一致；',
     ...toolsNote.map((line) => `- ${line}`),
     ...commNote.map((line) => `- ${line}`),
     `- ${ceilingNote}`,

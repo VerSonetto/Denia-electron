@@ -4,7 +4,7 @@
  *
  * # 为什么 HTML 必须用 iframe 而不是 dangerouslySetInnerHTML
  *
- * 预览的就是**工作区里一个用户自己的文件**，但它仍然是任意内容：往仓库里
+ * 预览的就是**项目里一个用户自己的文件**，但它仍然是任意内容：往仓库里
  * 放一个带 `<script>` 的 HTML，再点开它，那段脚本就会在 Denia 的源上执行
  * ——能读 console 的 localStorage、cookie，能带着会话凭据发任意请求。
  * `dangerouslySetInnerHTML` 就是这个后果，没有中间态。
@@ -58,8 +58,8 @@ export function previewKindOf(name: string): PreviewKind | null {
 }
 
 export interface FilePreviewProps {
-  /** 工作区绝对路径（预览资源的根）。 */
-  workspacePath: string
+  /** 项目绝对路径（预览资源的根）。 */
+  projectPath: string
   /** 当前文件的相对路径。 */
   file: string
   /** 文件名（含扩展名），用于判定预览类型。 */
@@ -68,7 +68,7 @@ export interface FilePreviewProps {
   content: string
 }
 
-export function FilePreview({ workspacePath, file, name, content }: FilePreviewProps) {
+export function FilePreview({ projectPath, file, name, content }: FilePreviewProps) {
   const kind = previewKindOf(name)
   // Markdown 标签必须是引用稳定的对象，否则 MarkdownText 的渲染缓存
   // 会在每次父组件重渲染时被丢弃。
@@ -91,7 +91,7 @@ export function FilePreview({ workspacePath, file, name, content }: FilePreviewP
       <iframe
         className="file-preview-frame"
         title={name}
-        src={api.workspacePreviewUrl(workspacePath, file)}
+        src={api.projectPreviewUrl(projectPath, file)}
         sandbox="allow-popups"
         referrerPolicy="no-referrer"
       />

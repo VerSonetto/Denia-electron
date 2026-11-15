@@ -1,12 +1,12 @@
 /**
- * 文件读取标签页:只读查看工作区内的文件内容。
+ * 文件读取标签页:只读查看项目内的文件内容。
  *
  * # 为什么没有手动入口
  *
  * 这个标签页**不出现在 `+` 菜单里**(见 `panelRegistry.ts` 的 `available:
  * () => false`),也不能手输路径。它只能由四类点击触发打开:
  * 对话流里的 Markdown 文件引用、edit/write 工具行的路径、轮次产物列表、
- * 侧栏工作区文件树里的文件项。这样它永远只承载"用户刚刚真的点了的东西",
+ * 侧栏项目文件树里的文件项。这样它永远只承载"用户刚刚真的点了的东西",
  * 不会变成第二个需要维护路径输入的地址栏。
  *
  * # 条目模型
@@ -35,7 +35,7 @@ import './FileReaderPanel.css'
 /** 当前文件的加载状态。 */
 type FileState =
   | { kind: 'loading' }
-  | { kind: 'ready'; view: api.WorkspaceFileView }
+  | { kind: 'ready'; view: api.ProjectFileView }
   | { kind: 'error'; message: string; code: string }
 
 /**
@@ -56,8 +56,8 @@ function systemPrefersLight(): boolean {
 }
 
 export interface FileReaderPanelProps {
-  /** 工作区绝对路径(文件读取的根)。 */
-  workspacePath: string
+  /** 项目绝对路径(文件读取的根)。 */
+  projectPath: string
   /** 已打开的文件条目(顺序即条目标签顺序)。 */
   files: readonly OpenedFile[]
   /** 当前激活的文件路径。 */
@@ -69,7 +69,7 @@ export interface FileReaderPanelProps {
 }
 
 export function FileReaderPanel({
-  workspacePath,
+  projectPath,
   files,
   activeFile,
   onActivate,
@@ -137,7 +137,7 @@ export function FileReaderPanel({
       requestRef.current = controller
       setStates({ [path]: { kind: 'loading' } })
       api
-        .fetchWorkspaceFile(workspacePath, path, controller.signal)
+        .fetchProjectFile(projectPath, path, controller.signal)
         .then((view) => {
           if (!aliveRef.current || controller.signal.aborted || revisionRef.current !== revision) return
           setStates({ [path]: { kind: 'ready', view } })
@@ -149,14 +149,14 @@ export function FileReaderPanel({
           setStates({ [path]: { kind: 'error', message, code } })
         })
     },
-    [workspacePath],
+    [projectPath],
   )
 
-  // 工作区换了(切会话):整批状态作废 —— 旧根的路径在新根下毫无意义。
+  // 项目换了(切会话):整批状态作废 —— 旧根的路径在新根下毫无意义。
   useEffect(() => {
     requestRef.current?.abort()
     setStates({})
-  }, [workspacePath])
+  }, [projectPath])
 
   // 按需加载:只为"还没有状态"的条目发请求。已加载/加载中/失败的都不重发
   // (失败要重试由用户点重试按钮,不自动重试)。
@@ -218,7 +218,7 @@ export function FileReaderPanel({
   }, [activeFile, files])
 
   return (
-    <div className="file-reader pane-panel" data-file-reader-root={workspacePath}>
+    <div className="file-reader pane-panel" data-file-reader-root={projectPath}>
       {/* 内部条目标签:文件多开时靠它切换。最后一个条目关掉后标签页自己
           消失(见 sidePane.closeFile),所以这里不需要空态分支。 */}
       {files.length > 1 && (
@@ -348,7 +348,7 @@ export function FileReaderPanel({
         ) : (
           showPreview ? (
             <FilePreview
-              workspacePath={workspacePath}
+              projectPath={projectPath}
               file={active}
               name={state.view.name}
               content={state.view.content}

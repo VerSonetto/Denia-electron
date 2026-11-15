@@ -1,11 +1,11 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { t } from '../i18n';
 import { sessionDisplayTitle } from '../sessionDisplay';
-import type { SessionSummary, WorkspaceRecord } from '../types';
+import type { ProjectRecord, SessionSummary } from '../types';
 import { SessionPresetLabel } from './SessionPresetLabel';
 import { OpenInApp } from './OpenInApp';
 import { AgentPresetSelector } from './AgentPresetSelector';
-import { IconCheck, IconChevron, IconDownload, IconPanelOpen, IconPlus, IconWorkspace } from './icons';
+import { IconCheck, IconChevron, IconDownload, IconPanelOpen, IconPlus, IconProject } from './icons';
 import type { ExportFormat } from '../lib/exportSession';
 import type { AgentPresetsView } from '../api';
 import * as api from '../api';
@@ -125,7 +125,7 @@ export function SessionHeader({
       <OpenInApp
         cwd={activeSession?.cwd_alive === false ? null : activeSession?.cwd ?? null}
       />
-      {/* 右侧面板开关:工作区头部最右、紧邻导出。 */}
+      {/* 右侧面板开关:项目头部最右、紧邻导出。 */}
       {onToggleSidePane && (
         <button
           type="button"
@@ -182,50 +182,50 @@ export function SessionHeader({
   )
 }
 
-/** 欢迎页(hero)的工作区选择行:工作区芯片 + 预设选择器 + 工作区菜单。 */
-export function HeroWorkspaceRow({
-  workspaces,
-  activeWs,
+/** 欢迎页(hero)的项目选择行:项目芯片 + 预设选择器 + 项目菜单。 */
+export function HeroProjectRow({
+  projects,
+  activeProject,
   locked,
   inert,
-  wsMenuOpen,
-  setWsMenuOpen,
+  projectMenuOpen,
+  setProjectMenuOpen,
   agentPresetCatalog,
   agentPresetId,
   agentPresetBusy,
   changeAgentPreset,
-  onSelectWorkspace,
-  onAddWorkspace,
+  onSelectProject,
+  onAddProject,
   onOpenPicker,
 }: {
-  workspaces: WorkspaceRecord[]
-  activeWs: WorkspaceRecord | null
+  projects: ProjectRecord[]
+  activeProject: ProjectRecord | null
   locked: boolean
   inert: boolean
-  wsMenuOpen: boolean
-  setWsMenuOpen: Dispatch<SetStateAction<boolean>>
+  projectMenuOpen: boolean
+  setProjectMenuOpen: Dispatch<SetStateAction<boolean>>
   agentPresetCatalog: AgentPresetsView | null
   agentPresetId: string | null
   agentPresetBusy: boolean
   changeAgentPreset: (id: string) => void
-  onSelectWorkspace: (ws: WorkspaceRecord) => void
-  onAddWorkspace: () => void
+  onSelectProject: (project: ProjectRecord) => void
+  onAddProject: () => void
   onOpenPicker: () => void
 }) {
   return (
-    <div className="composer-workspace hero-ws-row">
+    <div className="composer-project hero-project-row">
       <button
         type="button"
-        className={`ws-chip${wsMenuOpen ? ' open' : ''}`}
-        aria-expanded={wsMenuOpen}
+        className={`project-chip${projectMenuOpen ? ' open' : ''}`}
+        aria-expanded={projectMenuOpen}
         onClick={() => {
-          if (workspaces.length === 0) onOpenPicker()
-          else setWsMenuOpen((open) => !open)
+          if (projects.length === 0) onOpenPicker()
+          else setProjectMenuOpen((open) => !open)
         }}
       >
-        <IconWorkspace size={16} />
-        <span className={activeWs ? 'label' : 'label dim'}>
-          {activeWs?.title ?? t('heroChooseWorkspace')}
+        <IconProject size={16} />
+        <span className={activeProject ? 'label' : 'label dim'}>
+          {activeProject ? (activeProject.builtin === 'default' ? t('defaultProject') : activeProject.title) : t('heroChooseProject')}
         </span>
         <IconChevron size={11} />
       </button>
@@ -239,44 +239,48 @@ export function HeroWorkspaceRow({
           onChange={changeAgentPreset}
         />
       )}
-      {wsMenuOpen && (
+      {projectMenuOpen && (
         <>
-          <div className="menu-backdrop" onClick={() => setWsMenuOpen(false)} />
-          <div className="ws-menu">
-            {workspaces.map((ws) => {
-              const notCurrent = ws.id !== activeWs?.id
+          <div className="menu-backdrop" onClick={() => setProjectMenuOpen(false)} />
+          <div className="project-menu">
+            {projects.map((project) => {
+              const notCurrent = project.id !== activeProject?.id
               const blocked = locked && notCurrent
               return (
                 <button
-                  key={ws.id}
+                  key={project.id}
                   type="button"
-                  className={`ws-menu-item${ws.id === activeWs?.id ? ' active' : ''}`}
-                  title={blocked ? t('workspaceLockedTitle') : ws.path}
+                  className={`project-menu-item${project.id === activeProject?.id ? ' active' : ''}`}
+                  title={blocked ? t('projectLockedTitle') : project.dirs.join('\n')}
                   disabled={blocked}
                   onClick={() => {
-                    setWsMenuOpen(false)
-                    onSelectWorkspace(ws)
+                    setProjectMenuOpen(false)
+                    onSelectProject(project)
                   }}
                 >
-                  <IconWorkspace size={18} />
-                  <span className="ws-menu-text">
-                    <span className="name">{ws.title}</span>
-                    <span className="ws-menu-path">{ws.path}</span>
+                  <IconProject size={18} />
+                  <span className="project-menu-text">
+                    <span className="name">{project.builtin === 'default' ? t('defaultProject') : project.title}</span>
+                    <span className="project-menu-path">
+                      {project.dirs.length > 1
+                        ? t('projectDirsCount', { n: project.dirs.length })
+                        : project.dirs[0] ?? ''}
+                    </span>
                   </span>
-                  {ws.id === activeWs?.id && <IconCheck size={13} />}
+                  {project.id === activeProject?.id && <IconCheck size={13} />}
                 </button>
               )
             })}
             <button
               type="button"
-              className="ws-menu-item create"
+              className="project-menu-item create"
               onClick={() => {
-                setWsMenuOpen(false)
-                onAddWorkspace()
+                setProjectMenuOpen(false)
+                onAddProject()
               }}
             >
               <IconPlus size={13} />
-              <span className="name">{t('addWorkspaceMenu')}</span>
+              <span className="name">{t('addProjectMenu')}</span>
             </button>
           </div>
         </>

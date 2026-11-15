@@ -203,7 +203,7 @@ async function hostFor(harness: Harness): Promise<string> {
   return url
 }
 
-test('workspace-write asks, allow-once runs the command', async () => {
+test('project-write asks, allow-once runs the command', async () => {
   const bridge = new FakeBridge(() => ({ choice: 'accept' }))
   const harness = await startHarness({ bridge })
   const host = await startHostFor(harness)

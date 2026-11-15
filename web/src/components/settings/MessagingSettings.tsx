@@ -3,7 +3,7 @@
  *
  * 面板按平台列卡片;目前只有微信,后续接入 QQ/飞书等只需在这里追加一张卡。
  * 微信卡片负责扫码登录、状态展示与断开 —— 会话选择、模型与权限切换都在
- * 聊天里用 /workspace、/switch、/model、/permission 完成。
+ * 聊天里用 /project、/switch、/model、/permission 完成。
  */
 
 import { useCallback, useEffect, useState } from 'react'

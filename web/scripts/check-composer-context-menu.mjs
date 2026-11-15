@@ -159,7 +159,7 @@ async function mount(overrides = {}) {
   calls = { open: 0, upload: 0, files: [], commands: [], sessions: [], sent: 0, focusAtOpen: null, uploadWhileOpen: false }
   sessionHandler = async () => { editor.focus() }
   props = {
-    workspacePath: 'D:/work', activeId: 'active', sessions: [session('active'), session('other')],
+    projectPath: 'D:/work', activeId: 'active', sessions: [session('active'), session('other')],
     commands: [{ name: 'plan', label: 'Plan', description: 'Make a plan' }, { name: 'compact', label: 'Compact', description: 'Summarize context' }],
     onOpen() { calls.open++; calls.focusAtOpen = document.activeElement },
     onUpload() { calls.upload++; calls.uploadWhileOpen = !!menu() },
@@ -322,7 +322,7 @@ try {
     assert.equal(requests.at(-1).query, '', 'whitespace changes cannot strand an aborted search')
   })
 
-  await test('workspace sessions normalize paths, exclude current/missing/foreign cwd, cap at 10, search title/id/excerpt', async () => {
+  await test('project sessions normalize paths, exclude current/missing/foreign cwd, cap at 10, search title/id/excerpt', async () => {
     const matching = Array.from({ length: 13 }, (_, i) => session(`s${i}`, { cwd: 'd:\\WORK\\',
       ...(i === 12 ? { title: 'Hidden title', excerpt: 'Unique excerpt marker' } : {}) }))
     await mount({ sessions: [session('active'), session('foreign', { cwd: 'D:/else' }), session('unknown', { cwd: undefined }),
@@ -442,7 +442,7 @@ try {
     assert.ok(menu())
   })
 
-  await test('disabled/workspace changes and unmount abort outstanding file and session work', async () => {
+  await test('disabled/project changes and unmount abort outstanding file and session work', async () => {
     respondAutomatically = false
     await mount(); await open(); await flushSearch()
     const pending = deferred()
@@ -460,14 +460,14 @@ try {
     const work = deferred()
     sessionHandler = () => work.promise
     await click(row('session', 'other'))
-    await render({ workspacePath: 'D:/new' })
+    await render({ projectPath: 'D:/new' })
     assert.equal(menu(), null)
     assert.equal(requests[1].signal.aborted, true)
     assert.equal(calls.sessions[1].signal.aborted, true)
     await act(async () => work.resolve())
     await open(); await flushSearch()
     assert.equal(requests[2].path, 'D:/new')
-    await settle(requests[1], [file('wrong-workspace')])
+    await settle(requests[1], [file('wrong-project')])
     assert.equal(fileRows().length, 0)
     const last = requests[2]
     await act(async () => root.unmount())
@@ -489,11 +489,11 @@ try {
     assert.equal(requests.length, 0)
   })
 
-  await test('dead/no workspace never fetches files; dead workspace still lists its sessions and cancels earlier search', async () => {
+  await test('dead/no project never fetches files; dead project still lists its sessions and cancels earlier search', async () => {
     respondAutomatically = false
     await mount({ filesAvailable: false }); await open(); await flushSearch()
     assert.equal(requests.length, 0)
-    assert.ok(menu().textContent.includes(t('contextWorkspaceUnavailable')))
+    assert.ok(menu().textContent.includes(t('contextProjectUnavailable')))
     assert.deepEqual(sessionRows().map(node => node.dataset.contextSession), ['other'])
     await render({ filesAvailable: true }); await flushSearch()
     assert.equal(requests.length, 1)
@@ -504,7 +504,7 @@ try {
     assert.ok(menu())
     await click(row('session', 'other'))
     assert.equal(calls.sessions.length, 1)
-    await render({ workspacePath: null }); await open(); await flushSearch()
+    await render({ projectPath: null }); await open(); await flushSearch()
     assert.equal(requests.length, 1)
     assert.equal(sessionRows().length, 0)
     assert.ok(row('upload'))

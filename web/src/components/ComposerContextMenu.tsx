@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react'
 import * as api from '../api'
 import type { MentionCandidate } from '../api'
-import { sameWorkspacePath } from '../features/conversation/composerContext'
+import { sameProjectPath } from '../features/conversation/composerContext'
 import { t } from '../i18n'
 import type { SessionSummary } from '../types'
 import { ChatCircleText, ClipboardText, FileText, FolderOpen, MagnifyingGlass, Paperclip, Plus, Target, Terminal, X } from '@phosphor-icons/react'
@@ -12,7 +12,7 @@ export interface ComposerContextMenuProps {
   disabled?: boolean
   filesAvailable?: boolean
   panelAnchorRef?: RefObject<HTMLElement | null>
-  workspacePath: string | null
+  projectPath: string | null
   activeId: string | null
   sessions: SessionSummary[]
   commands: Array<{ name: string; label: string; description: string }>
@@ -39,7 +39,7 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 
 /** The page owns insertion and editor focus; this menu only selects context. */
 export function ComposerContextMenu(props: ComposerContextMenuProps) {
-  const { disabled = false, filesAvailable = true, workspacePath, activeId, sessions, commands } = props
+  const { disabled = false, filesAvailable = true, projectPath, activeId, sessions, commands } = props
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [files, setFiles] = useState<MentionCandidate[]>([])
@@ -92,7 +92,7 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
 
   useLayoutEffect(() => {
     close()
-  }, [workspacePath, disabled, activeId, close])
+  }, [projectPath, disabled, activeId, close])
 
   useLayoutEffect(() => {
     if (visible) searchRef.current?.focus({ preventScroll: true })
@@ -103,7 +103,7 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
     setFiles([])
     setFileError('')
     setLoading(false)
-    if (!visible || !workspacePath || !filesAvailable) return
+    if (!visible || !projectPath || !filesAvailable) return
     const controller = new AbortController()
     searchAbortRef.current = controller
     setLoading(true)
@@ -111,8 +111,8 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
       debounceRef.current = null
       const current = () => !controller.signal.aborted && searchAbortRef.current === controller
         && openRef.current && !latestRef.current.disabled && latestRef.current.filesAvailable !== false
-        && latestRef.current.workspacePath === workspacePath
-      void api.searchMentions(workspacePath, searchQuery, controller.signal).then(({ items }) => {
+        && latestRef.current.projectPath === projectPath
+      void api.searchMentions(projectPath, searchQuery, controller.signal).then(({ items }) => {
         if (!current()) return
         setFiles(searchQuery ? items : items.slice(0, 10))
         setLoading(false)
@@ -123,7 +123,7 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
       })
     }, 150)
     return cancelSearch
-  }, [visible, workspacePath, filesAvailable, query, searchQuery, retry, cancelSearch])
+  }, [visible, projectPath, filesAvailable, query, searchQuery, retry, cancelSearch])
 
   // Capture before PanePopover's document Escape handler, including focus that has tabbed out.
   // Composition is never treated as a menu shortcut.
@@ -156,12 +156,12 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
     try {
       await props.onSession(session, controller.signal)
       if (controller.signal.aborted || sessionAbortRef.current !== controller || !openRef.current
-        || latestRef.current.disabled || latestRef.current.workspacePath !== workspacePath) return
+        || latestRef.current.disabled || latestRef.current.projectPath !== projectPath) return
       sessionAbortRef.current = null
       close() // onSession has already restored the editor's focus.
     } catch (error: unknown) {
       if (controller.signal.aborted || sessionAbortRef.current !== controller || !openRef.current
-        || latestRef.current.disabled || latestRef.current.workspacePath !== workspacePath) return
+        || latestRef.current.disabled || latestRef.current.projectPath !== projectPath) return
       sessionAbortRef.current = null
       setPending(null)
       setSessionError({ session, message: errorMessage(error) })
@@ -183,19 +183,19 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
       : command.name === 'plan' ? <ClipboardText size={20} weight="duotone" /> : <Terminal size={20} weight="duotone" />,
     select: () => { if (canSelect()) { props.onCommand(command.name); close() } },
   }))]
-  const fileItems: MenuItem[] = (workspacePath && filesAvailable && !loading && !fileError ? files : []).map(candidate => ({
+  const fileItems: MenuItem[] = (projectPath && filesAvailable && !loading && !fileError ? files : []).map(candidate => ({
     key: `file:${candidate.kind}:${candidate.path}`, kind: 'file', path: candidate.path,
     label: candidate.path + (candidate.kind === 'directory' && !candidate.path.endsWith('/') ? '/' : ''),
     icon: candidate.kind === 'directory' ? <FolderOpen size={20} weight="duotone" /> : <FileText size={20} weight="duotone" />,
     select: () => {
-      if (canSelect() && latestRef.current.filesAvailable !== false && latestRef.current.workspacePath === workspacePath) {
+      if (canSelect() && latestRef.current.filesAvailable !== false && latestRef.current.projectPath === projectPath) {
         props.onFile(candidate)
         close()
       }
     },
   }))
   const sessionItems: MenuItem[] = sessions.filter(session => session.id !== activeId
-    && sameWorkspacePath(session.cwd, workspacePath)
+    && sameProjectPath(session.cwd, projectPath)
     && (!needle || [session.title, session.id, session.excerpt].some(text => text?.toLocaleLowerCase().includes(needle))))
     .slice(0, 10).map(session => ({
       key: `session:${session.id}`, kind: 'session', sessionId: session.id,
@@ -322,7 +322,7 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
           </div>}
           <div role="group" aria-labelledby={`${id}-files`} className="composer-context-group">
             <div id={`${id}-files`} className="composer-context-heading">{t('contextFilesSection')}</div>
-            {!workspacePath || !filesAvailable ? <p className="composer-context-empty">{t('contextWorkspaceUnavailable')}</p>
+            {!projectPath || !filesAvailable ? <p className="composer-context-empty">{t('contextProjectUnavailable')}</p>
               : loading ? <p className="composer-context-empty" role="status">{t('contextLoading')}</p>
                 : fileError ? <><p className="composer-context-error" role="alert">{fileError}</p>{fileRetry && renderItem(fileRetry)}</>
                   : fileItems.length ? fileItems.map(renderItem) : <p className="composer-context-empty">{t('contextFilesEmpty')}</p>}

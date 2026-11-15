@@ -22,7 +22,7 @@ const writes = new Map<string, Promise<void>>()
 let lastRevision = 0
 
 function checkScope(scope: string) {
-  if (!/^(session|workspace):.+$/s.test(scope)) throw new Error('Invalid composer scope')
+  if (!/^(session|project|workspace):.+$/s.test(scope)) throw new Error('Invalid composer scope')
 }
 
 function emptyComposer(): ComposerSnapshot {

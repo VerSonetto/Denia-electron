@@ -34,12 +34,16 @@ export interface FileSnapshot {
 }
 
 export interface FileDiffEntry {
+  /** Path relative to its project root (absolute when outside every root). */
   path: string
+  /** Owning project directory, present only for multi-directory projects. */
+  root?: string
   action: 'restore' | 'delete'
 }
 
 interface SessionHistory {
-  cwd: string
+  /** Project directories; the first one is the session's primary anchor. */
+  roots: string[]
   tracked: Set<string>
   /** Versions of the current (not yet closed) snapshot. */
   current: Map<string, FileVersion>
@@ -62,33 +66,42 @@ export class FileHistoryStore {
     return path.join(this.dirFor(sessionId), 'snapshots.json')
   }
 
-  private getOrCreate(sessionId: string, cwd: string): SessionHistory {
+  private getOrCreate(sessionId: string, scope: string | readonly string[]): SessionHistory {
+    const roots = normalizeRoots(scope)
     const existing = this.sessions.get(sessionId)
-    if (existing) return existing
+    if (existing) {
+      for (const root of roots) {
+        if (!existing.roots.includes(root)) existing.roots.push(root)
+      }
+      return existing
+    }
     const snapshots = readSnapshots(this.snapshotsFile(sessionId))
+    // Older histories keyed files relative to the session cwd. Project
+    // directories can be multiple now, so the canonical key is absolute; the
+    // first root is the old cwd and resolves legacy keys unambiguously.
+    const primary = roots[0]!
     const tracked = new Set<string>()
     const current = new Map<string, FileVersion>()
     for (const snapshot of snapshots) {
+      const files: Record<string, FileVersion> = {}
       for (const [key, version] of Object.entries(snapshot.files)) {
-        tracked.add(key)
-        current.set(key, version)
+        const absolute = path.isAbsolute(key) ? path.normalize(key) : path.resolve(primary, key)
+        files[absolute] = version
+        tracked.add(absolute)
+        current.set(absolute, version)
       }
+      snapshot.files = files
     }
-    const session: SessionHistory = {
-      cwd: path.resolve(cwd),
-      tracked,
-      current,
-      snapshots,
-    }
+    const session: SessionHistory = { roots, tracked, current, snapshots }
     this.sessions.set(sessionId, session)
     return session
   }
 
   /** Handle for write/edit tools; throws when a backup cannot be taken. */
-  backend(sessionId: string, cwd: string): FileHistoryBackend {
+  backend(sessionId: string, scope: string | readonly string[]): FileHistoryBackend {
     return {
       trackBeforeWrite: (file: string) => {
-        this.trackBeforeWrite(sessionId, cwd, file)
+        this.trackBeforeWrite(sessionId, scope, file)
       },
     }
   }
@@ -98,10 +111,10 @@ export class FileHistoryStore {
     this.sessions.delete(sessionId)
   }
 
-  private trackBeforeWrite(sessionId: string, cwd: string, file: string): void {
-    const session = this.getOrCreate(sessionId, cwd)
-    const key = relativeKey(session.cwd, file)
-    const version = captureCurrent(this.dirFor(sessionId), file, session.current.get(key))
+  private trackBeforeWrite(sessionId: string, scope: string | readonly string[], file: string): void {
+    const session = this.getOrCreate(sessionId, scope)
+    const key = path.normalize(path.resolve(file))
+    const version = captureCurrent(this.dirFor(sessionId), key, session.current.get(key))
     session.tracked.add(key)
     session.current.set(key, version)
     // Same message writing the same file twice keeps the first (pre-message)
@@ -117,13 +130,12 @@ export class FileHistoryStore {
    * Called right after a user message is appended: pin the on-disk state of
    * every tracked file to that message's seq.
    */
-  snapshot(sessionId: string, cwd: string, messageSeq: number): void {
-    const session = this.getOrCreate(sessionId, cwd)
+  snapshot(sessionId: string, scope: string | readonly string[], messageSeq: number): void {
+    const session = this.getOrCreate(sessionId, scope)
     // Refresh tracked files from disk first: a file untouched by this message
     // still needs its then-current version in the new checkpoint.
     for (const key of [...session.current.keys()]) {
-      const file = absolutePathOf(session.cwd, key)
-      const version = captureCurrent(this.dirFor(sessionId), file, session.current.get(key))
+      const version = captureCurrent(this.dirFor(sessionId), key, session.current.get(key))
       session.current.set(key, version)
     }
     const files: Record<string, FileVersion> = {}
@@ -133,23 +145,28 @@ export class FileHistoryStore {
   }
 
   /** Files that a rewind to `messageSeq` would change. */
-  diff(sessionId: string, cwd: string, messageSeq: number): FileDiffEntry[] {
-    const session = this.getOrCreate(sessionId, cwd)
+  diff(sessionId: string, scope: string | readonly string[], messageSeq: number): FileDiffEntry[] {
+    const session = this.getOrCreate(sessionId, scope)
     const targetIndex = this.targetIndex(session, messageSeq)
     if (targetIndex < 0) return []
     const target = session.snapshots[targetIndex]!
     const entries: FileDiffEntry[] = []
     for (const planned of planChanges(this.dirFor(sessionId), session, target)) {
       if (planned.action !== null) {
-        entries.push({ path: planned.key, action: planned.action })
+        const display = displayPath(session.roots, planned.file)
+        entries.push({
+          path: display.path,
+          ...(session.roots.length > 1 && display.root ? { root: display.root } : {}),
+          action: planned.action,
+        })
       }
     }
     return entries
   }
 
   /** Restore files to the checkpoint state and drop later snapshots. */
-  rewind(sessionId: string, cwd: string, messageSeq: number): string[] {
-    const session = this.getOrCreate(sessionId, cwd)
+  rewind(sessionId: string, scope: string | readonly string[], messageSeq: number): string[] {
+    const session = this.getOrCreate(sessionId, scope)
     const targetIndex = this.targetIndex(session, messageSeq)
     if (targetIndex < 0) {
       // A checkpoint without a snapshot (e.g. a steering message appended
@@ -167,22 +184,25 @@ export class FileHistoryStore {
     const planned = planChanges(this.dirFor(sessionId), session, target)
     const changed: string[] = []
     // Fail before touching anything when a backup vanished: a half-restored
-    // workspace is worse than an explicit error the user can retry after the
+    // project is worse than an explicit error the user can retry after the
     // host rebuilds its history.
     for (const item of planned) {
       if (item.action !== 'restore') continue
       const backup = path.join(this.dirFor(sessionId), item.version.backup!)
-      if (!fs.existsSync(backup)) throw new Error(`文件备份缺失: ${item.key}`)
+      if (!fs.existsSync(backup)) {
+        throw new Error(`文件备份缺失: ${displayPath(session.roots, item.file).path}`)
+      }
     }
     for (const item of planned) {
+      const display = displayPath(session.roots, item.file)
       if (item.action === 'restore') {
         const backup = path.join(this.dirFor(sessionId), item.version.backup!)
         fs.mkdirSync(path.dirname(item.file), { recursive: true })
         fs.copyFileSync(backup, item.file)
-        changed.push(item.key)
+        changed.push(display.path)
       } else if (item.action === 'delete') {
         fs.rmSync(item.file)
-        changed.push(item.key)
+        changed.push(display.path)
       }
     }
     // Keep the target snapshot and everything before it; the rest of the
@@ -234,7 +254,7 @@ function planChanges(
     // so a pre-existing file is restored rather than deleted.
     const version = target.files[key] ?? oldestVersion(session, key)
     if (!version) continue
-    const file = absolutePathOf(session.cwd, key)
+    const file = path.normalize(key)
     const stat = statOf(file)
     let action: PlannedChange['action'] = null
     if (version.backup !== null) {
@@ -261,20 +281,28 @@ function oldestVersion(session: SessionHistory, key: string): FileVersion | unde
   return undefined
 }
 
-/** Workspace-relative key with forward slashes; absolute when outside cwd. */
-function relativeKey(cwd: string, file: string): string {
-  const relative = path.relative(cwd, file)
-  const outside =
-    relative === '' ||
-    relative === '..' ||
-    relative.startsWith('..' + path.sep) ||
-    path.isAbsolute(relative)
-  const chosen = relative === '' || outside ? path.normalize(file) : relative
-  return chosen.split(path.sep).join('/')
+function normalizeRoots(scope: string | readonly string[]): string[] {
+  const list = typeof scope === 'string' ? [scope] : [...scope]
+  const roots = list
+    .filter((root) => root.trim() !== '')
+    .map((root) => path.resolve(root))
+  return roots.length > 0 ? [...new Set(roots)] : [process.cwd()]
 }
 
-function absolutePathOf(cwd: string, key: string): string {
-  return path.isAbsolute(key) ? path.normalize(key) : path.resolve(cwd, key)
+/** Relative display path plus the root that owns it (deepest match). */
+function displayPath(roots: readonly string[], file: string): { path: string; root: string | null } {
+  let best: { root: string; relative: string } | null = null
+  for (const root of roots) {
+    const relative = path.relative(root, file)
+    if (relative === '' || path.isAbsolute(relative)) continue
+    if (relative === '..' || relative.startsWith('..' + path.sep)) continue
+    if (!best || root.length > best.root.length) best = { root, relative }
+  }
+  if (!best) return { path: file.split(path.sep).join('/'), root: null }
+  return {
+    path: best.relative.split(path.sep).join('/'),
+    root: best.root,
+  }
 }
 
 function statOf(file: string): fs.Stats | null {

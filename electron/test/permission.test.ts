@@ -20,14 +20,14 @@ test('the catalog exposes exactly the four requested presets', () => {
     reviewer: 'user',
     collaboration: 'default',
   })
-  assert.deepEqual(presetState('workspace-write'), {
-    sandbox: 'workspace-write',
+  assert.deepEqual(presetState('project-write'), {
+    sandbox: 'project-write',
     approval: 'on-request',
     reviewer: 'user',
     collaboration: 'default',
   })
   assert.deepEqual(presetState('approve-for-me'), {
-    sandbox: 'workspace-write',
+    sandbox: 'project-write',
     approval: 'on-request',
     reviewer: 'auto-review',
     collaboration: 'default',
@@ -39,39 +39,39 @@ test('the catalog exposes exactly the four requested presets', () => {
     collaboration: 'default',
   })
   // Round-trip preset identity through the three fields.
-  for (const mode of ['read-only', 'workspace-write', 'approve-for-me', 'full-access'] as const) {
+  for (const mode of ['read-only', 'project-write', 'approve-for-me', 'full-access'] as const) {
     assert.equal(modeOf(presetState(mode)), mode)
   }
 })
 
 test('legacy permission levels project onto the new state', () => {
   assert.equal(legacyModeOf(presetState('read-only')), 'read-only')
-  assert.equal(legacyModeOf(presetState('workspace-write')), 'auto-edit')
+  assert.equal(legacyModeOf(presetState('project-write')), 'auto-edit')
   assert.equal(legacyModeOf(presetState('approve-for-me')), 'auto-edit')
   assert.equal(legacyModeOf(presetState('full-access')), 'full')
   // Switching to auto-edit keeps an active automatic reviewer.
   const next = stateFromLegacy('auto-edit', presetState('approve-for-me'))
   assert.equal(next.reviewer, 'auto-review')
-  assert.equal(next.sandbox, 'workspace-write')
+  assert.equal(next.sandbox, 'project-write')
   // Leaving full access restores prompts.
   const fromFull = stateFromLegacy('auto-edit', presetState('full-access'))
   assert.equal(fromFull.approval, 'on-request')
   assert.equal(fromFull.reviewer, 'user')
 })
 
-test('workspace-write: inside writes allow, outside writes and deletions prompt', () => {
-  const state = presetState('workspace-write')
-  assert.equal(decideAction({ state, action: 'read', insideWorkspace: true }).kind, 'allow')
-  assert.equal(decideAction({ state, action: 'write', insideWorkspace: true }).kind, 'allow')
-  assert.equal(decideAction({ state, action: 'write', insideWorkspace: false }).kind, 'prompt')
-  assert.equal(decideAction({ state, action: 'delete', insideWorkspace: true }).kind, 'prompt')
-  assert.equal(decideAction({ state, action: 'network', insideWorkspace: true }).kind, 'prompt')
+test('project-write: inside writes allow, outside writes and deletions prompt', () => {
+  const state = presetState('project-write')
+  assert.equal(decideAction({ state, action: 'read', insideProject: true }).kind, 'allow')
+  assert.equal(decideAction({ state, action: 'write', insideProject: true }).kind, 'allow')
+  assert.equal(decideAction({ state, action: 'write', insideProject: false }).kind, 'prompt')
+  assert.equal(decideAction({ state, action: 'delete', insideProject: true }).kind, 'prompt')
+  assert.equal(decideAction({ state, action: 'network', insideProject: true }).kind, 'prompt')
 })
 
 test('read-only forbids writes and any command it cannot prove read-only', () => {
   const state = presetState('read-only')
-  assert.equal(decideAction({ state, action: 'write', insideWorkspace: true }).kind, 'forbid')
-  assert.equal(decideAction({ state, action: 'delete', insideWorkspace: true }).kind, 'forbid')
+  assert.equal(decideAction({ state, action: 'write', insideProject: true }).kind, 'forbid')
+  assert.equal(decideAction({ state, action: 'delete', insideProject: true }).kind, 'forbid')
   const writeCommand = {
     command: 'echo hi > out.txt',
     certifiedReadonly: false,
@@ -80,7 +80,7 @@ test('read-only forbids writes and any command it cannot prove read-only', () =>
     mayNetwork: false,
   }
   assert.equal(
-    decideAction({ state, action: 'read', insideWorkspace: true, shell: writeCommand }).kind,
+    decideAction({ state, action: 'read', insideProject: true, shell: writeCommand }).kind,
     'forbid',
   )
   const readCommand = {
@@ -91,35 +91,35 @@ test('read-only forbids writes and any command it cannot prove read-only', () =>
     mayNetwork: false,
   }
   assert.equal(
-    decideAction({ state, action: 'read', insideWorkspace: true, shell: readCommand }).kind,
+    decideAction({ state, action: 'read', insideProject: true, shell: readCommand }).kind,
     'allow',
   )
 })
 
 test('full access allows everything and never asks', () => {
   const state = presetState('full-access')
-  assert.equal(decideAction({ state, action: 'delete', insideWorkspace: false }).kind, 'allow')
-  assert.equal(decideAction({ state, action: 'network', insideWorkspace: false }).kind, 'allow')
-  assert.equal(decideAction({ state, action: 'write', insideWorkspace: false }).kind, 'allow')
+  assert.equal(decideAction({ state, action: 'delete', insideProject: false }).kind, 'allow')
+  assert.equal(decideAction({ state, action: 'network', insideProject: false }).kind, 'allow')
+  assert.equal(decideAction({ state, action: 'write', insideProject: false }).kind, 'allow')
 })
 
 test('plan mode forbids writes and requires a human for exit_plan', () => {
-  const state = presetState('workspace-write', 'plan')
-  assert.equal(decideAction({ state, action: 'write', insideWorkspace: true }).kind, 'forbid')
-  assert.equal(decideAction({ state, action: 'delete', insideWorkspace: true }).kind, 'forbid')
-  assert.equal(decideAction({ state, action: 'plan-submit', insideWorkspace: true }).kind, 'prompt-user')
+  const state = presetState('project-write', 'plan')
+  assert.equal(decideAction({ state, action: 'write', insideProject: true }).kind, 'forbid')
+  assert.equal(decideAction({ state, action: 'delete', insideProject: true }).kind, 'forbid')
+  assert.equal(decideAction({ state, action: 'plan-submit', insideProject: true }).kind, 'prompt-user')
   // Outside plan mode the tool is a plain rejection.
   const outsidePlan = decideAction({
-    state: presetState('workspace-write'),
+    state: presetState('project-write'),
     action: 'plan-submit',
-    insideWorkspace: true,
+    insideProject: true,
   })
   assert.equal(outsidePlan.kind, 'forbid')
 })
 
 test('approval policy can turn a prompt into a hard rejection', () => {
-  const state = { ...presetState('workspace-write'), approval: 'never' as const }
-  assert.equal(decideAction({ state, action: 'write', insideWorkspace: false }).kind, 'forbid')
+  const state = { ...presetState('project-write'), approval: 'never' as const }
+  assert.equal(decideAction({ state, action: 'write', insideProject: false }).kind, 'forbid')
 })
 
 test('execpolicy matches prefixes and the strictest rule wins', () => {

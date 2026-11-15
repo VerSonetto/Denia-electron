@@ -42,7 +42,7 @@ export function saveMcpSettings(home: string, settings: McpSettings): void {
       enabled: server.enabled,
       disabledTools: server.disabledTools,
       scope: server.scope,
-      ...(server.workspaceId ? { workspaceId: server.workspaceId } : {}),
+      ...(server.projectId ? { projectId: server.projectId } : {}),
       protocolVersion: server.protocolVersion,
       callTimeoutMs: server.callTimeoutMs,
     })),

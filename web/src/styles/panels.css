@@ -1,9 +1,9 @@
-/* ---------- 右侧面板布局(多标签工作区) ----------
+/* ---------- 右侧面板布局(多标签项目) ----------
  * 面板本体样式在 components/SidePane.css(与标签栏一起);
  * 这里只保留与整体布局耦合的主行结构。
  */
 
-/* 常驻侧栏形态:聊天区缩窄,右侧并排多标签工作区 */
+/* 常驻侧栏形态:聊天区缩窄,右侧并排多标签项目 */
 .main-row {
   display: flex;
   flex: 1;
@@ -918,11 +918,11 @@
   border-left: 1px solid var(--border-l1);
 }
 
-.runtime-workspace[data-plan-preview='local'] {
+.runtime-view[data-plan-preview='local'] {
   flex-direction: column;
 }
 
-.runtime-workspace[data-plan-preview='local'] .plan-preview-panel {
+.runtime-view[data-plan-preview='local'] .plan-preview-panel {
   flex: none;
   height: auto;
   max-height: 38vh;

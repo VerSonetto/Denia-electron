@@ -480,7 +480,7 @@
   scrollbar-width: thin;
 }
 
-/* 与左侧「工作区」小标题同一种排版:11px / 600 / 字距。 */
+/* 与左侧「项目」小标题同一种排版:11px / 600 / 字距。 */
 .pane-overview-group {
   margin: 0;
   padding: 8px 8px 4px;

@@ -513,9 +513,9 @@ function effectNote(name: string, capability: ToolCapability): string {
   }
   switch (name) {
     case 'write_file':
-      return '覆盖整份工作区文件（写入前需先读过且内容新鲜）。'
+      return '覆盖整份项目文件（写入前需先读过且内容新鲜）。'
     case 'edit':
-      return '局部替换工作区文件内容。'
+      return '局部替换项目文件内容。'
     case 'todo_write':
       return '只更新本会话的待办清单，不改动文件。'
     case 'bash':
@@ -525,7 +525,7 @@ function effectNote(name: string, capability: ToolCapability): string {
     case 'ls':
     case 'glob':
     case 'grep':
-      return '只读工作区内容。'
+      return '只读项目内容。'
     case 'web_fetch':
       return '只读网络内容（会发起外部请求）。'
     case 'skill':
@@ -539,9 +539,9 @@ function effectNote(name: string, capability: ToolCapability): string {
     default:
       switch (capability) {
         case 'read':
-          return '只读取工作区或网络内容，不改动文件。'
+          return '只读取项目或网络内容，不改动文件。'
         case 'write':
-          return '会改写会话或工作区数据。'
+          return '会改写会话或项目数据。'
         case 'shell':
           return '会启动进程：命令可读写文件、访问网络、承担超时与清理义务。'
         case 'delegation':

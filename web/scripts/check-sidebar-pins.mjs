@@ -43,8 +43,8 @@ const stubAppStore = {
 const entry = join(outDir, 'sidebar-pins-entry.tsx')
 writeFileSync(
   entry,
-  `import { SidebarWorkspaces } from ${JSON.stringify(join(srcRoot, 'components', 'sidebar', 'SidebarWorkspaces.tsx').replace(/\\/g, '/'))}
-export { SidebarWorkspaces }
+  `import { SidebarProjects } from ${JSON.stringify(join(srcRoot, 'components', 'sidebar', 'SidebarProjects.tsx').replace(/\\/g, '/'))}
+export { SidebarProjects }
 `,
 )
 
@@ -85,15 +85,15 @@ for (const key of [
 
 const React = (await import('react')).default
 const { createRoot } = await import('react-dom/client')
-const { SidebarWorkspaces } = await import(pathToFileURL(bundle).href)
+const { SidebarProjects } = await import(pathToFileURL(bundle).href)
 const H = React.createElement
 const tick = (ms = 90) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const PINS_KEY = 'denia.sidebar-pins.v1'
 const VIEW_KEY = 'denia.sidebar-view.v1'
-const storedPins = () => JSON.parse(g.localStorage.getItem(PINS_KEY) ?? '{"workspaces":[],"sessions":[]}')
-const seedPins = (workspaces, sessions) => {
-  g.localStorage.setItem(PINS_KEY, JSON.stringify({ workspaces, sessions }))
+const storedPins = () => JSON.parse(g.localStorage.getItem(PINS_KEY) ?? '{"projects":[],"sessions":[]}')
+const seedPins = (projects, sessions) => {
+  g.localStorage.setItem(PINS_KEY, JSON.stringify({ projects, sessions }))
 }
 const clearStorage = () => g.localStorage.clear()
 
@@ -105,13 +105,14 @@ const sessions = [
   { id: 's4', created_at: now - 8_000, updated_at: now - 4_000, excerpt: 'loose pinned', title: null, cwd: undefined },
   { id: 's5', created_at: now - 9_000, updated_at: now - 3_000, excerpt: 'loose idle', title: null, cwd: undefined },
 ]
-const workspaces = [
-  { id: 'w1', path: 'D:/ws', title: 'ws', createdAt: 0, sessionIds: ['s1', 's2', 's3'] },
+const projects = [
+  { id: 'w1', dirs: ['D:/ws'], title: 'ws', createdAt: 0, sessionIds: ['s1', 's2', 's3'] },
+  { id: 'w2', dirs: ['D:/loose'], title: 'loose', createdAt: 0, sessionIds: ['s4', 's5'] },
 ]
 
 const props = (overrides = {}) => ({
   sessions,
-  workspaces,
+  projects,
   activeId: null,
   secondaryId: null,
   runningIds: { s1: true },
@@ -121,7 +122,7 @@ const props = (overrides = {}) => ({
   onAllExpandedChange: () => {},
   onOpenSession: () => {},
   onNewSession: () => {},
-  onDeleteWorkspace: () => {},
+  onDeleteProject: () => {},
   onDeleteSession: () => {},
   onDeleteUngrouped: () => {},
   ...overrides,
@@ -132,11 +133,11 @@ function mount(nextProps) {
   const container = g.document.createElement('div')
   g.document.body.appendChild(container)
   const root = createRoot(container)
-  root.render(H(SidebarWorkspaces, nextProps))
+  root.render(H(SidebarProjects, nextProps))
   mounted.push({ root, container })
   return {
     container,
-    rerender: (overrides) => root.render(H(SidebarWorkspaces, props(overrides))),
+    rerender: (overrides) => root.render(H(SidebarProjects, props(overrides))),
     unmount: () => {
       root.unmount()
       container.remove()
@@ -183,7 +184,6 @@ try {
   assert.ok(rowOf(view.container, 'pinned session').closest('[data-testid="sidebar-pinned-shelf"]'))
   assert.ok(!rowOf(view.container, 'pinned session').closest('[data-testid="sidebar-projects"]'))
   assert.ok(rowOf(view.container, 'running session').closest('[data-testid="sidebar-projects"]'))
-  assert.ok(section(view.container, 'sidebar-tasks'), '未项目任务进入任务分区')
   assert.ok(!view.container.textContent.includes('进行中任务'), '进行中筛选标签已删除')
   assert.equal(view.container.querySelector('[data-testid="in-progress-mark"]'), null)
   assert.equal(view.container.querySelector('.sidebar-filter-count'), null)
@@ -211,18 +211,18 @@ try {
   /* 3) 置顶项目:整块上浮,项目分区里不再出现;取消后回到项目分区。 */
   clearStorage()
   seedPins(['w1'], [])
-  const pinnedProject = mount(props())
+  const pinnedProject = mount(props({ projects: [projects[0]] }))
   await tick()
   assert.ok(section(pinnedProject.container, 'sidebar-pinned-projects'), '置顶项目块存在')
   assert.equal(section(pinnedProject.container, 'sidebar-projects'), null, '置顶项目从项目分区移除')
   assert.ok(
     section(pinnedProject.container, 'sidebar-pinned-projects').textContent.includes('ws'),
   )
-  const workspacePin = section(pinnedProject.container, 'sidebar-pinned-projects')
-    .querySelector('.ws-group-head-row .row-action-btn')
-  workspacePin.dispatchEvent(new g.MouseEvent('click', { bubbles: true }))
+  const projectPin = section(pinnedProject.container, 'sidebar-pinned-projects')
+    .querySelector('.project-group-head-row .row-action-btn')
+  projectPin.dispatchEvent(new g.MouseEvent('click', { bubbles: true }))
   await tick()
-  assert.deepEqual(storedPins().workspaces, [], '取消置顶项目写回账本')
+  assert.deepEqual(storedPins().projects, [], '取消置顶项目写回账本')
   assert.equal(section(pinnedProject.container, 'sidebar-pinned-projects'), null)
   assert.ok(section(pinnedProject.container, 'sidebar-projects'), '项目回到项目分区')
   pinnedProject.unmount()
@@ -259,15 +259,15 @@ try {
     title: null,
     cwd: 'D:/many',
   }))
-  const manyWorkspace = {
+  const manyProject = {
     id: 'w-many',
-    path: 'D:/many',
+    dirs: ['D:/many'],
     title: 'many',
     createdAt: 0,
     sessionIds: many.map((session) => session.id),
   }
   seedPins([], many.map((session) => session.id))
-  const cap = mount(props({ sessions: many, workspaces: [manyWorkspace], runningIds: {} }))
+  const cap = mount(props({ sessions: many, projects: [manyProject], runningIds: {} }))
   await tick()
   assert.equal(shelfRows(cap.container).length, 20, '置顶货架首屏 20 条')
   const more = cap.container.querySelector('[data-testid="sidebar-pinned-shelf"] .expand-rest')
