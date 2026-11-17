@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { t } from '../i18n'
 
 /**
@@ -38,7 +39,10 @@ export function ConfirmDialog({
   }, [open, onCancel])
 
   if (!open) return null
-  return (
+  // portal 到 body:侧栏折叠时 .sidebar-wide/.sidebar-region 会被 transform
+  // 缩退,而 transform 祖先会给 position:fixed 的后代重新造包含块 —— 不
+  // portal 的话确认框会被 256px 的侧栏裁掉,甚至跟着面板一起缩。
+  return createPortal(
     <div className="confirm-backdrop" onClick={onCancel}>
       <div
         className="confirm-dialog"
@@ -63,6 +67,7 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

@@ -97,7 +97,9 @@ const regionHeadDecls = declarations(rule(shellCss, '.sidebar-region-head'))
 const regionDecls = declarations(rule(shellCss, '.sidebar-region'))
 const wideDecls = declarations(rule(shellCss, '.sidebar-wide'))
 
+// 侧栏本身只负责裁切与背景;12px 内容边距挂在冻结宽度的 .sidebar-wide 上。
 const sidebarPadding = sides(value(sidebarDecls, 'padding', '.sidebar'))
+const wideLeft = Number.parseFloat(value(wideDecls, 'left', '.sidebar-wide'))
 const primaryPadding = sides(value(primaryDecls, 'padding', '.sidebar-primary'))
 const newButtonPadding = sides(value(newButtonDecls, 'padding', '.sidebar-new-btn'))
 const regionHeadPadding = sides(value(regionHeadDecls, 'padding', '.sidebar-region-head'))
@@ -107,25 +109,26 @@ assert.equal(value(newButtonDecls, 'gap', '.sidebar-new-btn'), '10px')
 assert.equal(primaryPadding.bottom, 12, '.sidebar-primary 底部留白为 12px')
 assert.equal(value(regionDecls, 'gap', '.sidebar-region'), '6px', '区域间距同为 6px')
 
-/* 侧栏内容起点(12) + .sidebar-primary 4 + 左对齐按钮 8 = 24;
- * 侧栏内容起点(12) + 区域标题 12 = 24 —— 两侧文字左缘对齐。 */
+assert.equal(sidebarPadding.left, 0, '.sidebar 不再吃内容边距')
+assert.equal(wideLeft, 12, '.sidebar-wide 左缘应为 12px')
+/* 宽态内容起点(12) + .sidebar-primary 4 + 左对齐按钮 8 = 24;
+ * 宽态内容起点(12) + 区域标题 12 = 24 —— 两侧文字左缘对齐。 */
 assert.equal(
-  sidebarPadding.left + primaryPadding.left + newButtonPadding.left,
-  sidebarPadding.left + regionHeadPadding.left,
+  wideLeft + primaryPadding.left + newButtonPadding.left,
+  wideLeft + regionHeadPadding.left,
   '新建/扩展导航与项目标题的 12px 基线不一致',
 )
-assert.equal(sidebarPadding.left, 12, '侧栏水平内边距应为 12px')
 assert.equal(primaryPadding.left, 4, '.sidebar-primary 水平内边距应为 4px')
 assert.equal(newButtonPadding.left, 8, '左对齐导航按钮内边距应为 8px')
 assert.equal(regionHeadPadding.left, 12, '.sidebar-region-head 水平内边距应为 12px')
 
-/* 宽态内容宽度吃满侧栏减左右 12px;若侧栏 padding 改了这里必须同步。 */
+/* 宽态内容宽度吃满侧栏减两侧 12px;宽度冻结才能让列折叠时不重排。 */
 const rootDecls = declarations(rule(foundationCss, ':root'))
 assert.equal(value(rootDecls, '--sidebar-w', ':root'), '280px', '展开态侧栏宽度')
 assert.equal(
   value(wideDecls, 'width', '.sidebar-wide'),
-  `calc(var(--sidebar-w) - ${sidebarPadding.left + sidebarPadding.right}px)`,
-  '.sidebar-wide 宽度与侧栏水平内边距不同步',
+  `calc(var(--sidebar-w) - ${wideLeft * 2}px)`,
+  '.sidebar-wide 宽度与两侧内容边距不同步',
 )
 
 /* 主按钮(新建会话)是居中填充按钮,不需要额外 margin 破坏 6px 间距节奏。 */
@@ -148,32 +151,50 @@ assert.match(
 
 const mobileSidebar = declarations(rule(responsiveCss, '.shell[data-mobile] .sidebar'))
 assert.equal(value(mobileSidebar, 'width', '移动端侧栏'), 'min(86vw, 320px)')
-assert.equal(value(mobileSidebar, 'padding-right', '移动端侧栏'), '12px')
+assert.equal(value(mobileSidebar, 'padding', '移动端侧栏'), '0')
+
+/* 320px 视口下抽屉只有 ≈275px,宽态内容必须跟着抽屉吃满;安全区
+ * 边距从 aside 的 padding 移到冻结层的 left/right 上。 */
+const mobileWide = declarations(rule(responsiveCss, '.shell[data-mobile] .sidebar-wide'))
+assert.equal(value(mobileWide, 'width', '移动端宽态内容'), 'auto')
+assert.equal(value(mobileWide, 'right', '移动端宽态内容'), '12px')
 assert.match(
-  value(mobileSidebar, 'padding-left', '移动端侧栏'),
+  value(mobileWide, 'left', '移动端宽态内容'),
   /^max\(12px, env\(safe-area-inset-left\)\)$/,
-  '移动端左内边距应保留 12px 下限并兼容安全区',
+  '移动端宽态左缘应保留 12px 下限并兼容安全区',
 )
-/* 320px 视口下抽屉只有 ≈275px,冻结 256px 的宽态内容会超出 251px 的
- * 可用内容区并被 overflow 裁掉;移动端必须改成吃满。 */
-const mobileWide = declarations(rule(shellCss, '.shell[data-mobile] .sidebar-wide'))
-assert.equal(value(mobileWide, 'width', '移动端宽态内容'), '100%')
-assert.ok(media820.includes('.shell[data-mobile] .sidebar-wide'), '移动端宽度覆盖应位于 820px 断点内')
+const media820Responsive = media(responsiveCss, '(max-width: 820px)')
+assert.ok(
+  media820Responsive.includes('.shell[data-mobile] .sidebar-wide'),
+  '移动端宽态覆盖应位于 820px 断点内',
+)
 
 /* ---------- 收起态 rail ---------- */
 
 const collapsedShell = declarations(rule(shellCss, '.shell[data-collapsed]'))
-const collapsedSidebar = declarations(rule(shellCss, '.shell[data-collapsed] .sidebar'))
+const railDecls = declarations(rule(shellCss, '.sidebar-rail'))
 const railButton = declarations(rule(shellCss, '.rail-btn'))
+const handleDecls = declarations(rule(shellCss, '.sidebar .sidebar-handle'))
 assert.match(
   value(collapsedShell, 'grid-template-columns', '收起态 shell'),
   /^56px\b/,
   '收起态栅格列宽应为 56px',
 )
-assert.equal(value(collapsedSidebar, 'padding-left', '收起态侧栏'), '10px')
-assert.equal(value(collapsedSidebar, 'padding-right', '收起态侧栏'), '10px')
+const railLeft = Number.parseFloat(value(railDecls, 'left', '.sidebar-rail'))
+const railWidth = Number.parseFloat(value(railDecls, 'width', '.sidebar-rail'))
+const handleRight = Number.parseFloat(value(handleDecls, 'right', '.sidebar .sidebar-handle'))
+const handleWidth = Number.parseFloat(value(handleDecls, 'width', '.sidebar .sidebar-handle'))
+assert.equal(railLeft, 10, '收起态轨道左缘应为 10px')
+assert.equal(railWidth, 36, '收起态轨道应为 36px')
 assert.equal(value(railButton, 'width', '.rail-btn'), '36px')
-assert.equal(10 + 36 + 10, 56, '收起态 56px 应恰好容纳 36px 控件与 10px 边距')
+assert.equal(railLeft + railWidth + 10, 56, '收起态 56px 应恰好容纳 36px 控件与 10px 边距')
+/* 开关钉在列右缘:其中心必须落在轨道中心线上,收起落位时不横跳。
+ * right 相对 aside 的 padding box,56px 外宽里还有 1px 右边框。 */
+assert.equal(
+  railLeft + railWidth / 2,
+  56 - 1 - handleRight - handleWidth / 2,
+  '收起开关的中心应与轨道中心对齐',
+)
 
 /* ---------- 置顶标记不会挤掉标题/时间/动作 ---------- */
 

@@ -252,7 +252,13 @@ try {
   const app = readFileSync(join(root, 'src/App.tsx'), 'utf8')
   assert.ok(app.includes("hash === '#usage'"), '用量页可直达')
   assert.ok(app.includes('sidebar-usage-btn'), '侧栏有入口')
-  assert.ok(app.includes('railMounted') && app.includes('usageOpen'), '收起态侧栏也有入口')
+  const railStart = app.indexOf('className="sidebar-rail"')
+  assert.ok(railStart >= 0, '收起态侧栏应常驻')
+  const railSource = app.slice(railStart, app.indexOf('</aside>', railStart))
+  assert.ok(
+    railSource.includes('openUsage') && railSource.includes("t('usagePageTitle')"),
+    '收起态侧栏也有入口',
+  )
   const api = readFileSync(join(root, 'src/api.ts'), 'utf8')
   assert.ok(api.includes('/api/usage?range='), '请求带区间参数')
 

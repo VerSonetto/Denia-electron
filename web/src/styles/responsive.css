@@ -35,14 +35,42 @@
     /* 抽屉宽度留出右侧一条,让用户看到"后面还有内容"、可点遮罩关闭。 */
     width: min(86vw, 320px);
     z-index: 60;
-    /* iOS 安全区:刘海屏横屏时左内边距不能压到圆角下。 */
-    padding-left: max(12px, env(safe-area-inset-left));
-    padding-right: 12px;
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    /* 内容边距由 .sidebar-wide 自己吃(桌面端那层是绝对定位的冻结宽度),
+       aside 只负责抽屉表面。 */
+    padding: 0;
     box-shadow: var(--shadow-float);
     transform: translateX(-100%);
     transition: transform 220ms var(--ease);
     will-change: transform;
+  }
+
+  /* 手机抽屉永远展示完整宽态:桌面端的收起轨道/边缘开关在这里没有意义。 */
+  .shell[data-mobile] .sidebar-rail,
+  .shell[data-mobile] .sidebar-handle {
+    display: none;
+  }
+
+  .shell[data-mobile] .sidebar-wide {
+    left: max(12px, env(safe-area-inset-left));
+    right: 12px;
+    bottom: max(12px, env(safe-area-inset-bottom));
+    width: auto;
+    padding-bottom: 0;
+    visibility: visible;
+    pointer-events: auto;
+    transform: none;
+    transition: none;
+  }
+
+  .shell[data-mobile] .sidebar-wide > * {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  /* 手机抽屉没有边缘开关,品牌行不需要给它让位。 */
+  .shell[data-mobile] .sidebar-logo {
+    padding-right: 12px;
   }
 
   .shell[data-mobile][data-drawer='open'] .sidebar {
@@ -100,11 +128,6 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--label-primary);
-  }
-
-  /* 抽屉里不需要"收起侧栏"按钮(手机端靠遮罩/选中会话关闭)。 */
-  .shell[data-mobile] .sidebar-toggle {
-    display: none;
   }
 
   /* 主列占满,并让滚动容器吃掉 iOS 的橡皮筋,避免整页跟着弹。 */

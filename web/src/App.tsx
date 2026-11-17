@@ -97,6 +97,9 @@ const LazyUsagePage = lazy(() => import('./pages/UsagePage'))
 const LazyUpdateDialog = lazy(() => import('./components/updates/UpdateDialog').then((module) => ({ default: module.UpdateDialog })))
 import type { ProjectRecord, SessionSummary } from './types'
 
+/** 轨道图标入场的错峰序号:shell.css 用它算 transition-delay。 */
+const railIndex = (index: number) => ({ '--rail-index': index } as CSSProperties)
+
 /**
  * 应用外壳:布局 + 全局事件订阅(SSE 推送)+ URL 导航 + 启动引导。
  * 业务状态与动作全部在 `appStore`,本组件只做编排,不持有会话数据。
@@ -342,13 +345,16 @@ export default function App() {
   const {
     sidebarCollapsed,
     setSidebarCollapsed,
-    wideMounted,
-    railMounted,
-    wideFadeOut,
-    wideEnter,
-    railEnter,
+    sidebarMoving,
     expandSidebarWithSearch,
   } = useSidebarCollapse(setSidebarSearchOpen)
+
+  // 宽态与收起态两层常驻:动画由 CSS 交叉过渡驱动,这里只负责把非活动层
+  // 真正移出焦点序列(inert)。visibility 已在 CSS 里兜底,但过渡期间两层
+  // 都可见,键盘用户不该 Tab 进正在消失的那一层。
+  const wideLayerRef = useRef<HTMLDivElement>(null)
+  const railLayerRef = useRef<HTMLDivElement>(null)
+  const sidebarHandleRef = useRef<HTMLButtonElement>(null)
 
   /* ---- 手机端侧栏抽屉 ---- */
 
@@ -358,6 +364,21 @@ export default function App() {
   // 状态,不去复用 sidebarCollapsed —— 否则手机用户的选择会被写进桌面偏好。
   const isMobile = useIsMobile()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  // 只在桌面端按收起态切换 active 层;手机抽屉始终显示完整宽态。
+  const wideInactive = sidebarCollapsed && !isMobile
+  const railInactive = !sidebarCollapsed || isMobile
+  useEffect(() => {
+    const wide = wideLayerRef.current
+    const rail = railLayerRef.current
+    const focus = document.activeElement
+    const focusFellInWide = wideInactive &&
+      focus instanceof HTMLElement &&
+      wide?.contains(focus) === true
+    if (wide) wide.inert = wideInactive
+    if (rail) rail.inert = railInactive
+    // 键盘触发收起时,焦点不能留在 invisible 的宽态里。
+    if (focusFellInWide) sidebarHandleRef.current?.focus({ preventScroll: true })
+  }, [wideInactive, railInactive])
   // 切到桌面尺寸时抽屉状态必须清掉:否则从手机横屏切到平板宽度,抽屉会
   // 以一个"没有遮罩、也不该存在"的浮层留在屏幕上。
   useEffect(() => {
@@ -862,6 +883,7 @@ export default function App() {
       data-collapsed={sidebarCollapsed || undefined}
       data-mobile={isMobile || undefined}
       data-drawer={isMobile && drawerOpen ? 'open' : undefined}
+      data-sidebar-moving={sidebarMoving || undefined}
     >
       {isMobile && drawerOpen && (
         <div
@@ -881,29 +903,22 @@ export default function App() {
             ? (event) => {
                 // 折叠/展开等纯图标操作不关闭抽屉,避免点了箭头抽屉就消失。
                 const target = event.target as HTMLElement
-                if (target.closest('.sidebar-toggle, .rail-btn')) return
+                if (target.closest('.sidebar-handle, .rail-btn')) return
                 setDrawerOpen(false)
               }
             : undefined
         }
       >
-        {wideMounted && (
-          <div
-            className={`sidebar-wide${wideFadeOut ? ' fade-out' : ''}${wideEnter ? ' wide-in' : ''}`}
-          >
-            {/* 品牌区保留窗口拖动能力；折叠按钮由 drag.js 排除。 */}
-            <div className="sidebar-logo" data-tauri-drag-region="deep">
+        <div
+          ref={wideLayerRef}
+          className="sidebar-wide"
+          aria-hidden={wideInactive || undefined}
+        >
+            {/* 品牌区；窗口拖动由主列标题栏负责。收起开关是 aside 层的
+                .sidebar-handle,始终钉在移动的列边缘上。 */}
+            <div className="sidebar-logo">
               <DeniaWordmark />
               <UpdateBadge />
-              <button
-                type="button"
-                className="icon-btn sidebar-toggle"
-                title={t('sidebarCollapse')}
-                aria-label={t('sidebarCollapse')}
-                onClick={() => setSidebarCollapsed(true)}
-              >
-                <IconPanelClose size={16} />
-              </button>
             </div>
             <nav className="sidebar-primary" aria-label={t('newSession')}>
             <button
@@ -983,75 +998,87 @@ export default function App() {
                 <span>{t('navSettings')}</span>
               </button>
             </nav>
+        </div>
+        <div
+          ref={railLayerRef}
+          className="sidebar-rail"
+          aria-hidden={railInactive || undefined}
+        >
+          {/* 收起态顶带:与展开态的品牌行、主列的窗口条同高同底线。
+              收起/展开开关不在这层里,而是 aside 上钉住列边缘的
+              .sidebar-handle,列移动时它跟着边缘走,不会有一帧没有开关。 */}
+          <div className="sidebar-rail-top" aria-hidden="true" />
+          <button
+            type="button"
+            className="rail-btn"
+            style={railIndex(0)}
+            title={t('newSession')}
+            aria-label={t('newSession')}
+            onClick={() => void startSession()}
+          >
+            <IconNewSession size={16} />
+          </button>
+          <button type="button" className={`rail-btn${extensionTab ? ' accent' : ''}`}
+            style={railIndex(1)}
+            aria-label={t('extensionsTitle')} title={t('extensionsTitle')}
+            aria-current={extensionTab ? 'page' : undefined} onClick={() => { openExtensions(); setDrawerOpen(false) }}>
+            <IconExtensions size={18} />
+          </button>
+          <button type="button" className={`rail-btn${usageOpen ? ' accent' : ''}`}
+            style={railIndex(2)}
+            aria-label={t('usagePageTitle')} title={t('usagePageTitle')}
+            aria-current={usageOpen ? 'page' : undefined} onClick={() => { openUsage(); setDrawerOpen(false) }}>
+            <IconUsage size={18} />
+          </button>
+          <button
+            type="button"
+            className="rail-btn"
+            style={railIndex(3)}
+            title={t('addProject')}
+            aria-label={t('addProject')}
+            onClick={() => setProjectDialogOpen(true)}
+          >
+            <IconFolderPlus size={16} />
+          </button>
+          <button
+            type="button"
+            className="rail-btn"
+            style={railIndex(4)}
+            title={t('searchSessions')}
+            aria-label={t('searchSessions')}
+            onClick={expandSidebarWithSearch}
+          >
+            <IconSessionSearch size={16} />
+          </button>
+          <UpdateBadge collapsed />
+          <div className="rail-spacer" />
+          <div className="rail-foot" style={railIndex(6)}>
+            <button
+              type="button"
+              className="rail-btn"
+              title={t('navSettings')}
+              aria-label={t('navSettings')}
+              onClick={() => setSettingsOpen(true)}
+            >
+              <IconGear size={16} />
+            </button>
           </div>
-        )}
-        {railMounted && (
-          <div className={`sidebar-rail${railEnter ? ' enter' : ''}`}>
-            {/* 收起态顶带:与展开态的品牌行、主列的窗口条同高同底线,
-                三段连成一条完整的顶带;它同样可拖窗口。 */}
-            <div className="sidebar-rail-top" data-tauri-drag-region="deep">
-              <button
-                type="button"
-                className="rail-btn"
-                title={t('sidebarExpand')}
-                aria-label={t('sidebarExpand')}
-                onClick={() => setSidebarCollapsed(false)}
-              >
-                <IconPanelOpen size={18} />
-              </button>
-            </div>
-            <button
-              type="button"
-              className="rail-btn"
-              title={t('newSession')}
-              aria-label={t('newSession')}
-              onClick={() => void startSession()}
-            >
-              <IconNewSession size={16} />
-            </button>
-            <button type="button" className={`rail-btn${extensionTab ? ' accent' : ''}`}
-              aria-label={t('extensionsTitle')} title={t('extensionsTitle')}
-              aria-current={extensionTab ? 'page' : undefined} onClick={() => { openExtensions(); setDrawerOpen(false) }}>
-              <IconExtensions size={18} />
-            </button>
-            <button type="button" className={`rail-btn${usageOpen ? ' accent' : ''}`}
-              aria-label={t('usagePageTitle')} title={t('usagePageTitle')}
-              aria-current={usageOpen ? 'page' : undefined} onClick={() => { openUsage(); setDrawerOpen(false) }}>
-              <IconUsage size={18} />
-            </button>
-            <button
-              type="button"
-              className="rail-btn"
-              title={t('addProject')}
-              aria-label={t('addProject')}
-              onClick={() => setProjectDialogOpen(true)}
-            >
-              <IconFolderPlus size={16} />
-            </button>
-            <button
-              type="button"
-              className="rail-btn"
-              title={t('searchSessions')}
-              aria-label={t('searchSessions')}
-              onClick={expandSidebarWithSearch}
-            >
-              <IconSessionSearch size={16} />
-            </button>
-            <UpdateBadge collapsed />
-            <div className="rail-spacer" />
-            <div className="rail-foot">
-              <button
-                type="button"
-                className="rail-btn"
-                title={t('navSettings')}
-                aria-label={t('navSettings')}
-                onClick={() => setSettingsOpen(true)}
-              >
-                <IconGear size={16} />
-              </button>
-            </div>
-          </div>
-        )}
+        </div>
+        {/* 唯一的收起/展开开关:right 让它始终钉在列的右缘;列宽从 280
+            收到 56 时,它从品牌行右侧滑到轨道顶部中央。两层都常驻,所以
+            动画任意一帧都不会出现"没有开关"的空白。 */}
+        <button
+          ref={sidebarHandleRef}
+          type="button"
+          className="icon-btn sidebar-handle"
+          title={sidebarCollapsed ? t('sidebarExpand') : t('sidebarCollapse')}
+          aria-label={sidebarCollapsed ? t('sidebarExpand') : t('sidebarCollapse')}
+          aria-expanded={!sidebarCollapsed}
+          onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+        >
+          <IconPanelClose size={16} className="handle-icon handle-icon-collapse" />
+          <IconPanelOpen size={16} className="handle-icon handle-icon-expand" />
+        </button>
       </aside>
       <main className="main">
         {/* 桌面壳的窗口条:只占**主列**宽度,不横穿侧栏。这样侧栏能从窗口

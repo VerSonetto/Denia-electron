@@ -36,8 +36,7 @@
     cursor: default;
   }
 
-  /* Electron 的无边框窗口用 Chromium 的 app-region 拖动;Tauri 侧走
-     `data-tauri-drag-region`,两条规则各管一个壳。 */
+  /* Electron 的无边框窗口用 Chromium 的 app-region 拖动。 */
   .desktop-titlebar[data-shell='electron'] .desktop-titlebar-drag {
     -webkit-app-region: drag;
   }
@@ -93,14 +92,39 @@
   }
 }
 
-/* ---------- shell: sidebar + center column ---------- */.shell {
+/* ---------- shell: sidebar + center column ---------- */
+.shell {
+  /* 主列折叠/展开的公共节拍。300ms 的缓入缓出 + 1.2% 回弹:
+     前 30% 只轻轻启动,内容先淡出;中段列快速折叠;后段越过终点
+     几个像素再咬合。轨道图标和正文视差可以比列更晚收尾,但真正
+     触发主列重排的时间只有这 300ms。 */
+  --sidebar-motion-dur: 300ms;
+  --sidebar-motion-ease: linear(
+    0 0%,
+    0.012 10%,
+    0.055 20%,
+    0.15 30%,
+    0.32 40%,
+    0.53 50%,
+    0.72 60%,
+    0.87 70%,
+    0.965 80%,
+    1.01 87%,
+    1.004 93%,
+    1 100%
+  );
+  --sidebar-content-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 轨道图标落位带一点点回弹:只在 transform 上,文字不会跟着抖。 */
+  --sidebar-rail-spring: cubic-bezier(0.22, 1.18, 0.36, 1);
+
   display: grid;
   flex: 1;
   min-height: 0;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   background: var(--bg-base);
-  /* 列宽滑动过渡:收起/展开共用同一曲线;拖拽/无动画偏好下由下述规则关闭 */
-  transition: grid-template-columns 260ms var(--ease);
+  /* 列宽滑动:快起动、软着陆。主列内容只在布局层跟随,不在每帧重新
+     组织阅读顺序 —— 视觉上的"延迟"由 .conversation-view 的视差补上。 */
+  transition: grid-template-columns var(--sidebar-motion-dur) var(--sidebar-motion-ease);
 }
 
 /* 收起态固定 56px 控制栏,不把宽度全让给主列 */
@@ -108,86 +132,201 @@
   grid-template-columns: 56px minmax(0, 1fr);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .shell {
-    transition: none;
-  }
-}
-
 .sidebar {
+  /* 收起开关 right 固定 = 收起后正好落在 36px 轨道的中心线上。 */
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  padding: 0 12px 12px;
+  padding: 0;
   background: var(--sidebar-fill);
   border-right: 1px solid var(--border-l1);
-  /* 列宽收拢时裁切冻结宽度的宽态内容:滑动途中不发生重排 */
+  /* 列宽变化时裁切两段冻结宽度的内容,内部不发生重排。 */
   overflow: hidden;
+  transition: box-shadow 180ms var(--ease);
 }
 
-/* 宽态内容:冻结宽度随列收拢被裁切,原地淡出后卸载 */
-.sidebar-wide {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1;
-  width: calc(var(--sidebar-w) - 24px);
-  transition: opacity 150ms var(--ease);
+/* 移动中给列边缘一层很淡的投影:让"移动的面板"与聊天区多一层前后关系,
+   静止时不保留阴影,不改变原有平面气质。 */
+.shell[data-sidebar-moving] .sidebar {
+  box-shadow: 12px 0 28px -22px rgba(0, 0, 0, 0.55);
 }
 
-.sidebar-wide.fade-out {
-  opacity: 0;
-}
-
-.sidebar-wide.wide-in {
-  animation: sidebar-wide-in 150ms var(--ease) backwards;
-}
-
-@keyframes sidebar-wide-in {
-  from {
-    opacity: 0;
+/* 宽态在动画期间是一个整体纹理:缩放/淡出由合成器处理,不逐帧重新
+   栅格化整块项目列表。移动结束后立刻撤销提示,避免长期占用显存。 */
+@media (min-width: 821px) {
+  .shell[data-sidebar-moving] .sidebar-wide {
+    will-change: transform, opacity;
   }
 }
 
-/* 收起态控制区与展开态品牌区同高，保持导航位置稳定。 */
+/* ---------- 侧栏两层:宽态内容 / 收起轨道 ----------
+ *
+ * 两层都常驻,由 data-collapsed 交叉过渡。宽态冻结在 --sidebar-w - 24 的
+ * 宽度上,列收拢时被 .sidebar 的 overflow 裁切;它不会跟着列宽缩窄,所以
+ * 项目列表的文字不会在动画途中重排。
+ */
+.sidebar-wide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  width: calc(var(--sidebar-w) - 24px);
+  min-height: 0;
+  padding-bottom: 12px;
+  visibility: visible;
+  /* 整层朝左侧收一点:内容不只是变透明,还像被折向轨道那一侧。
+     只缩不横移,左边距保持在原地,文字不会被扫出左边缘。
+     静止态用 none 而不是 scale(1):transform 祖先会给 fixed 后代重造
+     包含块,非动画期间不应该有这层影响。 */
+  transform-origin: 0 50%;
+  transform: none;
+  opacity: 1;
+  transition:
+    opacity 180ms var(--ease) 40ms,
+    transform 300ms var(--sidebar-content-ease) 0ms,
+    visibility 0s linear 0s;
+}
+
+/* 宽态里的四块:品牌、主操作、项目区、底部导航。整层只做一次透明度
+   过渡(一个合成层),四块各自向左退不同距离;收起时退场先于裁切边缘
+   抵达,避免文字被"切掉半行"。 */
+.sidebar-wide > * {
+  transform: none;
+  transition: transform 300ms var(--sidebar-content-ease) 0ms;
+}
+
+.shell:not([data-collapsed]) .sidebar-wide > .sidebar-logo {
+  transition-delay: 40ms;
+}
+
+.shell:not([data-collapsed]) .sidebar-wide > .sidebar-primary {
+  transition-delay: 70ms;
+}
+
+.shell:not([data-collapsed]) .sidebar-wide > .sidebar-region {
+  transition-delay: 100ms;
+}
+
+.shell:not([data-collapsed]) .sidebar-wide > .sidebar-foot {
+  transition-delay: 80ms;
+}
+
+.shell[data-collapsed] .sidebar-wide {
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.955);
+  transition:
+    opacity 140ms var(--ease) 0ms,
+    transform 300ms var(--sidebar-content-ease) 0ms,
+    visibility 0s linear 220ms;
+}
+
+.shell[data-collapsed] .sidebar-wide > * {
+  transform: translateX(-6px);
+  transition-delay: 0ms;
+}
+
+/* 四块不是一起平移:品牌先退一小步,主操作和项目区依次多退一点,
+   像纸张从边缘被抽走,而不是整层原地变透明。 */
+.shell[data-collapsed] .sidebar-wide > .sidebar-logo {
+  transform: translateX(-4px);
+}
+
+.shell[data-collapsed] .sidebar-wide > .sidebar-primary {
+  transform: translateX(-10px);
+}
+
+.shell[data-collapsed] .sidebar-wide > .sidebar-region {
+  transform: translateX(-16px);
+}
+
+.shell[data-collapsed] .sidebar-wide > .sidebar-foot {
+  transform: translateX(-6px);
+}
+
+/* 收起态轨道:固定 36px 宽,不随列宽收窄;图标自左下方轻量落位。 */
+.sidebar-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 36px;
+  min-height: 0;
+  padding-bottom: 12px;
+  opacity: 1;
+  transform: translateX(0);
+  visibility: visible;
+  transition:
+    opacity 140ms var(--ease) 0ms,
+    transform 220ms var(--sidebar-content-ease) 0ms,
+    visibility 0s linear 0s;
+}
+
+/* 展开时轨道先让位(快于宽态入场),避免两套图标在同一位置重叠太久。 */
+.shell:not([data-collapsed]) .sidebar-rail {
+  opacity: 0;
+  transform: translateX(-8px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 110ms var(--ease) 0ms,
+    transform 180ms var(--ease) 0ms,
+    visibility 0s linear 180ms;
+}
+
+/* 轨道图标:收起时按 --rail-index 依次入场;展开时立即退场。
+   transition-delay 的四项顺序与上面的 transition 简写一致,只推迟
+   opacity/transform,悬停底色仍然即时响应。 */
+.sidebar-rail > :is(.rail-btn, .update-badge, .rail-foot) {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  transition:
+    opacity 180ms var(--ease) 0ms,
+    transform 240ms var(--sidebar-rail-spring) 0ms,
+    background 150ms var(--ease) 0ms,
+    color 150ms var(--ease) 0ms;
+}
+
+.shell:not([data-collapsed]) .sidebar-rail > :is(.rail-btn, .update-badge, .rail-foot) {
+  opacity: 0;
+  transform: translateX(-10px) scale(0.84);
+  transition-delay: 0ms;
+}
+
+.shell[data-collapsed] .sidebar-rail > :is(.rail-btn, .update-badge) {
+  transition-delay:
+    calc(50ms + var(--rail-index, 5) * 25ms),
+    calc(50ms + var(--rail-index, 5) * 25ms),
+    0ms,
+    0ms;
+}
+
+.shell[data-collapsed] .sidebar-rail > .rail-foot {
+  transition-delay:
+    calc(50ms + var(--rail-index, 6) * 25ms),
+    calc(50ms + var(--rail-index, 6) * 25ms),
+    0ms,
+    0ms;
+}
+
+/* 收起态顶带与展开态品牌区同高:列变窄时轨道各图标的位置保持不跳。 */
 .sidebar-rail-top {
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
-}
-
-/* 收起态控制栏:与展开态一一对应的图标控件(开关/新建/添加/搜索 + 设置) */
-.sidebar-rail {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  min-height: 0;
-  flex: 1;
-}
-
-.sidebar-rail.enter {
-  animation: sidebar-rail-in 150ms var(--ease) backwards;
-}
-
-@keyframes sidebar-rail-in {
-  from {
-    opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .sidebar-wide,
-  .sidebar-wide.fade-out {
-    transition: none;
-  }
-  .sidebar-wide.wide-in,
-  .sidebar-rail.enter {
-    animation: none;
-  }
+  height: 76px;
 }
 
 .rail-btn {
@@ -236,36 +375,90 @@
   border-top: 1px solid var(--border-l1);
 }
 
-/* 展开态顶部开关:logo 行右侧 */
-.sidebar-toggle {
-  margin-left: auto;
-  width: 26px;
-  height: 26px;
-  padding: 0;
+/* ---------- 唯一的收起/展开开关 ----------
+ *
+ * right 固定在列右缘内侧,所以列宽动画的每一帧它都在边缘上;展开态时它
+ * 就是品牌行右侧的按钮,收起后正好落在轨道顶部的中心。两层常驻期间不会
+ * 出现"开关被裁掉 / 还没挂载"的空窗。
+ */
+.sidebar .sidebar-handle {
+  position: absolute;
+  top: 23px;
+  right: 12px;
+  z-index: 3;
+  display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 7px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   flex: none;
+  border-radius: 8px;
+  /* 与侧栏同色:淡出中的内容从它下面经过时,文字不会和图标糊在一起。 */
+  background: var(--sidebar-fill);
+  color: var(--label-secondary);
+  transition:
+    background 150ms var(--ease),
+    box-shadow 150ms var(--ease),
+    color 150ms var(--ease);
 }
 
+.sidebar .sidebar-handle:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.sidebar .sidebar-handle:active {
+  background: var(--active-fill);
+}
+
+/* 移动中的开关是整段动画的锚点:轻轻点亮,让视线知道"面板从这里折过去"。
+   底色仍与侧栏同色(只掺一点前景),淡出中的文字不会从按钮里透出来。 */
+.shell[data-sidebar-moving] .sidebar .sidebar-handle {
+  background: color-mix(in srgb, var(--sidebar-fill), var(--label-primary) 6%);
+  color: var(--label-primary);
+  box-shadow: 0 0 0 1px var(--border-l2);
+}
+
+.handle-icon {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  transition:
+    opacity 180ms var(--ease),
+    transform 280ms var(--sidebar-rail-spring);
+}
+
+.handle-icon-collapse {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.handle-icon-expand {
+  opacity: 0;
+  transform: scale(0.62) rotate(-35deg);
+}
+
+.shell[data-collapsed] .handle-icon-collapse {
+  opacity: 0;
+  transform: scale(0.62) rotate(35deg);
+}
+
+.shell[data-collapsed] .handle-icon-expand {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+/* 品牌行右侧留出开关的落位:更新徽标不能滑到开关下面被盖住。 */
 .sidebar-logo {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
   height: 76px;
-  padding: 0 12px;
+  padding: 0 46px 0 12px;
   margin-bottom: 0;
   color: var(--label-primary);
-}
-
-.sidebar-rail-top {
-  height: 76px;
-}
-
-.shell[data-collapsed] .sidebar {
-  padding-left: 10px;
-  padding-right: 10px;
 }
 
 .denia-wordmark {
@@ -274,6 +467,104 @@
   height: 28px;
   flex: none;
   color: var(--label-primary);
+}
+
+/* ---------- 主列对话的"惯性" ----------
+ *
+ * 列宽变化时,对话块的重心也在横移。给正文一张极短的"滞后"位移:列先走,
+ * 正文跟半步再落回。它不改变排版宽度(每帧重排仍由列宽驱动),只是把
+ * 位移方向上的加速度抹平,让 224px 的横移看起来像被带着走而不是被推着走。
+ * 只作用于 .conversation-view:输入区里的 fixed 弹层不能进入 transform
+ * 包含块。
+ */
+/* 主列整块的遮罩:用一层 0.07 的底色代替给整棵正文做 opacity 动画。
+   正文可以有几万像素高,逐帧给整层做透明度会多一张很大的合成纹理;
+   一张覆盖视口的浮层几乎不花钱,同时把重新折行的那一瞬压暗。 */
+.page-pane::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  background: var(--bg-base);
+  opacity: 0;
+}
+
+@media (min-width: 821px) {
+  .shell[data-sidebar-moving][data-collapsed] .conversation-view {
+    animation: sidebar-chat-lag-collapse 360ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+
+  .shell[data-sidebar-moving]:not([data-collapsed]) .conversation-view {
+    animation: sidebar-chat-lag-expand 360ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+
+  .shell[data-sidebar-moving] .page-pane::after {
+    animation: sidebar-chat-shade 360ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+}
+
+/* 列先走,正文慢半步再落回;亮度由 page-pane 的浮层统一处理。 */
+@keyframes sidebar-chat-lag-collapse {
+  0% {
+    transform: translateX(0);
+  }
+  32% {
+    transform: translateX(14px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes sidebar-chat-lag-expand {
+  0% {
+    transform: translateX(0);
+  }
+  32% {
+    transform: translateX(-14px);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes sidebar-chat-shade {
+  0% {
+    opacity: 0;
+  }
+  35% {
+    opacity: 0.07;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell {
+    transition: none;
+  }
+  .sidebar,
+  .sidebar-wide,
+  .sidebar-wide > *,
+  .sidebar-rail,
+  .sidebar-rail > :is(.rail-btn, .update-badge, .rail-foot),
+  .sidebar .sidebar-handle,
+  .handle-icon {
+    transition: none;
+  }
+  /* 折叠态的 visibility 延迟比上面的单类选择器特异性高,这里单独压掉:
+     减少动态偏好下宽态应立即从命中层/辅助树里消失。 */
+  .shell[data-collapsed] .sidebar-wide {
+    transition: none;
+  }
+  .shell[data-sidebar-moving] .conversation-view {
+    animation: none;
+  }
+  .shell[data-sidebar-moving] .page-pane::after {
+    animation: none;
+  }
 }
 
 .sidebar-primary {
@@ -356,11 +647,6 @@
 }
 @media (max-width: 820px) {
   .sidebar-primary { --nav-height: 44px; }
-  /* 手机上侧栏是 min(86vw, 320px) 的抽屉:宽态内容若仍冻结在桌面
-   * 280px 宽度,320px 屏幕(86vw≈275px)会把按钮右缘裁掉,宽屏手机则
-   * 在右侧留一段空白。抽屉宽度靠 transform 动画、不随展开收窄,
-   * 所以这里直接吃满内容区。 */
-  .shell[data-mobile] .sidebar-wide { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sidebar :is(button, .project-group-body) { transition: none; }
