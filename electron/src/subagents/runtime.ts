@@ -1,14 +1,16 @@
 // Subagent runtime: dispatch, background execution, inbox delivery, control.
 //
 // All children are background sessions. Completion results and messages are
-// persisted as `agent-inbox` events first; a step boundary turns them into
-// `agent-delivery` events, which is what the model actually sees. This keeps
-// delivery idempotent across crashes and never interrupts a model mid-action.
+// published to the shared CompletionLifecycle, which persists them as
+// `agent-inbox` events first and only promotes them to `agent-delivery` at a
+// step boundary. Delivery is therefore idempotent across crashes and never
+// interrupts a model mid-action.
 
 import { randomUUID } from 'node:crypto'
 
 import type { PermissionState } from '../core/permission.ts'
 import { stateFromLegacy } from '../core/permission.ts'
+import { CompletionLifecycle } from '../agent/lifecycle.ts'
 import type {
   Envelope,
   ModelSelection,
@@ -16,6 +18,7 @@ import type {
   SessionHeader,
   SessionSummary,
   ToolSchema,
+  TurnEndReason,
 } from '../core/wire.ts'
 import { isRecord } from '../core/util.ts'
 import type { SessionStore } from '../session/store.ts'
@@ -66,6 +69,8 @@ export interface SubagentRuntimeOptions {
   maxConcurrentRuns?: number
   catalogMaxBytes?: number
   outputBytes?: number
+  /** Shared with the job manager; when omitted the runtime owns a private one. */
+  completions?: CompletionLifecycle
   /** The child session exists; attach it before its first task is enqueued. */
   childCreated?(childId: string, parentId: string): void
   /** The child session is gone (dispatch rollback or parent cascade). */
@@ -126,8 +131,6 @@ export interface SubagentHandoff {
 const DEFAULT_CATALOG_BYTES = 8192
 const HISTORY_PROJECTION_FILE = 'history-projection.json'
 const DEFAULT_OUTPUT_BYTES = 64 * 1024
-/** Automatic wakes in a row before waiting for a human turn to reset the budget. */
-const MAX_CONSECUTIVE_WAKES = 3
 /** Startup replay window: older child completions are history, not pending work. */
 const RECOVERY_WINDOW_MS = 10 * 60 * 1000
 const CATALOG_HEADER = '[denia 子代理目录]'
@@ -150,8 +153,8 @@ export class SubagentRuntime {
   private readonly definitionsChanged: (() => void) | undefined
   private readonly getConfig: (() => AppConfig) | undefined
   private readonly children = new Map<string, Child>()
-  private readonly paused = new Set<string>()
-  private readonly wakeAttempts = new Map<string, number>()
+  private readonly completions: CompletionLifecycle
+  private readonly ownsCompletions: boolean
   private jobCleaner: ((sessionId: string) => string[]) | undefined
 
   constructor(
@@ -170,6 +173,15 @@ export class SubagentRuntime {
     this.childRemoved = options.childRemoved
     this.definitionsChanged = options.definitionsChanged
     this.getConfig = options.config
+    this.ownsCompletions = options.completions === undefined
+    this.completions =
+      options.completions ??
+      new CompletionLifecycle({
+        store,
+        startTurn: (sessionId) => port.startTurn(sessionId, '', { continueOnly: true }),
+        isRunning: (sessionId) => port.isRunning(sessionId),
+        outputBytes: this.outputBytes,
+      })
   }
 
   // —— dispatch ——
@@ -435,97 +447,42 @@ export class SubagentRuntime {
 
   // —— inbox / delivery ——
 
+  /** Publish an agent message or a completion through the shared lifecycle. */
   enqueue(target: string, id: string, text: string, source: string): string {
-    const session = this.store.read(target)
-    if (!session) throw new Error(`目标会话不存在：${target}`)
-    if (text.length > this.outputBytes * 2) throw new Error('代理消息超过配置的体积上限')
-    const delivered = new Set<string>()
-    for (const event of session.events) {
-      if (event.type === 'agent-inbox' || event.type === 'agent-delivery') delivered.add(event.id)
-    }
-    if (delivered.has(id)) return id
-    if (source.startsWith('agent:')) this.paused.delete(target)
-    this.wakeAttempts.delete(target)
-    this.store.append(target, { type: 'agent-inbox', id, text, source })
-    this.store.flush(target)
-    this.wake(target)
+    this.completions.push({ id, target, text, source })
     return id
   }
 
-  /** Move pending inbox entries into model-visible deliveries (step boundary). */
   drainInbox(sessionId: string): void {
-    const session = this.store.read(sessionId)
-    if (!session) return
-    const delivered = new Set<string>()
-    for (const event of session.events) {
-      if (event.type === 'agent-delivery') delivered.add(event.id)
-    }
-    for (const event of session.events) {
-      if (event.type !== 'agent-inbox' || delivered.has(event.id)) continue
-      delivered.add(event.id)
-      this.store.append(sessionId, {
-        type: 'agent-delivery',
-        id: event.id,
-        text: event.text,
-        source: event.source,
-      })
-    }
-    this.store.flush(sessionId)
+    this.completions.drainInbox(sessionId)
   }
 
   hasPending(sessionId: string): boolean {
-    const session = this.store.read(sessionId)
-    if (!session) return false
-    const delivered = new Set<string>()
-    for (const event of session.events) {
-      if (event.type === 'agent-delivery') delivered.add(event.id)
-    }
-    return session.events.some(
-      (event) => event.type === 'agent-inbox' && !delivered.has(event.id),
-    )
-  }
-
-  wake(sessionId: string): void {
-    if (this.paused.has(sessionId) || this.port.isRunning(sessionId)) return
-    if (!this.hasPending(sessionId)) return
-    // A pending result that keeps failing to drain must not spin forever; the
-    // budget resets on the next human turn (or the next explicit message).
-    const attempts = this.wakeAttempts.get(sessionId) ?? 0
-    if (attempts >= MAX_CONSECUTIVE_WAKES) return
-    this.wakeAttempts.set(sessionId, attempts + 1)
-    void this.port
-      .startTurn(sessionId, '', { continueOnly: true })
-      .then(() => this.onIdle(sessionId))
-      .catch(() => {
-        /* the driver records turn failures in the log */
-      })
+    return this.completions.hasPending(sessionId)
   }
 
   onTurnStart(sessionId: string): void {
-    this.wakeAttempts.delete(sessionId)
-    if (this.store.header(sessionId)?.subagent) this.paused.delete(sessionId)
+    this.completions.onTurnStart(sessionId)
   }
 
-  /**
-   * A physical log truncation invalidated the removed branch's queued work:
-   * drop the pause mark and auto-wake budget that were accounted against it.
-   * Pending inbox entries need no reset — they are re-scanned from the log.
-   */
   onSessionRewound(sessionId: string): void {
-    this.paused.delete(sessionId)
-    this.wakeAttempts.delete(sessionId)
+    this.completions.onSessionRewound(sessionId)
   }
 
-  onTurnEnd(sessionId: string): void {
+  onTurnEnd(sessionId: string, reason: TurnEndReason = { kind: 'completed' }): void {
     const header = this.store.header(sessionId)
     if (!header) return
     if (header.subagent) this.captureCompletion(sessionId)
-    this.onIdle(sessionId)
+    this.completions.onTurnEnd(sessionId, reason)
+  }
+
+  /** Re-check pending deliveries (kept for callers that drove the inbox directly). */
+  wake(sessionId: string): void {
+    this.completions.kick(sessionId)
   }
 
   onIdle(sessionId: string): void {
-    if (this.port.isRunning(sessionId)) return
-    if (this.hasPending(sessionId)) this.wake(sessionId)
+    this.completions.kick(sessionId)
   }
 
   /**
@@ -545,7 +502,7 @@ export class SubagentRuntime {
       this.captureCompletion(sessionId)
     }
     if (tail.pendingInbox) {
-      if (this.hasPending(sessionId)) this.wake(sessionId)
+      this.completions.recover(sessionId)
     }
   }
 
@@ -733,7 +690,7 @@ export class SubagentRuntime {
     if (!this.canControl(owner, target, true)) {
       throw new Error('目标不在当前代理允许控制的谱系范围内')
     }
-    this.paused.add(target)
+    this.completions.pause(target)
     this.port.cancel(target)
     this.cleanJobs(target)
   }
@@ -748,7 +705,7 @@ export class SubagentRuntime {
     const descendants = this.descendants(owner).reverse()
     for (const child of descendants) {
       this.cleanJobs(child.id)
-      this.paused.delete(child.id)
+      this.completions.forget(child.id)
       this.store.delete(child.id)
       this.children.delete(child.id)
       this.childRemoved?.(child.id)
@@ -757,6 +714,7 @@ export class SubagentRuntime {
 
   close(): void {
     for (const child of this.allChildren()) this.port.cancel(child.id)
+    if (this.ownsCompletions) this.completions.close()
   }
 
   /** Frozen tools of a child session; null for ordinary sessions. */

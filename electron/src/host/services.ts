@@ -252,7 +252,7 @@ export class HostServices implements SessionServices {
   }
 
   onTurnEnd(sessionId: string, reason: TurnEndReason, usage?: TokenUsage): void {
-    this.subagents.onTurnEnd(sessionId)
+    this.subagents.onTurnEnd(sessionId, reason)
     this.goalRuntime?.onTurnEnd(sessionId, reason, usage)
   }
 

@@ -51,6 +51,7 @@ test('a background job settles once and reports its completion', async () => {
     onDone: (job) => {
       notices.push(job.id)
       resolveNotice()
+      return true
     },
   })
   const job = manager.start({
@@ -71,6 +72,20 @@ test('a background job settles once and reports its completion', async () => {
   // Reading again returns the retained output without a second notice.
   assert.equal(manager.read(job.id, 's1').job.reported, true)
   assert.equal(notices.length, 1)
+})
+
+test('a rejected completion stays claimable through job_output', async () => {
+  const manager = new JobManager({ onDone: () => false })
+  const job = manager.start({
+    owner: 's1',
+    cwd: process.cwd(),
+    command: 'node -e "console.log(\'still-readable\')"',
+  })
+  await waitSettled(manager, job.id, 's1')
+  assert.equal(manager.list('s1')[0]?.reported, false)
+  const read = manager.read(job.id, 's1')
+  assert.match(read.output, /still-readable/)
+  assert.equal(read.job.reported, true)
 })
 
 test('jobs are scoped to their owning session', async () => {

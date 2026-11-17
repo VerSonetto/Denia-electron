@@ -45,8 +45,10 @@ export interface StartJobInput {
 }
 
 export interface JobManagerOptions {
-  /** Called once per settled job, unless the result was already collected. */
-  onDone?(snapshot: JobSnapshot): void
+  /** Called once per settled job, unless the result was already collected.
+   * Returning `false` (or throwing) leaves the job unreported so a later
+   * `job_output` read can still claim it. */
+  onDone?(snapshot: JobSnapshot): boolean | undefined
   outputCap?: number
   maxActive?: number
   maxRetained?: number
@@ -83,7 +85,7 @@ export class JobManager {
   private readonly outputCap: number
   private readonly maxActive: number
   private readonly maxRetained: number
-  private readonly onDone: ((snapshot: JobSnapshot) => void) | undefined
+  private readonly onDone: ((snapshot: JobSnapshot) => boolean | undefined) | undefined
 
   constructor(options: JobManagerOptions = {}) {
     this.outputCap = options.outputCap ?? JOB_OUTPUT_CAP
@@ -267,10 +269,13 @@ export class JobManager {
     record.child = null
     if (record.snapshot.reported) return
     record.snapshot.reported = true
+    if (!this.onDone) return
     try {
-      this.onDone?.(record.snapshot)
+      if (this.onDone(record.snapshot) === false) record.snapshot.reported = false
     } catch {
-      /* completion delivery is best-effort; the result stays readable */
+      // The notice could not be published; keep the result readable through
+      // `job_output` instead of pretending it was reported.
+      record.snapshot.reported = false
     }
   }
 }

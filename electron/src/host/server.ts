@@ -17,6 +17,7 @@ import path from 'node:path'
 import { BrowserManager } from '../browser/manager.ts'
 import { createBrowserTool } from '../tools/browser.ts'
 import { SessionDriver } from '../agent/loop.ts'
+import { CompletionLifecycle } from '../agent/lifecycle.ts'
 import type { ApprovalBridge } from '../agent/gate.ts'
 import type { ApprovalAnswer } from '../agent/gate.ts'
 import { createModelReviewer } from '../agent/reviewer.ts'
@@ -414,6 +415,14 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     console.error('[denia] MCP 初始化失败:', errorMessage(error))
   })
   const profiles = new ProfileStore(home)
+  // One queue for both producers: a settled child and a finished background
+  // job are the same kind of completion. The lifecycle persists them as
+  // `agent-inbox` first and only promotes them at an action boundary.
+  const completions = new CompletionLifecycle({
+    store,
+    startTurn: (sessionId) => driver.startTurn(sessionId, '', { continueOnly: true }),
+    isRunning: (sessionId) => driver.isRunning(sessionId),
+  })
   const subagents = new SubagentRuntime(store, profiles, {
     startTurn: (sessionId, prompt, turnOptions) =>
       driver.startTurn(sessionId, prompt, turnOptions ?? {}),
@@ -427,20 +436,25 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     childRemoved: detachFromProjects,
     definitionsChanged: () => broadcast({ type: 'subagents-updated' }),
     config: () => config,
+    completions,
   })
   const jobs = new JobManager({
     onDone: (job) => {
-      // The completion notice is enqueued as an inbox event and only becomes
-      // model-visible at the next step boundary, so a busy turn is never
-      // interrupted mid-action.
       let text = `[后台任务完成]\n${JSON.stringify(jobs.peek(job.id, job.owner))}`
       if (text.length > JOB_OUTPUT_CAP) {
         text = `${Array.from(text).slice(0, JOB_OUTPUT_CAP).join('')}\n（后台任务结果已截断，完整输出请用 job_output 读取。）`
       }
       try {
-        subagents.enqueue(job.owner, `job:${job.id}`, text, 'job-completed')
+        completions.push({
+          id: `job:${job.id}`,
+          target: job.owner,
+          text,
+          source: 'job-completed',
+        })
+        return true
       } catch {
         // The owning session is gone; the result stays readable while retained.
+        return false
       }
     },
   })
@@ -722,6 +736,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
         }
         subagents.removeOwner(sessionId)
         jobs.removeOwner(sessionId)
+        completions.forget(sessionId)
         goalStore.remove(sessionId)
         driver.forgetCacheWarm(sessionId)
         store.flush(sessionId)
@@ -1240,6 +1255,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       for (const sessionId of ids) {
         subagents.removeOwner(sessionId)
         jobs.removeOwner(sessionId)
+        completions.forget(sessionId)
         goalStore.remove(sessionId)
         driver.forgetCacheWarm(sessionId)
         store.flush(sessionId)
@@ -2452,6 +2468,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       sseClients.clear()
       await browser?.dispose()
       subagents.close()
+      completions.close()
       await mcp.shutdownAll()
       driver.dispose()
       for (const id of store.list().map((summary) => summary.id)) {

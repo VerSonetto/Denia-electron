@@ -31,12 +31,14 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
   命名与冲突过滤；`mcp_list` 目录 + 首次调用懒加载参数；按字符分页与
   `result_id` 续读（续读不重新执行外部工具）；`/api/mcp` 管理端点（增删改、
   启停、重连、逐工具开关）与 `settings.yaml` 的 `mcp` 命名空间持久化
-- **子代理**：内置 explore / develop / verify + 用户级/项目级定义（YAML
-  frontmatter + Markdown）；`spawn_agent` / `fork_agent` / `create_subagent` /
-  `send_message` / `list_agents` / `wait_agent` / `interrupt_agent` /
-  `session_trace`；冻结工具授权、只读权限上限、禁止再派遣、后台执行、
-  `agent-inbox` → `agent-delivery` 完成投递、fork 只复制已闭合历史；
-  `/api/subagent-profiles`、`/api/subagent-tools` 与 `/api/sessions/:id/agents`
+- **子代理 / 后台任务**：内置 explore / develop / verify + 用户级/项目级定义
+  （YAML frontmatter + Markdown）；`spawn_agent` / `fork_agent` /
+  `create_subagent` / `send_message` / `list_agents` / `wait_agent` /
+  `interrupt_agent` / `session_trace`；冻结工具授权、只读权限上限、禁止再派遣、
+  后台执行；两者共用同一完成生命周期：结果先落 `agent-inbox`，模型动作中
+  等待、`step` 边界转 `agent-delivery`，模型空闲则立即唤醒；
+  fork 只复制已闭合历史；`/api/subagent-profiles`、`/api/subagent-tools`
+  与 `/api/sessions/:id/agents`
 - **技能**：项目/用户/内置分层发现，`SKILL.md` + 资源读取，`skill` 工具，
   `<available_skills>` 目录注入，`/api/skills` 管理端点与 `disabled-skills.json`
 - **项目记忆**：`<home>/memories/projects/<slug>-<sha16>/memory/` 桶；
@@ -94,7 +96,7 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - `project-instructions`：`AGENTS.md` 全文（system-reminder 框架）
 - `skill-catalog`：`<available_skills>` 摘要列表
 - `project-memory`：`MEMORY.md` 索引（仅主代理；子代理不注入）
-- `agent-delivery`：子代理完成通知 / 父子消息
+- `agent-delivery`：子代理 / 后台任务完成通知、父子消息
 
 `deriveHistory` 对上述基线通道只保留最新一条进入模型面；日志仍 append-only。
 子代理目录与 MCP 纪律段在系统提示里，不占注入通道。
