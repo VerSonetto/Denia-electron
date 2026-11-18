@@ -3,7 +3,7 @@
 // 为什么放在构建期而不是运行时压缩:传输字节数就是延迟
 // (主包 1.5 MB 级,多跑几百 KB 就是几百毫秒)。构建期可以随便用
 // brotli q11 换最小体积,运行时零 CPU、零缓冲;服务端只按 Accept-Encoding
-// 选一个现成实体发出去(见 crates/server/src/web_assets.rs)。
+// 选一个现成实体发出去(见 electron/src/host/server.ts 的 serveStatic)。
 //
 // 位置:front-end 工具链目录(web/scripts),由 web/package.json 的 build 脚本
 // 与仓库根的 scripts/desktop.ps1 调用。放在 web/ 内部才能让 `pnpm build`

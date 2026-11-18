@@ -77,7 +77,7 @@ export function PermissionSelector({
   value: PermissionChoice
   onChange: (level: PermissionChoice) => void
   disabled?: boolean
-  /** Electron 宿主提供「自动审批」档位;Rust 宿主没有该能力。 */
+  /** 宿主提供「自动审批」档位时显示;能力探测失败则该档位隐藏。 */
   showApproveForMe?: boolean
 }) {
   const [open, setOpen] = useState(false)

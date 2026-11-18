@@ -22,6 +22,12 @@ interface ShellChoice {
   file: string
   args: string[]
   label: string
+  /**
+   * cmd.exe needs the command appended as raw text. Node's default Windows
+   * quoting wraps the command in quotes and breaks commands that already
+   * contain quoted arguments (for example `node -e "..."`).
+   */
+  verbatim: boolean
 }
 
 let cachedShell: ShellChoice | null | undefined
@@ -48,21 +54,25 @@ export function shellChoice(): ShellChoice {
   const override = process.env.DENIA_SHELL?.trim()
   if (override) {
     const file = override.includes('/') || override.includes('\\') ? override : (findOnPath(override) ?? override)
-    cachedShell = { file, args: ['-c'], label: file }
+    const base = file.replaceAll('\\', '/').split('/').pop()?.toLowerCase()
+    cachedShell =
+      base === 'cmd' || base === 'cmd.exe'
+        ? { file, args: ['/d', '/s', '/c'], label: 'cmd', verbatim: true }
+        : { file, args: ['-c'], label: file, verbatim: false }
     return cachedShell
   }
   if (process.platform === 'win32') {
     const bash = findOnPath('bash.exe') ?? findOnPath('bash')
     if (bash) {
-      cachedShell = { file: bash, args: ['-c'], label: 'bash' }
+      cachedShell = { file: bash, args: ['-c'], label: 'bash', verbatim: false }
       return cachedShell
     }
     const comspec = process.env.ComSpec?.trim() || 'cmd.exe'
-    cachedShell = { file: comspec, args: ['/d', '/s', '/c'], label: 'cmd' }
+    cachedShell = { file: comspec, args: ['/d', '/s', '/c'], label: 'cmd', verbatim: true }
     return cachedShell
   }
   const bash = findOnPath('bash') ?? (existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh')
-  cachedShell = { file: bash, args: ['-c'], label: bash }
+  cachedShell = { file: bash, args: ['-c'], label: bash, verbatim: false }
   return cachedShell
 }
 
@@ -197,6 +207,7 @@ export const BashTool = {
         child = spawn(shell.file, [...shell.args, command], {
           cwd: ctx.cwd,
           windowsHide: true,
+          windowsVerbatimArguments: shell.verbatim,
           detached: process.platform !== 'win32',
           env: {
             ...process.env,

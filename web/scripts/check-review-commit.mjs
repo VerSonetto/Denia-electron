@@ -10,7 +10,7 @@
  * - **组件层**:真挂载 ReviewPanel,断言
  *   "输入信息 → 点提交 → 发的是哪个请求、body 是什么"、
  *   "AI 生成的结果回填进编辑框"、"失败时显示错误与引导"。
- *   fetch 是 stub:守的是前端行为,后端由 cargo test 的 git 测试覆盖。
+ *   fetch 是 stub:守的是前端行为,后端由 `electron/test/git.test.ts` 覆盖。
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'

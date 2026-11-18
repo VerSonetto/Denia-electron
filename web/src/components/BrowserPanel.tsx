@@ -25,7 +25,7 @@ import {
 } from './icons'
 import './BrowserPanel.css'
 
-/** elementInfo 命令的 value 结构(见 crates/browser manager.rs)。 */
+/** elementInfo 命令的 value 结构(见 electron/src/browser/types.ts)。 */
 interface ElementInfoValue {
   tag?: string
   id?: string

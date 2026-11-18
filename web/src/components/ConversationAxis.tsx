@@ -15,7 +15,7 @@ import { t } from '../i18n'
  */
 
 /** 少于这么多条用户消息时整条轨道不渲染。 */
-const MIN_ITEMS = 4
+const MIN_ITEMS = 2
 /**
  * 轨道与正文互不重叠所需的「内容列左缘」最小净距(px)。
  *

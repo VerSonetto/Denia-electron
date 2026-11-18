@@ -1,8 +1,9 @@
 /**
  * 终端面板的 API 客户端:REST 管生命周期 + WebSocket 管交互数据。
  *
- * 分工理由见 `crates/server/src/api/terminals.rs` 顶部注释:键盘输入每敲一下
- * 都要往返,走 HTTP 延迟会叠加;WebSocket 一条连接双向复用。
+ * 宿主端尚未实现 `/api/terminals`（当前返回 501）；这里保留前端契约，
+ * 便于补齐终端功能。设计上是键盘输入每敲一下都要往返,走 HTTP 延迟会叠加;
+ * WebSocket 一条连接双向复用。
  */
 
 import { encodeUtf8Base64 } from './lib/base64'

@@ -9,7 +9,7 @@ import {
 } from './icons'
 
 /**
- * 桌面壳(Tauri / Electron)的窗口条。
+ * 桌面壳(Electron)的窗口条。
  *
  * ## 为什么它不是"通栏标题栏"
  *
@@ -62,15 +62,12 @@ export function DesktopTitleBar() {
 
   return (
     <header className="desktop-titlebar" data-shell={shell.kind} aria-label={t('titleBarLabel')}>
-      {/* 拖动区:主列顶部整条。Tauri 用 `data-tauri-drag-region="deep"` ——
-          裸属性只认「直接点在自己身上」(`el === composedPath[0]`),点在子元素
-          上不拖,`deep` 让整棵子树可拖。Electron 侧由 `[data-shell='electron']`
+      {/* 拖动区:主列顶部整条。Electron 无边框窗口由 `[data-shell='electron']`
           的 `-webkit-app-region: drag` 接管。
 
-          双击最大化**不在这里挂 onDoubleClick**:两个壳都由系统/壳层自己响应
-          拖动区的双击,再挂一次就会双击一下切换两次、净效果为零(看起来就是
-          双击没反应)。 */}
-      <div className="desktop-titlebar-drag" data-tauri-drag-region="deep" />
+          双击最大化**不在这里挂 onDoubleClick**:系统自己响应拖动区的双击,
+          再挂一次就会双击一下切换两次、净效果为零(看起来就是双击没反应)。 */}
+      <div className="desktop-titlebar-drag" />
       <div className="desktop-titlebar-actions">
         <button
           type="button"

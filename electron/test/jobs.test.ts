@@ -172,6 +172,15 @@ test('bash run_in_background hands the command to the job manager', async () => 
   assert.match(manager.read(snapshot.id, 's1').output, /bg-ok/)
 })
 
+test('bash runs a quoted foreground command through the selected shell', async () => {
+  const output = await BashTool.execute(
+    { command: 'node -e "console.log(\'foreground-ok\')"' },
+    toolContext(new JobManager()),
+  )
+  assert.equal(output.isError, false)
+  assert.match(output.content, /foreground-ok/)
+})
+
 test('the jobs HTTP surface lists, reads and kills by session', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'denia-jobs-home-'))
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'denia-jobs-cwd-'))

@@ -1,7 +1,8 @@
 // Wire types shared with the existing web UI.
 //
-// These mirror `web/src/generated/core.ts` (which is generated from the Rust
-// serde definitions). Field names and shapes are part of the HTTP contract:
+// These mirror `web/src/generated/core.ts`. That file is a frozen snapshot of
+// the old Rust serde bindings; there is no generator left, so the two must be
+// kept in sync by hand. Field names and shapes are part of the HTTP contract:
 // the UI folds session events directly, so they must not drift.
 
 import type { SubagentDescriptor } from '../subagents/types.ts'

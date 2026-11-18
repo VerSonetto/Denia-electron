@@ -1,15 +1,15 @@
-// Provider configuration, settings and credentials — sourced from the same
-// home directory the Rust backend uses (`~/.denia`).
+// Provider configuration, settings and credentials, all stored under the Denia
+// home directory (`~/.denia`).
 //
 // Resolution order for providers:
 //   1. `<home>/config.json` — local override used by tests/dev.
-//   2. `<home>/settings.yaml` → `llm-openai.providers` — the Rust settings
-//      document, so the Electron build reuses the user's existing routes.
+//   2. `<home>/settings.yaml` → `llm-openai.providers` — the shared settings
+//      document, so the host reuses the user's existing routes.
 //   3. environment variables / built-in default.
 //
 // API keys resolve through `apiKeyEnv`: process environment first, then
-// `<home>/.credentials.yaml` (the same plaintext refs file the Rust build
-// writes). Secrets never leave the main process.
+// `<home>/.credentials.yaml` (the plaintext refs file Denia writes). Secrets
+// never leave the main process.
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -80,7 +80,7 @@ export interface CredentialInfo {
 export function resolveHome(): string {
   const fromEnv = process.env.DENIA_HOME?.trim()
   if (fromEnv) return path.resolve(fromEnv)
-  // Same home as the Rust build: sessions, settings, credentials, projects.
+  // The legacy data directory: sessions, settings, credentials, projects.
   return path.join(os.homedir(), '.denia')
 }
 

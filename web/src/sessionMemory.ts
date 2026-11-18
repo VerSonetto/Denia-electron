@@ -8,7 +8,7 @@ export const LIVE_EVENT_LIMIT = 600
  * 高频流式帧:只服务实时观感,不占分页位次、不触发历史复制、结算后从内存
  * 回收。
  *
- * 与后端 `is_transient_event`(`crates/session/src/lib.rs`)是同一份名单,
+ * 与后端 `isTransientEvent`(`electron/src/session/store.ts`)是同一份名单,
  * 两边必须同步:后端漏登记会让增量帧混进分页窗口,前端漏登记会把它们当成
  * 持久事件计数——表现为会话翻页总数在命令运行期间自己往上飘。
  */

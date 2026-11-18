@@ -1,8 +1,8 @@
 // 更新检查与安装：固定发布仓库，只在打包版里可用。
 //
-// 与 Rust 版的历史保持一致——release 资产叫
+// 与历史发布保持一致——release 资产叫
 // `Denia-<tag>-windows-x64-setup.exe` 或 `Denia-v<version>-windows-x64-setup.exe`，
-// 安装包旁放 SHA256SUMS.txt。这样两个版本看同一套发布规则。
+// 安装包旁放 SHA256SUMS.txt。这样旧版与本版使用同一套发布规则。
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'

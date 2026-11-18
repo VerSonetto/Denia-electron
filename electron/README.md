@@ -1,7 +1,7 @@
 # Denia Electron（进行中）
 
-Rust 后端向 Electron + TypeScript 迁移的工作树。前端 `web/` 原样复用：它只通过
-HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服务，窗口直接加载
+Electron + TypeScript 版的 Denia。前端 `web/` 原样复用：它只通过
+HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务，窗口直接加载
 `http://127.0.0.1:<port>`，相对 `/api` 路径与事件流都不需要改。
 
 ## 当前范围
@@ -11,11 +11,11 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **agent loop**：turn/step、流式 chunk、工具调用、并行执行、取消、死循环检测
 - **LLM 适配器**：`openai-completions`、`openai-responses`、`anthropic-messages`，
   共享 `StreamAssembler` 保证三条流发出同一套 `StreamChunk`
-- **会话存储**：与 Rust 版共用 `~/.denia`，`sessions/<id>/session.jsonl` 格式
+- **会话存储**：沿用旧版的 `~/.denia`，`sessions/<id>/session.jsonl` 格式
   对齐（header version 0 / UUID id / seq 连续）；崩溃遗留轮次加载时补
   `turn-end {aborted, disposed}`
 - **共享配置**：读取 `settings.yaml` 的 `llm-openai.providers`、从
-  `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；项目读写 `projects.json` 的 map+order 结构（一个项目可包含多个目录）；随附 preset（standard / creator / minimal）与 Rust 对齐
+  `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；项目读写 `projects.json` 的 map+order 结构（一个项目可包含多个目录）；随附 preset（standard / creator / minimal）与旧版对齐
 - **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、
   `todo_write`、`exit_plan`、`skill`
 - **权限（三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
@@ -49,16 +49,15 @@ HTTP/SSE 与宿主通信，因此新宿主在进程内起一个本地 HTTP 服�
 - **标题 / 上下文**：首轮后后台生成 `session-title`；`/context-breakdown`
   近似 token 拆分与压力；手动压缩按整轮摘要并落 `compaction-summary`
 - **Electron 壳**：主进程起宿主，窗口加载 UI
-- **窗口**：无边框自绘标题栏，与 Tauri 版共用 `DesktopTitleBar` 的 DOM/CSS；
-  `preload.cjs` 只暴露最小化 / 最大化 / 关闭与最大化状态，拖动走
-  `-webkit-app-region`，最大化状态由主进程窗口事件回推
+- **窗口**：无边框自绘标题栏；`preload.cjs` 只暴露最小化 / 最大化 / 关闭与
+  最大化状态，拖动走 `-webkit-app-region`，最大化状态由主进程窗口事件回推
 
-尚未迁移：goal、浏览器、渠道、更新、终端；
-真实 OS 沙箱仍未实现（只读档靠命令证明 + 工具层路径限制兵底）。这些端点
-目前返回 501 或空壳，不影响已迁移的能力。
+尚未迁移：渠道（微信 / QQ Bot）与终端；真实 OS 沙箱仍未实现（只读档靠命令
+证明 + 工具层路径限制兜底）。这些端点返回空状态或 501，不影响已迁移的能力。
 
-远程连接（局域网直连 / Cloudflare 隧道）不在 Electron 版提供：设置页签、
-远程门页、横幅、前端 API 与相关能力字段均已删除，宿主只监听本机。
+远程访问（局域网直连 / 设备配对）已实现，接口契约见
+[REMOTE-ACCESS.md](REMOTE-ACCESS.md)。对外地址由设置中的 `publicUrl` 提供，
+可用于反向代理或隧道；宿主本身不内置隧道进程。
 
 ## 权限模型
 
@@ -112,8 +111,11 @@ npm run build
 npm start
 ```
 
-宿主默认监听 `127.0.0.1:43655`（Rust 版占用 43654，两个版本可同时运行），home 为
-`~/.denia`，与 Rust 版共用同一份会话、设置与凭据；项目注册表是 Electron 版的新结构（首次启动会把旧的 `workspaces.json` 迁移为 `projects.json`）。可用环境变量覆盖：
+开发模式用 `npm run dev`：它会构建宿主、启动 Vite（默认 5173）并让窗口加载
+Vite 地址，前端热更新直接生效。`DENIA_VITE_PORT` 可换 Vite 端口，
+`DENIA_WEB_URL` 可复用已有前端地址；宿主端口由 `DENIA_PORT` 决定，默认 43655。
+
+宿主默认监听 `127.0.0.1:43655`，home 为 `~/.denia`；项目注册表首次启动会把旧的 `workspaces.json` 迁移为 `projects.json`。可用环境变量覆盖：
 
 - `DENIA_HOME`：会话、配置、项目记录的根目录
 - `DENIA_INSTALL_DIR`：程序安装目录（打包版默认取 Denia.exe 所在目录；开发版取应用包目录）
@@ -189,9 +191,9 @@ npm run dist
 - 应用身份是 `Denia` / `dev.denia.app`，安装到 `%LOCALAPPDATA%\Programs\Denia`。
   用户数据仍在 `~/.denia`，与旧版共用。
 - 更新检查指向本仓库的 Release（`VerSonetto/Denia-electron`）：拉最新版本、
-  校对 `SHA256SUMS.txt`，然后启动安装包。Rust 版已停止更新，0.6.0 是它的最后一版。
-- `pnpm build` 会先跑前端 QA 套件；本机 `check-follow` 在无联调环境时会失败，
-  它不参与产物，直接跑上面三条构建命令即可。
+  校对 `SHA256SUMS.txt`，然后启动安装包。
+- `pnpm build` 会先跑前端 QA 套件；若本机缺少联调环境导致个别套件失败，
+  直接跑 `pnpm exec vite build && node scripts/precompress.mjs` 仍可生成产物。
 - 打包使用 `build/icon.ico`（由 `128x128@2x.png` 生成的 256×256 图标）。
 - 静默安装：`Denia-v0.6.1-windows-x64-setup.exe /S`（默认按用户安装，无需管理员）。
 
@@ -226,7 +228,7 @@ scripts/
 ## 验证现状
 
 - `npm run typecheck` 通过
-- `npm test`：36 个用例通过，覆盖 agent loop、协议适配器、权限/审批、MCP
+- `npm test`：全部通过，覆盖 agent loop、协议适配器、权限/审批、MCP
   三种传输、父子代理派遣/完成投递/fork、技能、项目记忆、项目指令、
   标题与手动压缩
 - 前端 `cd web && npx tsc -b && npx vite build` 通过
@@ -235,7 +237,6 @@ scripts/
 
 ## 下一步建议
 
-1. goal（目标续跑）
-2. 浏览器工具与终端会话
-3. 渠道（微信 / QQ Bot）与更新
-4. 真实 OS 沙箱
+1. 渠道（微信 / QQ Bot）
+2. 终端会话
+3. 真实 OS 沙箱

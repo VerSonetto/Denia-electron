@@ -182,7 +182,7 @@ try {
   geometry(replacement)
   await wheel(query('.prompt-editor'), { deltaY: 30 })
   check('conditional remount installs one listener on the new wrapper', () => assert.equal(replacement.scrollTop, 30))
-  const source = readFileSync(join(web, 'src/pages/SessionsPage.tsx'), 'utf8')
+  const source = readFileSync(join(web, 'src/components/ComposerEditor.tsx'), 'utf8')
   check('the production composer attaches containment to its actual scroll wrapper', () => {
     assert.match(source, /<div className="prompt-scroll" ref={promptScrollRef} data-placeholder=\{placeholderText\}>/)
     assert.doesNotMatch(source, /onPromptWheel/)

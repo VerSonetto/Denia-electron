@@ -143,7 +143,7 @@ export function useSidePaneController(
       // 审查、浏览器、项目文件是单例:
       // - 审查:同一时刻只可能看一份 git 状态,开两个没有意义;
       // - 浏览器:denia 的 BrowserManager 是**单实例 + 内部 tab 列表**
-      //   (见 crates/browser),开多个侧栏浏览器标签会全部显示同一个实例,
+      //   (见 electron/src/browser/manager.ts),开多个侧栏浏览器标签会全部显示同一个实例,
       //   反而让人以为"新开了一个浏览器"。
       // - 项目文件:树是相对项目根的唯一一份,两个标签必然同内容。
       // 终端相反:每个终端是独立 PTY,必须可多开。

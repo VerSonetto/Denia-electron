@@ -1,4 +1,4 @@
-// Shared wire types are generated from Rust/serde; UI-only types stay here.
+// Shared wire types live in the frozen Rust/serde bindings; UI-only types stay here.
 import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, PresetSpec, SessionHeader as WireSessionHeader, ImageData as UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor } from './generated/core'
 export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, PresetSpec, UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor }
 export type SessionHeader = WireSessionHeader & { agent_preset?: string }
@@ -64,7 +64,7 @@ export interface SubagentPreview {
   instructionScope?: string
   fingerprint?: string
 }
-/** Wire types shared with the Rust backend. camelCase mirrors serde. */
+/** Wire types shared with the host. camelCase mirrors the frozen serde names. */
 
 export interface ProviderInfo {
   id: string
@@ -259,7 +259,7 @@ export function normalizePermissionChoice(raw: string): PermissionChoice {
 }
 
 export interface SessionSummary {
-  /** 子代理运行快照（wire 类型由 Rust 生成；旧日志由 serde default 补齐）。 */
+  /** 子代理运行快照（wire 类型来自冻结的生成文件；旧日志由 serde default 补齐）。 */
   subagent?: SubagentDescriptor
   id: string
   created_at: number
@@ -285,7 +285,7 @@ export interface SessionSummary {
 }
 
 /**
- * 全会话累计统计(服务端对整份日志的投影,见 Rust `denia_session::SessionTotals`)。
+ * 全会话累计统计(服务端对整份日志的投影,见 `electron/src/session/store.ts` 的 `SessionTotals`)。
  *
  * 分页只给窗口,窗口里没有早期轮次 —— 状态栏的轮次/耗时/token 用它当基准,
  * 再叠加实时帧,刷新/翻页/长会话裁剪才不会让累计数字缩水。

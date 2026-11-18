@@ -110,9 +110,24 @@ const folded = singleEdit(
   'edit',
   JSON.stringify({ path: 'a.ts', old_string: Array.from({ length: 60 }, (_, k) => `line${k}`).join('\n'), new_string: long() }),
 )
-check('折叠后行数', folded.lines.length, 7)
-check('折叠占位行', folded.lines[3].fold, true)
-check('折叠计数', folded.skipped, 60 - 6 + 1) // 含新增的一行,diff 总长 61
+check('hunk 行数', folded.lines.length, 10)
+check('hunk 首段折叠可展开', folded.lines[0].fold, true)
+check('hunk 首段保留未改动行', folded.lines[0].hidden.length, 27)
+check('hunk 改动行可见', [fmt(folded).includes('del:line30:31/'), fmt(folded).includes('add:LINE30:/31')], [true, true])
+check('hunk 尾段折叠', folded.lines.at(-1).fold, true)
+check('hunk 折叠总数', folded.skipped, 53)
+
+/* 多处相隔较远的改动:各自成 hunk,中间未改动段单独折叠。 */
+const spread = singleEdit(
+  'edit',
+  JSON.stringify({
+    path: 'a.ts',
+    old_string: Array.from({ length: 100 }, (_, k) => `line${k}`).join('\n'),
+    new_string: Array.from({ length: 100 }, (_, k) => (k === 10 ? 'A' : k === 80 ? 'B' : `line${k}`)).join('\n'),
+  }),
+)
+check('多 hunk 段数', spread.lines.filter((line) => line.fold).length, 3)
+check('多 hunk 两处改动都可见', [fmt(spread).includes('add:A:/11'), fmt(spread).includes('add:B:/81')], [true, true])
 
 /* 8) 非 edit 工具不产 diff;缺字段返回 null。 */
 check('非 edit 返回 null', singleEdit('bash', args), null)
@@ -147,6 +162,15 @@ check('write 对齐行序列', fmt(overwrite), [
   'add:d:/4',
 ])
 check('write 空内容', mod.writeDiff('write_file', JSON.stringify({ path: 'a.ts', content: '' })).added, 0)
+const bigWrite = mod.writeDiff(
+  'write_file',
+  JSON.stringify({
+    path: 'big.ts',
+    content: Array.from({ length: 120 }, (_, k) => `export const v${k} = ${k}`).join('\n'),
+  }),
+)
+check('write 大文件不折叠', bigWrite.skipped, 0)
+check('write 大文件完整展示', bigWrite.lines.length, 120)
 check('write 非 write 工具', mod.writeDiff('edit', args), null)
 
 /* ---- todo_write ---- */

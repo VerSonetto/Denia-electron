@@ -196,7 +196,7 @@ export function usePermissions({
   // agent preset(预设):名册来自服务端;当前值优先取用户在新会话页的选择,
   // 其次取会话摘要里记的预设(列表接口携带),最后落到部署默认值。
   // 会话一旦产出内容就没有改选入口——选择器只长在新会话页那一行。
-  // 能力探测:Electron 宿主提供「自动审批」档位,Rust 宿主没有。
+  // 能力探测:宿主未提供 catalog 时隐藏「自动审批」档位。
   const [showApproveForMe, setShowApproveForMe] = useState(false)
   useEffect(() => {
     let alive = true

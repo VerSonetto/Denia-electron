@@ -1,13 +1,28 @@
-import { memo } from 'react'
+import { memo, useEffect, useState, type ReactNode } from 'react'
 import { t } from '../i18n'
-import type { EditDiff } from '../toolDisplay'
+import type { DiffLine, EditDiff } from '../toolDisplay'
+
+/** 普通 diff 行;折叠段展开后也复用它。 */
+function DiffLineRow({ line }: { line: DiffLine }) {
+  return (
+    <div className={`diff-line ${line.kind}`}>
+      <span className="diff-gutter">{line.oldNo ?? ''}</span>
+      <span className="diff-gutter">{line.newNo ?? ''}</span>
+      <span className="diff-sign">
+        {line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}
+      </span>
+      <span className="diff-text">{line.text === '' ? ' ' : line.text}</span>
+    </div>
+  )
+}
 
 /**
- * edit 工具的行级 diff 卡片:行号双列(旧/新)+ 符号列 + 正文。
+ * edit / write_file 的行级 diff 卡片。
  *
- * 纯展示组件(无状态),memo 化后流式帧不会带着它重渲染;折叠区只渲染
- * 一行占位,超长编辑也不会在工具行里挂一整屏。多处编辑一组多张卡,
- * `hidePath` 隐藏重复的文件名(路径已在外层展示过一次)。
+ * 长 diff 不再保留"文件头 + 文件尾"再挖掉中间:那样改动落在中段时,
+ * 展开后反而看不到改了什么。这里按 hunk 折叠**未改动**的行 —— 每处
+ * 增删都保留前后上下文,远端未改动段变成一条可点击展开的折叠带。
+ * 展开/收起是卡片局部状态,不会让整条对话重新计算。
  */
 export const DiffCard = memo(function DiffCard({
   diff,
@@ -19,6 +34,69 @@ export const DiffCard = memo(function DiffCard({
   // 藏路径的多 hunk 组里,首行锚点为 1 且无增删时头部没有任何内容,
   // 整条不渲染,避免留一条空带。
   const showHead = !hidePath || diff.startLine > 1 || diff.added > 0 || diff.removed > 0
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set())
+
+  // 结果更新(diff 引用变化)时折叠所有段,避免旧的展开下标落到新折叠带上。
+  useEffect(() => {
+    setExpanded((current) => (current.size === 0 ? current : new Set()))
+  }, [diff])
+
+  const toggle = (index: number) => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(index)) next.delete(index)
+      else next.add(index)
+      return next
+    })
+  }
+
+  const rows: ReactNode[] = []
+  diff.lines.forEach((line, index) => {
+    if (!line.fold) {
+      rows.push(<DiffLineRow key={index} line={line} />)
+      return
+    }
+    const hidden = line.hidden ?? []
+    if (expanded.has(index)) {
+      // 收起带留在原折叠位置,展开的行接在它后面:视线落点不跳。
+      rows.push(
+        <button
+          type="button"
+          key={`${index}-collapse`}
+          className="diff-line fold expanded"
+          aria-expanded="true"
+          onClick={() => toggle(index)}
+        >
+          <span className="diff-gutter">⋯</span>
+          <span className="diff-text">{t('diffCollapse')}</span>
+        </button>,
+      )
+      hidden.forEach((inner, innerIndex) => {
+        rows.push(<DiffLineRow key={`${index}-${innerIndex}`} line={inner} />)
+      })
+      return
+    }
+    const count = hidden.length
+    const from = line.oldNo
+    const label =
+      from === undefined
+        ? t('diffFolded', { n: count })
+        : t('diffFoldRange', { from, to: from + count - 1, n: count })
+    rows.push(
+      <button
+        type="button"
+        key={index}
+        className="diff-line fold"
+        aria-expanded="false"
+        onClick={() => toggle(index)}
+      >
+        <span className="diff-gutter">⋯</span>
+        <span className="diff-text">{label}</span>
+        <span className="diff-fold-action">{t('diffExpand')}</span>
+      </button>,
+    )
+  })
+
   return (
     <div className="diff-card">
       {showHead && (
@@ -34,25 +112,7 @@ export const DiffCard = memo(function DiffCard({
           <DiffStat added={diff.added} removed={diff.removed} />
         </div>
       )}
-      <div className="diff-body">
-        {diff.lines.map((line, index) =>
-          line.fold ? (
-            <div className="diff-line fold" key={index}>
-              <span className="diff-gutter">⋯</span>
-              <span className="diff-text">{t('diffFolded', { n: diff.skipped })}</span>
-            </div>
-          ) : (
-            <div className={`diff-line ${line.kind}`} key={index}>
-              <span className="diff-gutter">{line.oldNo ?? ''}</span>
-              <span className="diff-gutter">{line.newNo ?? ''}</span>
-              <span className="diff-sign">
-                {line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ''}
-              </span>
-              <span className="diff-text">{line.text === '' ? ' ' : line.text}</span>
-            </div>
-          ),
-        )}
-      </div>
+      <div className="diff-body">{rows}</div>
     </div>
   )
 })

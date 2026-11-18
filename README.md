@@ -1,93 +1,72 @@
 # Denia
 
-Rust agent runtime with a React console and an optional Tauri desktop host.
+Electron + TypeScript 的本地 agent 桌面端，复用 `web/` 的 React 控制台。
+宿主在进程内启动 HTTP/SSE 服务，窗口加载 `http://127.0.0.1:<port>`；前端只通过
+相对 `/api` 与事件流通信，构建产物由宿主同源提供。
 
-## Architecture
+## 目录
 
-- `core`: domain records, JSON wire types, event projection.
-- `agent-loop`: turn/step orchestration, provider retries, tool dispatch and compaction.
-- `llm`, `tools`, `browser`, `mcp`, `terminal`: capability adapters.
-- `session`: JSONL storage, recovery, history, projections and indexing in separate modules.
-- `settings`, `credentials`: layered configuration and credential resolution.
-- `server/application`: prompt admission and business orchestration.
-- `server/infrastructure`: shared filesystem adapters.
-- `server/api`: HTTP parameter and response translation.
-- `server/state` and `host`: composition, resource lifecycle and listener setup.
-- `desktop`: Tauri host using the same server startup path.
-- `web/src/features/conversation`: conversation state helpers and composer hooks.
+- `electron/`：主进程、HTTP/SSE 宿主、agent loop、工具、MCP、子代理、
+  浏览器、会话存储与桌面打包
+- `web/`：React 控制台；Vite 开发服务器把 `/api` 代理到本地宿主
+- `scripts/`：本地检查与联调脚本
 
-Both listeners use the same authentication gate. Local clients retain direct access;
-remote clients need the configured remote session. Model tools follow the session's
-permission mode: read-only, auto-edit, plan or full.
+权威的宿主说明、能力范围与目录细节见 [electron/README.md](electron/README.md)。
+远程访问与移动端接入的接口契约见
+[electron/REMOTE-ACCESS.md](electron/REMOTE-ACCESS.md)。
 
-## Development
+## 开发
 
-`cargo run -p denia-server` serves the console at http://127.0.0.1:43654.
-Run `pnpm dev` inside `web` for the Vite development server.
+要求 Node.js 22+。
 
-State lives under `DENIA_HOME`, defaulting to `~/.denia`. A running host holds an
-OS lock on its data directory. Use a separate `--home` / `DESKTOP_HOME` when
-running an additional development or desktop instance; multiple browser clients
-can use one server normally.
+```bash
+cd electron
+npm install
+npm run dev        # 启动宿主 + Vite HMR + Electron，前端改动即时生效
+```
 
-Console compaction, microcompaction, prompt-cache warming and tool concurrency
-settings are resolved when each turn begins. An active turn keeps a consistent
-configuration snapshot; the next turn reads saved changes immediately. Cache
-warming is off by default: `console.cacheWarming` selects `off`, `streaming`
-(only while a turn runs) or `idle` (also after it settles), and
-`console.cacheWarmTtlSeconds` sets the provider lifetime it targets. Compaction
-circuit breakers belong to their session and are released when that session
-leaves the runtime cache. Settings writes publish their value and revision only
-after persistence succeeds.
+`npm run dev` 会自行在 `127.0.0.1:5173` 启动 Vite，并让 Electron 直接加载它；
+`DENIA_VITE_PORT` 可换端口，已有前端地址时可用 `DENIA_WEB_URL` 跳过内置 Vite。
 
-Sessions are append-only JSONL logs under `sessions/<id>/session.jsonl`. Loading
-repairs partial tails and closes orphaned turns. After an I/O failure the log
-writer stops; reloading repairs any partial tail before further writes.
+只跑宿主（不启动 Electron，适合浏览器联调）：
 
-## Build and verification
+```bash
+cd electron
+node scripts/serve.ts
+```
 
-- `pwsh scripts/check.ps1`: Rust format, Clippy correctness/suspicious checks,
-  generated protocol freshness, all Rust tests, frontend tests/types and build.
-- `pwsh scripts/check.ps1 -SkipBuild`: the same checks without the Vite build.
-- `pnpm check` in `web`: every frontend regression suite, including memory tests.
-- `pnpm typecheck`: TypeScript verification.
-- `pnpm build`: the same frontend test inventory, type checking and Vite build.
-- `scripts/build.ps1 -NoRun` or `scripts/build.sh`: install the CLI.
-- `pwsh scripts/desktop.ps1`: build the desktop app (Vite console, precompressed
-  assets, Tauri shell). Add `-Bundle` for the NSIS installer, `-Check` to run the
-  frontend regression suites first, and `-Fast` for an unoptimized iteration
-  build (cgu=16, no LTO, separate `target/fast`) that is not for release.
+前端单独开发（需要另开宿主）：
 
-Windows CI uses the same verification script. Browser/network integration tests
-that require external dependencies remain explicitly ignored by default.
+```bash
+cd web
+pnpm install
+pnpm dev           # http://127.0.0.1:5173
+```
 
-Shared event and request types come from Rust/serde. Regenerate after changing
-those records with:
+宿主默认监听 `127.0.0.1:43655`，Vite 默认把 `/api` 代理到同一端口；
+可用 `DENIA_API_URL` 覆盖。`DENIA_HOME` 默认为 `~/.denia`，会话、设置、凭据、
+项目记录与记忆都存放在这里。
 
-`cargo run -p denia-core --features bindings --example bindings`
+## 检查与构建
 
-The bindings feature is optional and adds no dependency to ordinary core builds.
-The generator's `--check` mode verifies committed TypeScript is current.
+```bash
+powershell -NoProfile -File scripts/check.ps1             # Electron 类型检查 + 测试；前端测试 + 类型检查 + 构建
+powershell -NoProfile -File scripts/check.ps1 -SkipBuild  # 跳过前端构建
+```
 
-## Desktop releases
+Windows 安装包：
 
-The **Desktop release** GitHub Actions workflow runs only through **Actions →
-Desktop release → Run workflow**. Select the source branch, optionally enter a
-new tag (for example `v0.1.0`), and choose whether to mark it as a prerelease.
-With no tag, it generates `desktop-<run number>-<attempt>`. Existing tags are
-rejected to avoid replacing published builds.
+```bash
+cd web
+pnpm build                          # 测试、类型检查、Vite 构建与预压缩
+cd ../electron
+npm run dist                        # esbuild 打包宿主 + NSIS 安装器
+```
 
-It tests and builds the frontend, embeds it into the Windows x64 desktop binary,
-and publishes two executables plus `SHA256SUMS.txt` to GitHub Releases:
-a standalone `Denia-<tag>-windows-x64.exe` to run directly, and a
-`Denia-<tag>-windows-x64-setup.exe` installer that installs for the current user.
-Release creation targets the exact selected commit. No signing secrets are
-required; both executables are unsigned. The installer downloads WebView2 when
-missing, while standalone users must install Microsoft Edge WebView2 Runtime
-themselves. Pushing commits or tags does not trigger this workflow.
+产物在 `electron/release/Denia-v<version>-windows-x64-setup.exe`。
+发布流程见 `.github/workflows/electron-release.yml`：手动 dispatch，或推送与
+`electron/package.json` 版本一致的 `v*` 标签。
 
-## Test gateway
-
-`node scripts/mock-gateway.mjs` starts a local OpenAI-compatible gateway on
-port 8788. Register its `http://127.0.0.1:8788/v1` endpoint to exercise the agent
-loop without a provider key.
+测试网关：`node scripts/mock-gateway.mjs` 在 `127.0.0.1:8788` 提供 OpenAI
+兼容接口，注册 `http://127.0.0.1:8788/v1` 即可在没有真实密钥的情况下跑通
+agent loop。

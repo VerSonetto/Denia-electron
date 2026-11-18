@@ -42,9 +42,9 @@ Add-Event @{ seq=5; time=$now; type='step-start'; turn=1; step=1 }
 $md = @'
 ### 文件引用素材
 
-- 普通相对路径:[Cargo.toml](Cargo.toml)
-- 带 `./` 前缀:[AGENTS.md](./AGENTS.md)
-- 反斜杠形态:[fs.rs](crates\server\src\api\fs.rs)
+- 普通相对路径:[package.json](package.json)
+- 带 `./` 前缀:[package.json](./package.json)
+- 反斜杠形态:[server.ts](electron\src\host\server.ts)
 - 外部链接(应保持默认跳转):[DeepSeek](https://www.deepseek.com/)
 - 不存在的文件(应显示失败提示):[missing](does/not/exist.txt)
 '@
@@ -92,4 +92,4 @@ Write-Host "fixture session written:"
 Write-Host "  file:      $file"
 Write-Host "  session:   $Id"
 Write-Host "  cwd:       $cwd"
-Write-Host "  open at:   http://127.0.0.1:3601/#s=$Id"
+Write-Host "  open at:   http://127.0.0.1:43655/#s=$Id"

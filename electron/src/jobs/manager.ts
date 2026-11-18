@@ -140,6 +140,7 @@ export class JobManager {
       child = spawn(shell.file, [...shell.args, input.command], {
         cwd: input.cwd,
         windowsHide: true,
+        windowsVerbatimArguments: shell.verbatim,
         detached: process.platform !== 'win32',
         env: { ...process.env },
       })

@@ -1,4 +1,3 @@
-/target
 /web/node_modules
 /web/dist
 *.log
@@ -6,11 +5,6 @@
 .DS_Store
 *.tsbuildinfo
 /.zcode
-/denia_develop.exe
-
-# tauri-build 编译期生成的 ACL capability schema(见 tauri-utils
-# acl::schema::generate_capability_schema),不是源码,随 capabilities/ 变化重生成。
-/crates/desktop/gen/
 
 # 一次性 esbuild 调试打包产物(由 web/scripts/make-bundle.mjs 生成)
 /web/scripts/app-bundle.mjs
@@ -26,11 +20,6 @@
 
 /mail_page.html
 /register_page.js
-
-# 整个 scripts/ 目录不入库(构建/验证脚本按本地约定维护)。
-# 目录内 17 个文件此前已被 git 追踪,ignore 规则对已追踪文件无效,
-# 已用 `git rm -r --cached scripts/` 解除追踪;磁盘文件保留在本地。
-/scripts/
 
 # WorkBuddy 工具数据目录(记忆与概念稿,不入库)
 /.workbuddy/
@@ -59,11 +48,8 @@
 # 上游 ZCode 参考克隆(嵌套 git 仓库,不入库)
 /ZCode/
 
-# 本地桌面发布产物(每次构建重新生成,不入库)
+# 发布工作流在仓库根暂存的产物(每次构建重新生成,不入库)
 /release/
-/denia-desktop.exe
-/denia-desktop.old.exe
-/uninstall.exe
 
 # 上游参考克隆(第三方项目源码,仅本地对照,不入库)
 /_hermes-src/
@@ -83,3 +69,4 @@
 /electron/main.js
 /electron/main.js.map
 .openbitfun/
+.local/agent-work/

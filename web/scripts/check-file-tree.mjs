@@ -11,7 +11,7 @@
  *   整棵树重来 —— 这些是"发了几个请求"级别的断言,只有真挂载才看得到。
  *
  * 组件部分 stub 掉 `fetch`:它守的是"什么时候发请求、请求哪个目录",
- * 不是后端行为(后端由 `cargo test` 的 `tree_tests` 覆盖)。
+ * 不是后端行为(后端由 `electron/test` 的宿主测试覆盖)。
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'

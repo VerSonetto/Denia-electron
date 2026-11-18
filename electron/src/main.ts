@@ -20,7 +20,7 @@ app.setAppUserModelId('dev.denia.app')
 const WINDOW_TITLE = 'Denia'
 const WINDOW_SIZE = { width: 1280, height: 860 }
 const MIN_SIZE = { width: 720, height: 480 }
-/** The Electron build listens on its own port; the Rust instance owns 43654. */
+/** The Electron host owns 43655; DENIA_PORT overrides it. */
 const DEFAULT_PORT = 43655
 const PRELOAD = path.join(import.meta.dirname, 'preload.cjs')
 /** 自然时长:书写动画约 1.1s + 墨点落款约 0.7s;host 更快时也要等它播完再导航。 */

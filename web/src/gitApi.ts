@@ -1,7 +1,7 @@
 /**
  * 审查面板的 API 客户端:Git 状态与单文件 Diff。
  *
- * 后端直接调 `git` 可执行文件(理由见 `crates/server/src/api/git.rs`),
+ * 后端直接调 `git` 可执行文件(理由见 `electron/src/host/git.ts`),
  * 所以这里的形状就是 git 输出的结构化版本。
  */
 

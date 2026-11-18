@@ -8,7 +8,7 @@
 // # 背景
 //
 // OpenAI 系协议(含 DeepSeek 官方)的 `prompt_tokens` 是**含缓存的总量**,
-// 但 `crates/llm/src/wire.rs` 的映射曾把它原样塞进 `input_tokens`,违反了下游
+// 但旧版 Rust 的 wire 映射曾把它原样塞进 `input_tokens`,违反了下游
 // 共同假设的"input 只含未缓存部分"。后果是前端命中率公式
 // `cache / (input + cache)` 把缓存算了两遍,99% 显示成 49%。
 //

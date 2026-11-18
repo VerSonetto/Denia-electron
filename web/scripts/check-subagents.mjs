@@ -288,7 +288,8 @@ for (const needle of [
 assert('RuntimePanel 不展示快照摘要', !runtimePanel.includes("t('runtimeSnapshot')"))
 const sessionsPage = read('web/src/pages/SessionsPage.tsx')
 assert('子会话横幅使用共享的身份摘要', sessionsPage.includes('subagentSnapshotText'))
-assert('子会话横幅渲染摘要', sessionsPage.includes('child-snapshot'))
+const childBanner = read('web/src/components/ChildSubagentBanner.tsx')
+assert('子会话横幅渲染摘要', childBanner.includes('child-snapshot'))
 
 assert(
   '编辑器删掉按能力猜的只读兼容字段',

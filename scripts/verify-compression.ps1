@@ -10,9 +10,9 @@
 # 三类,取 content-encoding 要走 content.Headers,脚本里容易写错;curl 直接看线上原文。
 #
 #   pwsh scripts/verify-compression.ps1
-#   BASE=http://127.0.0.1:3600 pwsh scripts/verify-compression.ps1
+#   BASE=http://127.0.0.1:43655 pwsh scripts/verify-compression.ps1
 $ErrorActionPreference = 'Continue'
-$Base = if ($env:BASE) { $env:BASE } else { 'http://127.0.0.1:3601' }
+$Base = if ($env:BASE) { $env:BASE } else { 'http://127.0.0.1:43655' }
 $Out = Join-Path $env:TEMP 'denia-verify-body.bin'
 $Head = Join-Path $env:TEMP 'denia-verify-head.txt'
 $script:fail = 0

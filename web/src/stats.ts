@@ -117,7 +117,7 @@ export function deriveStats(nodes: TranscriptNode[]): SessionStats {
  * 上表 `deriveStats` 折的是**当前加载窗口**里的节点;窗口被首屏分页(尾部
  * N 条)、重连重快照、长会话实时裁剪(>600 条丢旧轮次)截断后,累计值就会
  * 缩水 —— 用户看到"耗时/轮次/token 忽大忽小"。所以累计字段改由服务端对
- * 整份日志投影(`SessionTotals`,见 Rust `denia_session::SessionTotals`),
+ * 整份日志投影(`SessionTotals`,见 `electron/src/session/store.ts`),
  * 这里只维护"快照之后新到达的事件"那一小段增量;规则与 `deriveStats`
  * 及服务端投影逐项一致,三处口径必须同步改。
  *
@@ -219,8 +219,8 @@ export function formatTokens(count: number): string {
  * 注意:这个公式只有在 `input_tokens` 确实是"未缓存"时才成立。曾经
  * OpenAI 系协议的映射漏了减法(`prompt_tokens` 是含缓存的总量),导致
  * `input_tokens` 变成总 prompt,于是这里的加法把分母算成了近两倍,
- * 命中率显示成真值的一半。口径的归一在 `crates/llm/src/wire.rs` 的
- * `map_usage`;那边有回归用例 `both_wire_flavors_normalize_to_uncached_input`。
+ * 命中率显示成真值的一半。口径的归一在 `electron/src/llm/normalize.ts` 的
+ * 用量映射;那边有回归用例覆盖两种 wire 口径。
  * 无任何计费输入返回 null。
  */
 export function cacheHitPercent(inputTokens: number, cacheReadTokens: number): string | null {

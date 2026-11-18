@@ -241,7 +241,7 @@ function blockKindOf(blockType: BlockType): UiBlock['kind'] {
  * 为什么必须有:流式帧的 `index` 是提供方给的,不是我们数出来的。三条真实
  * 路径都会让它超过已开块数——
  * 1. 非规范网关:缺 index 的 tool-call 帧由后端"尽力归位"推算
- *    (`crates/llm/src/wire.rs` 的 `resolve_wire_index`);
+ *    (`electron/src/llm/stream-assembler.ts` 的块归位逻辑);
  * 2. 网络错误重试:模型从头重新生成,重发低位 index 之后又续上高位;
  * 3. 前端节点被重建:`assistant-chunk` 是 transient 事件,不进快照也不进
  *    分页窗口(`store.rs::read_page` 按 `is_transient_event` 过滤),断流
@@ -1334,8 +1334,8 @@ export function groupProcessNodes(nodes: TranscriptNode[]): Array<NodeRow | Proc
  * 三段信息是一张卡片的全部事实,缺一段都会让人回头去翻工具行:
  * - `kind` 决定标题说"新建"还是"编辑"(先建后改的文件按新建计);
  * - `added`/`removed` 是本轮累计行数,跨多次编辑累加;
- * - `diffs` 是本轮各次调用的行级 diff(已各自折叠到 40 行内),供悬停预览
- *   与单文件内联展示复用 —— 不用二次解析,也不用再拉一次 diff。
+ * - `diffs` 是本轮各次调用的行级 diff(已按改动切 hunk、折叠未改动段),供
+ *   悬停预览与单文件内联展示复用 —— 不用二次解析,也不用再拉一次 diff。
  */
 export interface TurnProducedFile {
   /** 工具参数里的原始路径(相对 cwd 或绝对,原样保留)。 */

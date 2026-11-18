@@ -1,41 +1,47 @@
 import { useComposerPersistence } from '../features/conversation/useComposerPersistence'
+import { useComposerAttachments } from '../features/conversation/useComposerAttachments'
 import { useInputHistory } from '../features/conversation/useInputHistory'
 import { saveComposer, type ComposerSnapshot } from '../composerMemory'
 import { useSessionContext } from '../features/conversation/useSessionContext'
 import { useComposerMentions } from '../features/conversation/useComposerMentions';
 import { useComposerSlash } from '../features/conversation/useComposerSlash';
-import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, latestRequestSelection, queuedPayload, type OutgoingPayload } from '../features/conversation/sessionState';
-import { readSessionModel, rememberSessionModel } from '../features/conversation/sessionModelMemory';
+import { queuedPayload, type OutgoingPayload } from '../features/conversation/sessionState';
 import { usePermissions } from '../features/conversation/usePermissions';
 import { usePromptOptimize } from '../features/conversation/usePromptOptimize';
+import { usePromptKeyboard } from '../features/conversation/usePromptKeyboard';
 import { useMessageQueue, type PostMessageFn } from '../features/conversation/useMessageQueue';
 import { peekQueueDefaultAction } from '../features/conversation/queueDefaults';
+import { useSessionGoal } from '../features/conversation/useSessionGoal';
+import { useSessionModelSelection } from '../features/conversation/useSessionModelSelection';
+import { useSessionRuntime } from '../features/conversation/useSessionRuntime';
+import { useSessionRewind } from '../features/conversation/useSessionRewind';
+import { useSessionTranscriptStats } from '../features/conversation/useSessionTranscriptStats';
 import { SessionHeader, HeroProjectRow } from '../components/SessionHeader';
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react';
 import * as api from '../api';
 import { flushSync } from 'react-dom'
 
 import { addSessionLocal, ensureSession, getActiveProject, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useProjects, useSessions } from '../appStore';
 import { t } from '../i18n';
-import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
+import { ensureFollowing } from '../sessionStreams';
 import { subagentModelLabel, subagentSnapshotFacts, subagentSnapshotText } from '../sessionDisplay';
-import { openTurnStartedAt, type TranscriptNode } from '../fold';
+import type { TranscriptNode } from '../fold';
 import type { TrajectoryQuote } from '../trajectory';
 import { SessionView } from '../components/SessionView';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { StatsBar } from '../components/StatsBar';
-import { ComposerModelMenu } from '../components/ComposerModelMenu';
-import { ComposerContextMenu } from '../components/ComposerContextMenu';
+import { ComposerAttachments } from '../components/ComposerAttachments';
+import { ComposerEditor } from '../components/ComposerEditor';
+import { ComposerMenus } from '../components/ComposerMenus';
+import { ComposerToolbar } from '../components/ComposerToolbar';
+import { ChildSubagentBanner } from '../components/ChildSubagentBanner';
+import { RewindDialog } from '../components/RewindDialog';
 import { buildSessionContextQuote, validateContextQuotes } from '../features/conversation/composerContext';
-import { ComposerEffortControl } from '../components/ComposerEffortControl';
-import { PermissionSelector } from '../components/PermissionSelector';
 import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { PlanPreviewPanel } from '../components/PlanPreviewPanel';
 import { ApprovalDialog } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { ContextRing } from '../components/ContextRing';
-import { IconBranch, IconArrowDown, IconClose, IconFile, IconFolder, IconPanelOpen, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
-import { resolveSessionReasoningEffort } from '../modelCatalog';
+import { IconArrowDown, IconPanelOpen } from '../components/icons';
 import { useFollow } from '../streaming/useFollow';
 import { SmoothStreamContext } from '../streaming/pressure';
 import { useContainedWheel } from '../hooks/useContainedWheel';
@@ -43,16 +49,12 @@ import { useContainedWheel } from '../hooks/useContainedWheel';
 import { collectSkillTokens, parseLeadingCommand } from './slash';
 import { insertFileChip, selectionOffsetsIn, serializeEditor, setCaretOffset, syncEmptyMark } from './editor';
 import { REFERENCE_MIME } from '../fileTree';
-import { applyTotalsEvent, emptyTotals, formatTokens, resetTotals, totalsFromPage, type TotalsAccumulator } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
 import { RuntimePanel } from '../components/RuntimePanel';
-import type { SessionEnvelope } from '../types';
 import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
-import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, QueuedMessage, SessionSummary, SessionTotals, TodoItem, UserMessageImage, ProjectRecord } from '../types';
-import { isGenericImageName } from '../userImages';
-import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
+import type { AskAnswer, PendingAttachment, QueuedMessage, SessionSummary, UserMessageImage, ProjectRecord } from '../types';
 
 export default function SessionsPage({
   activeId,
@@ -118,6 +120,14 @@ export default function SessionsPage({
     () => subagentModelLabel(activeSession?.subagent),
     [activeSession?.subagent],
   )
+  const {
+    catalog,
+    selection,
+    applySelection,
+    effortLevels,
+    activeEffort,
+    ensureVision,
+  } = useSessionModelSelection({ activeId, catalogTick, activeSessionRef })
 
   // 运行状态直接订阅引擎(侧栏/状态栏同源)。
   const running = useRunningFor(activeId)
@@ -126,10 +136,7 @@ export default function SessionsPage({
   const runningRef = useRef(running)
   runningRef.current = running
 
-  const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
-  const catalogRef = useRef<ModelCatalog | null>(null)
   const [prompt, setPrompt] = useState('')
-  const [selection, setSelection] = useState<ModelSelection | null>(null)
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [sending, setSending] = useState(false)
   const [planPreviewDismissed, setPlanPreviewDismissed] = useState(false)
@@ -140,15 +147,6 @@ export default function SessionsPage({
   const [pendingMessages, setPendingMessages] = useState<
     { text: string; images?: UserMessageImage[] }[]
   >([])
-  // 回退确认框状态;changes 为空时只做简单确认。
-  const [rewindReq, setRewindReq] = useState<{
-    seq: number
-    text: string
-    images?: UserMessageImage[]
-    changes: api.FileDiffEntry[]
-    removedMessages: number
-  } | null>(null)
-  const [rewindBusy, setRewindBusy] = useState(false)
   // 回退成功后递增,强制重挂载 SessionView 重新拉快照。
   const [transcriptReloadTick, setTranscriptReloadTick] = useState(0)
   /**
@@ -156,69 +154,31 @@ export default function SessionsPage({
    * 早先放在组件 useState 里,一刷新就丢 —— 而后端任务其实还在跑。
    */
   const compactingAt = useCompactingFor(activeId)
-  // 当前会话的 transcript 节点,供状态栏统计。
-  //
-  // 节流写入:流式期间 nodes 每帧都是新数组,若直接 setState,这个 2500 行的
-  // 页面(连同 composer/侧栏/统计条/对话轴)会跟着每帧重渲染一次 —— 帧内的
-  // React 工作量从"会话流子树"放大成"整页"。这里只在节拍上落一次 state
-  // (StatsBar 这类只吃统计的下游不需要 60Hz),其余时刻由 nodesRef 承载
-  // 最新值给异步逻辑(回退找节点等)读。
-  const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
-  // 状态栏累计统计:服务端对整份会话日志的投影当基准(随分页 meta 到达),
-  // 之后只叠加实时帧 —— 分页窗口里没有早期轮次,自己按窗口折叠会在刷新、
-  // 翻页、长会话实时裁剪时缩水。
-  const [sessionTotals, setSessionTotals] = useState<SessionTotals>(() => emptyTotals())
-  const totalsRef = useRef<TotalsAccumulator>({ totals: emptyTotals(), openTurns: new Map() })
-  const nodesRef = useRef<TranscriptNode[]>([])
-  const nodesThrottleRef = useRef<number | null>(null)
-  const applyNodes = useCallback((nodes: TranscriptNode[], flush = false) => {
-    nodesRef.current = nodes
-    if (flush) {
-      if (nodesThrottleRef.current !== null) {
-        window.clearTimeout(nodesThrottleRef.current)
-        nodesThrottleRef.current = null
-      }
-      setTranscriptNodes(nodes)
-      return
-    }
-    if (nodesThrottleRef.current !== null) return
-    nodesThrottleRef.current = window.setTimeout(() => {
-      nodesThrottleRef.current = null
-      setTranscriptNodes(nodesRef.current)
-    }, NODES_THROTTLE_MS)
-  }, [])
-  // 卸载时收掉待发的节拍。**必须同步把 ref 置回 null**:节拍用 ref 是否非空
-  // 当"已有待发任务"的判据,清了定时器却留着 id,后续每一次 applyNodes 都会
-  // 以为还有任务在排队而直接 return —— 统计条这类只吃 transcriptNodes 的下游
-  // 就再也不会更新。
-  //
-  // 这条路径在 StrictMode 下必现:开发模式挂载会跑一遍"挂载→卸载→挂载",
-  // 首次挂载时 SessionView 的 effect 已经用空数组调过一次 applyNodes(排了
-  // 节拍),卸载那一步把定时器清掉,于是整个会话期间状态栏不再出现。
-  useEffect(
-    () => () => {
-      if (nodesThrottleRef.current !== null) {
-        window.clearTimeout(nodesThrottleRef.current)
-        nodesThrottleRef.current = null
-      }
-    },
-    [],
-  )
-  /** 进行中轮次的起点:耗时胶囊据此实时跳动(闭合后自动归零)。 */
-  const openTurnAt = useMemo(() => openTurnStartedAt(transcriptNodes) ?? null, [transcriptNodes])
-  // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
-  const [axisAnchors, setAxisAnchors] = useState<api.SessionAnchor[]>([])
-  // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
-  const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number; behavior?: ScrollBehavior } | null>(null)
-  const [todos, setTodos] = useState<TodoItem[]>([])
-  const [runtimeEvents, setRuntimeEvents] = useState<SessionEnvelope[]>([])
-  const [runtimeCounts, setRuntimeCounts] = useState({ agents: 0, jobs: 0 })
-  const [runtimeCollapsed, setRuntimeCollapsed] = useState(false)
-  const handleRuntimeCountsChange = useCallback((counts: { agents: number; jobs: number }) => {
-    setRuntimeCounts((current) => current.agents === counts.agents && current.jobs === counts.jobs ? current : counts)
-  }, [])
-  // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
-  const [goalView, setGoalView] = useState<api.GoalView | null>(null)
+  const {
+    transcriptNodes,
+    sessionTotals,
+    openTurnAt,
+    axisAnchors,
+    setAxisAnchors,
+    axisJump,
+    setAxisJump,
+    nodesRef,
+    applyNodes,
+    clearNodes,
+    reset: resetTranscriptStats,
+  } = useSessionTranscriptStats(activeId)
+  const {
+    todos,
+    setTodos,
+    runtimeEvents,
+    setRuntimeEvents,
+    runtimeCounts,
+    runtimeCollapsed,
+    setRuntimeCollapsed,
+    handleRuntimeCountsChange,
+    reset: resetRuntime,
+  } = useSessionRuntime()
+  const { goalView, refreshGoal, goalSummaryText } = useSessionGoal(activeId)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送(状态与操作在 useMessageQueue)。
   // 会话内容视图:对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
@@ -306,52 +266,6 @@ export default function SessionsPage({
     event.dataTransfer.dropEffect = 'copy'
   }, [])
 
-  /* ---- 会话目标(goal 模式):服务端权威视图 + 事件触发的重拉 ---- */
-
-  const refreshGoal = useCallback(
-    (id: string) => {
-      api
-        .getGoal(id)
-        .then(setGoalView)
-        .catch(() => setGoalView(null))
-    },
-    [],
-  )
-
-  /** 裸 /goal 的查看结果(多行 toast)。 */
-  const goalSummaryText = (view: api.GoalView): string => {
-    const goal = view.goal
-    if (!goal) return t('goalNone')
-    const budget = goal.tokenBudget !== null
-      ? `${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)}`
-      : formatTokens(goal.tokensUsed)
-    const statusLabel =
-      goal.status === 'active'
-        ? t('goalPhaseActive')
-        : goal.status === 'paused'
-          ? t('goalPhasePaused')
-          : goal.status === 'budget-limited'
-            ? t('goalPhaseBudgetLimited')
-            : t('goalPhaseComplete')
-    return t('goalSummary', {
-      objective: goal.objective,
-      status: statusLabel,
-      budget,
-      iteration: String(goal.iteration),
-      elapsed: `${goal.timeUsedSeconds}s`,
-    })
-  }
-
-  // 会话切换:拉取当前目标;SessionView 的 onGoalTouch(goal 事件/轮次
-  // 闭合/快照)也走这里,用量与状态始终以服务端为准。
-  useEffect(() => {
-    if (!activeId) {
-      setGoalView(null)
-      return
-    }
-    refreshGoal(activeId)
-  }, [activeId, refreshGoal])
-
   // 会话切换仅复位派生视图；草稿和队列由持久化通道恢复。
   //
   // 依赖只挂 activeId —— 这是一次"换会话"的复位,不是"回调换了个引用"的
@@ -375,122 +289,13 @@ export default function SessionsPage({
     setPendingMessages([])
     sendingRef.current = false
     closeMentionRef.current()
-    nodesRef.current = []
-    setTranscriptNodes([])
-    // 累计统计先清零,等新会话的分页 meta 重新给基准;否则会短暂显示上一
-    // 会话的耗时/token。
-    totalsRef.current = { totals: emptyTotals(), openTurns: new Map() }
-    setSessionTotals(emptyTotals())
-    setAxisAnchors([])
-    setAxisJump(null)
-    setTodos([])
-    setRuntimeEvents([])
-    setRuntimeCounts({ agents: 0, jobs: 0 })
-    setRuntimeCollapsed(false)
+    resetTranscriptStats()
+    resetRuntime()
     // 新会话从顶部开始且重新吸底:复位归属,不写 DOM(scrollTop 归零)。
     resetFollowRef.current()
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
   }, [activeId])
-
-  useEffect(() => {
-    let cancelled = false
-    api
-      .getCatalog()
-      .then((next) => {
-        if (!cancelled) {
-          catalogRef.current = next
-          setCatalog(next)
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          notify('err', error instanceof Error ? error.message : String(error))
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [catalogTick])
-
-  const loadLastModel = (current: ModelCatalog): ModelSelection | null => {
-    try {
-      let raw = window.localStorage.getItem(LAST_MODEL_KEY)
-      if (!raw) {
-        // 改名 denia → Denia 前的旧 key:搬一次后清掉,用户选择不丢。
-        raw = window.localStorage.getItem(LAST_MODEL_KEY_LEGACY)
-        if (raw) {
-          window.localStorage.setItem(LAST_MODEL_KEY, raw)
-          window.localStorage.removeItem(LAST_MODEL_KEY_LEGACY)
-        }
-      }
-      if (!raw) return null
-      const parsed = JSON.parse(raw) as ModelSelection
-      const group = current.groups.find((g) => g.id === parsed.provider)
-      if (!group?.models.some((m) => m.id === parsed.model)) return null
-      return normalizeSelection(current, parsed)
-    } catch {
-      return null
-    }
-  }
-
-  /**
-   * 草稿态(还没有会话)的初始模型:上一次用过的模型(localStorage 全局记忆),
-   * 没有则目录里第一个可用模型。
-   *
-   * 只服务草稿态 —— 一旦进入某个会话,模型由那个会话决定(见下方的会话模型
-   * 恢复效应),两者不共用来源,否则所有会话会退化成共用一个模型。
-   */
-  useEffect(() => {
-    if (!catalog || selection) return
-    const initial = loadLastModel(catalog) ?? firstAvailableSelection(catalog)
-    if (initial) setSelection(normalizeSelection(catalog, initial))
-  }, [catalog, selection])
-
-  useEffect(() => {
-    if (!catalog || !selection) return
-    const valid = catalog.groups.some(
-      (g) => g.id === selection.provider && g.models.some((m) => m.id === selection.model),
-    )
-    if (!valid) {
-      const next = loadLastModel(catalog) ?? firstAvailableSelection(catalog)
-      setSelection(next ? normalizeSelection(catalog, next) : null)
-    }
-  }, [catalog, selection])
-
-  // 当前会话 id 的镜像:applySelection 写会话记忆时要用最新值。
-  const activeIdRef = useRef(activeId)
-  activeIdRef.current = activeId
-  // 已经恢复过模型的会话 id。同一会话只恢复一次,之后的重放快照与列表刷新
-  // 都不得把用户手动换的选择顶回去。
-  const restoredSelectionRef = useRef<string | null>(null)
-
-  /**
-   * 用户显式换了模型:写全局记忆(下一个新草稿的起点),并记进当前会话。
-   *
-   * 会话记忆必须在这里写:会话"刚选完模型但还没发消息"的那一段,日志里
-   * 还是上一次请求的模型,切走再切回来会被恢复成旧值 —— 用户看到的就是
-   * "切换会话把模型改掉了"。
-   */
-  const applySelection = (next: ModelSelection) => {
-    if (!catalog) return
-    const normalized = normalizeSelection(catalog, next)
-    setSelection(normalized)
-    try {
-      window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(normalized))
-    } catch {
-      /* storage unavailable */
-    }
-    rememberSessionModel(activeIdRef.current, normalized)
-    // 手动选择本身就是这个会话的正确状态,后续快照不该再改它。
-    restoredSelectionRef.current = activeIdRef.current
-  }
-
-  // 把当前模型选择同步给右侧面板的「AI 生成提交信息」(见 modelSelectionStore):
-  // 它复用同一个模型,不让用户再选一次。
-  useEffect(() => {
-    setSharedModelSelection(selection)
-  }, [selection])
 
   useEffect(() => {
     if (running && sending) {
@@ -499,16 +304,6 @@ export default function SessionsPage({
   }, [running, sending])
 
   const hasHistory = Boolean(activeSession?.excerpt)
-  // 当前模型的思考强度档位:模型没提供档位时没有可调空间,控件不渲染。
-  const effortLevels = useMemo(() => {
-    if (!catalog || !selection) return []
-    const group = catalog.groups.find((entry) => entry.id === selection.provider)
-    const model = group?.models.find((entry) => entry.id === selection.model)
-    return model?.reasoning?.efforts ?? []
-  }, [catalog, selection])
-  const activeEffort = selection
-    ? resolveSessionReasoningEffort(effortLevels, selection.reasoningEffort)
-    : undefined
   const showTranscript = Boolean(
     activeId &&
       (hasStarted ||
@@ -551,6 +346,21 @@ export default function SessionsPage({
     activeId, running, composerReadyRef, composerScope, postMessageRef, composerSnapshotRef,
     runningRef, mountedRef, applyDraft, promptRef, setPastedImages, setAttachments, setTrajQuotes,
     pastedImages, attachments, trajQuotes, setPendingMessages,
+  })
+  const { rewindReq, setRewindReq, handleRewind, confirmRewind } = useSessionRewind({
+    activeId,
+    runningRef,
+    nodesRef,
+    inputHistoryRefresh: inputHistory.refresh,
+    applyDraft,
+    setPastedImages,
+    setAttachments,
+    setQueuedMessages,
+    setPendingMessages,
+    clearNodes,
+    confirmedRef,
+    setAutoFlushSuppressed,
+    onRewound: () => setTranscriptReloadTick((tick) => tick + 1),
   })
   const composerSnapshot = useMemo<ComposerSnapshot>(() => ({
     text: prompt, images: pastedImages, attachments, quotes: trajQuotes, queue: queuedMessages,
@@ -639,145 +449,12 @@ export default function SessionsPage({
     closeSlash()
   }
 
-  // 模型选择恢复:切换会话时把编辑器上的模型切到**这个会话自己的**模型,
-  // 而不是沿用上一会话的选择。
-  //
-  // 取值优先级:
-  //   1. 会话里刚选过但还没发消息的那一次(本地记忆,见 sessionModelMemory);
-  //   2. 会话日志投影出的最后模型(服务端 last_selection,覆盖全部历史);
-  //   3. 会话摘要里带的同一份投影(列表接口,快照还没到时的兜底);
-  //   4. 都没有 → 保持当前值(空会话沿用你在别处选好的模型)。
-  //
-  // 恢复只对每个会话做一次,之后的重放快照与列表刷新都不覆盖手动选择。
-  // (权限模式同步与审批监听的那一半订阅在 usePermissions 里。)
-
-  /** 把一份候选选择落到编辑器;目录里已没有该模型时返回 false(交给上层兜底)。 */
-  const restoreSelection = useCallback((candidate: ModelSelection | null | undefined): boolean => {
-    const current = catalogRef.current
-    if (!candidate || !current) return false
-    const usable = current.groups.some(
-      (group) => group.id === candidate.provider && group.models.some((m) => m.id === candidate.model),
-    )
-    if (!usable) return false
-    setSelection(normalizeSelection(current, candidate))
-    return true
-  }, [])
-
-  // 会话切换:先用本地记忆/摘要投影立刻落一次,不必等快照往返 ——
-  // 否则切换瞬间编辑器会短暂显示上一个会话的模型。
-  //
-  // 守卫按会话 id 判等而不是"初始化为 null":效果执行顺序、目录刷新时机都
-  // 不影响正确性 —— 同一个会话只落一次,换会话自然重新落。
-  useEffect(() => {
-    if (!activeId || !catalog) return
-    if (restoredSelectionRef.current === activeId) return
-    // 摘要只在这里读一次(切换时的那一份);列表刷新(标题/时间变化)不进
-    // 依赖,否则会把用户刚换的模型顶回摘要里的旧值。
-    const remembered = readSessionModel(activeId) ?? activeSessionRef.current?.last_selection
-    if (restoreSelection(remembered)) restoredSelectionRef.current = activeId
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, catalog, restoreSelection])
-
-  useEffect(() => {
-    if (!activeId) return
-    const unsubscribe = attach(activeId, {
-      onSnapshot: (_header, events, meta) => {
-        // 累计统计以服务端全会话投影为基准(分页窗口里没有早期轮次),
-        // 未闭合轮次表用页面事件重建;之后的重连重快照同样以新基准校正。
-        totalsRef.current = resetTotals(totalsFromPage(meta?.totals), events)
-        setSessionTotals({ ...totalsRef.current.totals })
-        if (restoredSelectionRef.current !== activeId) {
-          // 目录未就绪时不消耗恢复机会,等后续自愈快照重试。
-          if (!catalogRef.current) return
-          const remembered = readSessionModel(activeId)
-          if (remembered) {
-            // 本地记忆更新(用户刚选过):它比日志新,快照不得覆盖。
-            if (restoreSelection(remembered)) restoredSelectionRef.current = activeId
-            return
-          }
-          // 快照里的 last_selection 是全会话投影;老后端没有这个字段时
-          // 退回扫描窗口里的 request-header(仅 request-context 兜底)。
-          const logged = meta?.lastSelection ?? latestRequestSelection(events)
-          if (restoreSelection(logged)) restoredSelectionRef.current = activeId
-        }
-      },
-      onEnvelope: (event) => {
-        // 累计统计的实时增量:结算/工具调用/轮次闭合才动累计值,流式帧不动。
-        if (applyTotalsEvent(totalsRef.current, event)) {
-          setSessionTotals({ ...totalsRef.current.totals })
-        }
-      },
-    })
-    return () => {
-      unsubscribe()
-    }
-  }, [activeId])
-
-  const visionModelInfo = useCallback((): CatalogModel | null => {
-    if (!catalog || !selection) return null
-    const group = catalog.groups.find((g) => g.id === selection.provider)
-    return group?.models.find((m) => m.id === selection.model) ?? null
-  }, [catalog, selection])
-
-  const modelSupportsVision = useCallback((): boolean => {
-    const model = visionModelInfo()
-    return !!model?.inputModalities?.includes('image')
-  }, [visionModelInfo])
-
-  /** 检查模型能否识图;不能时提示并返回 false(拒绝粘贴/发送)。 */
-  const ensureVision = useCallback((): boolean => {
-    if (modelSupportsVision()) return true
-    notify('err', `${t('imageNotSupportedTitle')}:${t('imageNotSupportedDesc')}`)
-    return false
-  }, [modelSupportsVision, notify])
-
-  const readFileAsDataUrl = useCallback((file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result))
-      reader.onerror = () => reject(reader.error)
-      reader.readAsDataURL(file)
-    })
-  }, [])
-
-  const handlePaste = useCallback(
-    async (event: ClipboardEvent<HTMLElement>) => {
-      if (optimizing) return
-      const items = event.clipboardData?.items
-      if (!items) return
-      const imageItems = Array.from(items).filter(
-        (item) => item.kind === 'file' && item.type.startsWith('image/'),
-      )
-      if (imageItems.length === 0) return
-      // 粘贴图片:模型必须标记为可识图,否则拒绝。
-      if (!ensureVision()) {
-        event.preventDefault()
-        return
-      }
-      event.preventDefault()
-      for (const item of imageItems) {
-        const file = item.getAsFile()
-        if (!file) continue
-        try {
-          const preview = await readFileAsDataUrl(file)
-          const comma = preview.indexOf(',')
-          setPastedImages((previous) => [
-            ...previous,
-            {
-              name: file.name || `pasted-${Date.now()}.png`,
-              mime: file.type || 'image/png',
-              data: comma >= 0 ? preview.slice(comma + 1) : preview,
-              bytes: file.size,
-              preview,
-            },
-          ])
-        } catch {
-          /* unreadable clipboard image: ignored */
-        }
-      }
-    },
-    [ensureVision, readFileAsDataUrl, optimizing],
-  )
+  const { onEditorPaste, onPickFiles } = useComposerAttachments({
+    optimizing,
+    ensureVision,
+    setPastedImages,
+    setAttachments,
+  })
 
   const onEditorCopy = (event: ClipboardEvent<HTMLDivElement>, cut = false) => {
     const editor = promptRef.current
@@ -796,38 +473,6 @@ export default function SessionsPage({
       refreshMenus()
     }
   }
-
-  /** 编辑器粘贴:图片走识图流程,其余一律降级纯文本(保持节点结构纪律)。 */
-  const onEditorPaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    const items = event.clipboardData?.items
-    if (
-      items &&
-      Array.from(items).some((item) => item.kind === 'file' && item.type.startsWith('image/'))
-    ) {
-      void handlePaste(event)
-      return
-    }
-    event.preventDefault()
-    const text = event.clipboardData?.getData('text/plain') ?? ''
-    if (text) document.execCommand('insertText', false, text)
-  }
-
-  const onPickFiles = useCallback(async () => {
-    let paths: string[]
-    try {
-      // 只取路径:不读文件内容,大文件也不会进内存或网络。
-      ({ paths } = await api.pickFiles())
-    } catch (error) {
-      notify('err', `${t('pickFilesFailed')}:${error instanceof Error ? error.message : String(error)}`)
-      return
-    }
-    if (paths.length === 0) return
-    setAttachments((previous) => [
-      ...previous,
-      // 重名只影响显示;发送用的是完整路径,不会互相覆盖。
-      ...paths.map((path) => ({ name: path.split(/[/\\]/).pop() || path, path })),
-    ])
-  }, [])
 
   // 回合启动推一把:首块内容到达前先落到底,后续由 onNodesChange 接管。
   useEffect(() => {
@@ -939,36 +584,6 @@ export default function SessionsPage({
     return () => observer.disconnect()
   }, [phase, view])
 
-  /* ---- 回退:预览文件变化 → 确认 → 物理截断 + 恢复文件 ---- */
-
-  const handleRewind = useCallback(async (seq: number) => {
-    if (!activeId || rewindBusy) return
-    const node = nodesRef.current.find(
-      (n): n is Extract<TranscriptNode, { kind: 'user' }> =>
-        n.kind === 'user' && n.anchor === seq,
-    )
-    try {
-      const [checkpointsRes, diffRes] = await Promise.all([
-        api.getCheckpoints(activeId),
-        api.getCheckpointDiff(activeId, seq),
-      ])
-      const index = checkpointsRes.checkpoints.findIndex((c) => c.seq === seq)
-      if (index < 0) {
-        notify('err', t('rewindNotFound'))
-        return
-      }
-      setRewindReq({
-        seq,
-        text: node?.text ?? checkpointsRes.checkpoints[index]?.text ?? '',
-        images: node?.images,
-        changes: diffRes.changes,
-        removedMessages: checkpointsRes.checkpoints.length - index,
-      })
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-    }
-  }, [activeId, transcriptNodes, rewindBusy])
-
   /* ---- 分支:从收尾消息分叉出全新会话并立即切换 ---- */
 
   const forkBusyRef = useRef(false)
@@ -1064,76 +679,6 @@ export default function SessionsPage({
     // navigate 实现退到单窗格,而不是清掉主会话。
     go(null, null)
   }, [go])
-
-  /* ---- 提示词优化:当前模型 + 最近 5 轮上下文,支持一键撤销(在 usePromptOptimize) ---- */
-
-  const confirmRewind = useCallback(async () => {
-    if (!activeId || !rewindReq || rewindBusy) return
-    setRewindBusy(true)
-    // 回退期间抑制队列自动发送:上面的打断会让 running 转 false,若不抑制,
-    // 队首消息会在日志即将被截断的瞬间被发出去。
-    setAutoFlushSuppressed(true)
-    try {
-      // 运行中也能回退:先替用户打断当前轮次并等它真正退出。不再要求
-      // 先手动暂停 —— 但打断必须发生在用户确认之后(取消确认框时 AI
-      // 照旧跑完,不因一次误点丢掉正在产出的回答)。
-      //
-      // cancel 幂等(没有运行中的轮次时服务端直接返回),所以不先判前端
-      // running:另一个标签页发起的轮次也能被这一步收住。
-      try {
-        await api.cancelSession(activeId)
-      } catch (error) {
-        notify('err', error instanceof Error ? error.message : String(error))
-      }
-      // cancel 是异步的:等 driver 退出 running 再回退(running 期间
-      // 后端拒绝回退,且截断日志会与正在写入的流互相踩)。
-      const deadline = Date.now() + 5000
-      while (runningRef.current && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 150))
-      }
-      if (runningRef.current) {
-        notify('err', t('rewindStopFailed'))
-        return
-      }
-      const result = await api.rewindSession(activeId, rewindReq.seq)
-      void inputHistory.refresh()
-      // 后端物理截断后事件 seq 重新编号,本页流引擎的 cursor 与 follow
-      // 连接已失真:显式重连对齐(重拉快照校正 cursor、按需重开 follow),
-      // 不依赖 SessionView 重挂载这类间接效应——否则快照竞态失败或另一
-      // 标签页回退时,新事件帧会整段落在旧 cursor 之下被静默吞掉。
-      invalidateSession(activeId)
-      // 恢复目标消息文本/图片到输入框,方便修改后重发。
-      applyDraft(result.toMessage ?? rewindReq.text)
-      if (rewindReq.images && rewindReq.images.length > 0) {
-        setPastedImages(
-          rewindReq.images.map((image) => ({
-            name: 'pasted-image.png',
-            mime: image.mime,
-            data: image.data,
-            bytes: Math.ceil((image.data.length * 3) / 4),
-            preview: `data:${image.mime};base64,${image.data}`,
-          })),
-        )
-      } else {
-        setPastedImages([])
-      }
-      setAttachments([])
-      // 时间线已截断:乐观行、确认记录与排队消息一并作废。
-      confirmedRef.current.clear()
-      setPendingMessages([])
-      setQueuedMessages([])
-      setTranscriptNodes([])
-      // 强制重挂载 SessionView,重新拉截断后的快照。
-      setTranscriptReloadTick((tick) => tick + 1)
-      notify('ok', t('rewindDone'))
-      setRewindReq(null)
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-    } finally {
-      setAutoFlushSuppressed(false)
-      setRewindBusy(false)
-    }
-  }, [activeId, rewindReq, rewindBusy])
 
   const { context } = useSessionContext(activeId)
 
@@ -1456,94 +1001,34 @@ export default function SessionsPage({
     }
   }
 
-  const onPromptKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (mentionOpen) {
-      // IME 组词阶段的按键交给输入法,不做选择/发送旁路。
-      if (composingRef.current) return
-      const count = mentionItems.length
-      if (event.key === 'ArrowDown' && count > 0) {
-        event.preventDefault()
-        setMentionActive((index) => Math.min(count - 1, index + 1))
-        return
-      }
-      if (event.key === 'ArrowUp' && count > 0) {
-        event.preventDefault()
-        setMentionActive((index) => Math.max(0, index - 1))
-        return
-      }
-      // 弹层打开时 Enter/Tab 优先选择候选,不发送。
-      if (event.key === 'Tab' || event.key === 'Enter') {
-        event.preventDefault()
-        if (mentionLoading || count === 0) return
-        const target = mentionItems[Math.min(mentionActive, count - 1)]
-        if (target) pickMention(target)
-        return
-      }
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        closeMention()
-        return
-      }
-    }
-    if (slashOpen) {
-      // IME 组词阶段的按键交给输入法,不做选择/发送旁路。
-      if (composingRef.current) return
-      const count = slashItems.length
-      if (event.key === 'ArrowDown' && count > 0) {
-        event.preventDefault()
-        setSlashActive((index) => Math.min(count - 1, index + 1))
-        return
-      }
-      if (event.key === 'ArrowUp' && count > 0) {
-        event.preventDefault()
-        setSlashActive((index) => Math.max(0, index - 1))
-        return
-      }
-      // 弹层打开时 Enter/Tab 优先选择候选,不发送。
-      if ((event.key === 'Tab' || event.key === 'Enter') && count > 0) {
-        event.preventDefault()
-        const target = slashItems[Math.min(slashActive, count - 1)]
-        if (target) pickSlash(target)
-        return
-      }
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        closeSlash()
-        return
-      }
-    }
-    // 卡片原子性(contenteditable=false)由浏览器原生保证:光标进不去、
-    // Backspace/Delete/选择删除均整卡处理,无需任何拦截。
-    if (composingRef.current || event.nativeEvent.isComposing) return
-    if (!mentionOpen && !slashOpen && !optimizing && composerReady
-      && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
-      && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-      const editor = promptRef.current
-      const range = editor ? selectionOffsetsIn(editor) : null
-      if (editor && range && range.start === range.end) {
-        const current = serializeEditor(editor)
-        const up = event.key === 'ArrowUp'
-        const boundary = up ? !current.slice(0, range.start).includes('\n') : !current.slice(range.end).includes('\n')
-        if (boundary) {
-          const text = inputHistory.navigate(up ? 'up' : 'down', current)
-          if (text !== null) {
-            event.preventDefault()
-            applyDraft(text)
-            setCaretOffset(editor, up ? 0 : text.length)
-            return
-          }
-        }
-      }
-    }
-    if (event.key !== 'Enter' || event.shiftKey) return
-    event.preventDefault()
-    if (optimizing) return
-    if (primaryStops) {
-      void stop()
-      return
-    }
-    if (!sending) void send()
-  }
+  const onPromptKeyDown = usePromptKeyboard({
+    mentionOpen,
+    composingRef,
+    mentionItems,
+    mentionLoading,
+    mentionActive,
+    setMentionActive,
+    pickMention,
+    closeMention,
+    slashOpen,
+    slashItems,
+    slashActive,
+    setSlashActive,
+    pickSlash,
+    closeSlash,
+    running,
+    stop,
+    optimizing,
+    composerReady,
+    promptRef,
+    inputHistory,
+    applyDraft,
+    promptEmpty,
+    queuedMessages,
+    interjectQueued,
+    sending,
+    send,
+  })
 
   const promptScrollRef = useContainedWheel<HTMLDivElement>()
 
@@ -1574,347 +1059,90 @@ export default function SessionsPage({
       onClick={inert ? onOpenPicker : undefined}
     >
       <ApprovalDialog request={approvalReq} onDecide={handleApproval} />
-      {showAttachRow && (
-        <div className="composer-attachments">
-          {trajQuotes.map((quote) => (
-            <span className="att-chip traj-quote-chip" key={quote.id}>
-              <IconBranch size={12} />
-              <span className="att-name" title={quote.title}>
-                {quote.title}
-              </span>
-              <button
-                type="button"
-                className="att-remove"
-                title={t('removeAttachment')}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setTrajQuotes((previous) => previous.filter((q) => q.id !== quote.id))
-                }}
-              >
-                <IconClose size={10} />
-              </button>
-            </span>
-          ))}
-          {pastedImages.map((image, index) => (
-            <div className="composer-image-thumb" key={`img-${index}`}>
-              <img src={image.preview} alt="" />
-              {!isGenericImageName(image.name) && (
-                <span className="composer-image-label" title={image.name}>
-                  {image.name}
-                </span>
-              )}
-              <button
-                type="button"
-                className="composer-image-remove"
-                title={t('removeAttachment')}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setPastedImages((previous) => previous.filter((_, i) => i !== index))
-                }}
-              >
-                <IconClose size={10} />
-              </button>
-            </div>
-          ))}
-          {attachments.map((attachment, index) => (
-            <span className="att-chip" key={`att-${index}`}>
-              <IconFile size={12} />
-              <span className="att-name" title={attachment.path}>{attachment.name}</span>
-              <button
-                type="button"
-                className="att-remove"
-                title={t('removeAttachment')}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  setAttachments((previous) => previous.filter((_, i) => i !== index))
-                }}
-              >
-                <IconClose size={10} />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="prompt-scroll" ref={promptScrollRef} data-placeholder={placeholderText}>
-        <div
-          ref={promptRef}
-          className="prompt-editor"
-          contentEditable={!inert && !optimizing && composerReady}
-          suppressContentEditableWarning
-          role="textbox"
-          aria-multiline="true"
-          aria-autocomplete="list"
-          aria-controls={mentionOpen ? 'file-mention-results' : undefined}
-          aria-activedescendant={mentionOpen && !mentionLoading && mentionItems.length > 0 ? `file-mention-option-${mentionActive}` : undefined}
-          aria-label={inert ? t('heroChooseProject') : t('chatPlaceholder')}
-          aria-readonly={inert || optimizing || !composerReady}
-          spellCheck={false}
-          onInput={() => {
-            // DOM 是草稿事实源:同步 prompt 镜像 + 触发检测(IME 组词期间
-            // 只同步状态,不刷新弹层)。删空后浏览器会补一个占位 <br>,
-            // 占位提示的显隐交给 syncEmptyMark(serializeEditor 把 <br>
-            // 读成换行,只看字符串会让提示消失)。
-            const el = promptRef.current
-            if (!el) return
-            const text = serializeEditor(el)
-            syncEmptyMark(el)
-            onDraftChange(text)
-            syncPromptHeight()
-            if (!composingRef.current) refreshMenus()
-          }}
-          onCompositionStart={() => {
-            composingRef.current = true
-          }}
-          onCompositionEnd={() => {
-            composingRef.current = false
-            const el = promptRef.current
-            if (el) {
-              syncEmptyMark(el)
-              onDraftChange(serializeEditor(el))
-            }
-            refreshMenus()
-          }}
-          onCopy={onEditorCopy}
-          onCut={(event) => onEditorCopy(event, true)}
-          onPaste={onEditorPaste}
-          onDragOver={onEditorDragOver}
-          onDrop={onEditorDrop}
-          onFocus={() => {
-            if (inert) onOpenPicker()
-          }}
-          onKeyDown={onPromptKeyDown}
-        />
-      </div>
-      {mentionOpen && (
-        <>
-          <div className="menu-backdrop" onClick={closeMention} />
-          <div
-            className="mention-menu"
-            id="file-mention-results"
-            role="listbox"
-            aria-busy={mentionLoading}
-            aria-label={t('mentionAria')}
-            ref={mentionMenuRef}
-          >
-            <div className="mention-menu-heading">{t('mentionSearchHint')}</div>
-            {mentionLoading ? (
-              <div className="mention-menu-empty">
-                <IconSpinner size={12} />
-                {t('mentionLoading')}
-              </div>
-            ) : mentionItems.length === 0 ? (
-              <div className="mention-menu-empty">
-                {mentionQuery ? t('mentionEmpty') : t('mentionEmptyQuery')}
-              </div>
-            ) : (
-              mentionItems.map((item, index) => {
-                const active = index === mentionActive
-                const directory = item.kind === 'directory'
-                const slash = item.path.lastIndexOf('/')
-                const name = slash >= 0 ? item.path.slice(slash + 1) : item.path
-                const parent = slash >= 0 ? item.path.slice(0, slash + 1) : ''
-                return (
-                  <button
-                    key={`${item.kind}:${item.path}`}
-                    id={`file-mention-option-${index}`}
-                    title={item.path}
-                    type="button"
-                    role="option"
-                    aria-selected={active}
-                    data-kb={active || undefined}
-                    className={`mention-menu-item${active ? ' kb' : ''}`}
-                    onMouseDown={(mouseEvent) => {
-                      // 阻止菜单夺焦:编辑器必须保住光标/选区,execCommand 才能落点。
-                      mouseEvent.preventDefault()
-                    }}
-                    onMouseEnter={() => setMentionActive(index)}
-                    onClick={() => pickMention(item)}
-                  >
-                    <span className={`mention-menu-icon${directory ? ' dir' : ''}`}>
-                      {directory ? <IconFolder size={13} /> : <IconFile size={13} />}
-                    </span>
-                    <span className="mention-menu-text">
-                      <span className="mention-menu-name">
-                        {name}
-                        {directory ? '/' : ''}
-                      </span>
-                      {parent && <span className="mention-menu-parent">{parent}</span>}
-                    </span>
-                  </button>
-                )
-              })
-            )}
-          </div>
-        </>
-      )}
-      {slashOpen && (
-        <>
-          <div className="menu-backdrop" onClick={closeSlash} />
-          <div
-            className="mention-menu"
-            role="listbox"
-            aria-label={t('slashAria')}
-            ref={slashMenuRef}
-          >
-            {slashItems.length === 0 ? (
-              <div className="mention-menu-empty">{t('slashEmpty')}</div>
-            ) : (
-              slashItems.map((item, index) => {
-                const active = index === slashActive
-                const header =
-                  index === 0 || slashItems[index - 1].kind !== item.kind ? (
-                    <div className="slash-menu-group" role="presentation">
-                      {item.kind === 'command' ? t('slashGroupCommands') : t('slashGroupSkills')}
-                    </div>
-                  ) : null
-                return (
-                  <Fragment key={`${item.kind}:${item.name}`}>
-                    {header}
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={active}
-                      data-kb={active || undefined}
-                      className={`mention-menu-item${active ? ' kb' : ''}`}
-                      onMouseDown={(mouseEvent) => {
-                        // 阻止菜单夺焦:编辑器必须保住光标/选区,execCommand 才能落点。
-                        mouseEvent.preventDefault()
-                      }}
-                      onMouseEnter={() => setSlashActive(index)}
-                      onClick={() => pickSlash(item)}
-                    >
-                      <span className="mention-menu-icon">
-                        {item.kind === 'command' ? (
-                          <IconSlashCommand name={item.name} size={13} />
-                        ) : (
-                          /* 技能:统一四角星,不按名字区分。 */
-                          <IconSparkles size={13} />
-                        )}
-                      </span>
-                      <span className="mention-menu-text">
-                        <span className="mention-menu-name-row">
-                          <span className="mention-menu-name">/{item.name}</span>
-                          {item.userOnly && (
-                            <span className="slash-badge">{t('slashBadgeUserOnly')}</span>
-                          )}
-                        </span>
-                        <span className="slash-menu-desc">{item.description}</span>
-                      </span>
-                    </button>
-                  </Fragment>
-                )
-              })
-            )}
-          </div>
-        </>
-      )}
-      <div className="prompt-bar">
-        {/* 左组:添加上下文与权限档位。 */}
-        <div className="composer-left">
-          <ComposerContextMenu
-            panelAnchorRef={composerPanelRef}
-            disabled={inert || optimizing || sending}
-            projectPath={contextProjectPath}
-            filesAvailable={activeSession?.cwd_alive !== false}
-            activeId={activeId}
-            sessions={sessions}
-            commands={!showAttachRow ? [
-              { name: 'goal', label: t('contextGoal'), description: t('cmdGoalDesc') },
-              { name: 'plan', label: t('contextPlan'), description: t('cmdPlanDesc') },
-            ] : []}
-            onOpen={openContextMenu}
-            onUpload={() => { void onPickFiles() }}
-            onFile={insertContextFile}
-            onSession={addContextSession}
-            onCommand={insertContextCommand}
-          />
-          <PermissionSelector
-            value={permission}
-            onChange={requestPermissionChange}
-            disabled={inert || permissionBusy}
-            showApproveForMe={showApproveForMe}
-          />
-        </div>
-        {/* 右组:模型 → 思考强度 → 优化 → 上下文 → 发送,一条从左到右的链。 */}
-        <div className="composer-right">
-          {selection && (
-            <div className="composer-model-group">
-              {catalog && selection && (
-                <ComposerModelMenu
-                  catalog={catalog}
-                  selection={selection}
-                  disabled={inert || optimizing}
-                  onChange={applySelection}
-                />
-              )}
-              {selection && activeEffort && effortLevels.length > 0 && (
-                <ComposerEffortControl
-                  key={`${activeId}:${selection.provider}:${selection.model}`}
-                  efforts={effortLevels}
-                  value={activeEffort}
-                  disabled={inert || optimizing}
-                  onChange={(effort) => applySelection({ ...selection, reasoningEffort: effort })}
-                />
-              )}
-            </div>
-          )}
-          <button
-            type="button"
-            className={`icon-btn composer-opt-btn${optimizedPrompt ? ' undo' : ''}${optimizing ? ' busy' : ''}`}
-            title={optimizedPrompt ? t('optimizeUndo') : t('optimizePromptHint')}
-            aria-label={optimizing ? t('optimizing') : optimizedPrompt ? t('optimizeUndo') : t('optimizePrompt')}
-            disabled={
-              inert ||
-              optimizing ||
-              running ||
-              sending ||
-              !activeId ||
-              !selection ||
-              (!optimizedPrompt && !prompt.trim())
-            }
-            onClick={() => {
-              if (optimizedPrompt) handleUndoOptimize()
-              else void handleOptimize()
-            }}
-          >
-            {optimizing ? (
-              <IconSpinner size={16} />
-            ) : optimizedPrompt ? (
-              <IconUndo size={16} />
-            ) : (
-              <IconPromptOptimize size={16} />
-            )}
-          </button>
-          <ContextRing
-            pressure={context?.pressure}
-            breakdown={context?.breakdown}
-            sessionId={activeId ?? undefined}
-            running={running}
-          />
-          {primaryStops ? (
-            <button
-              type="button"
-              className="btn-send stop"
-              onClick={() => void stop()}
-              title={t('stop')}
-              aria-label={t('stop')}
-            >
-              <IconStop size={14} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn-send"
-              disabled={promptEmpty || sending || optimizing || inert}
-              onClick={() => void send()}
-              title={t('run')}
-              aria-label={t('run')}
-            >
-              <IconSend size={16} />
-            </button>
-          )}
-        </div>
-      </div>
+      <ComposerAttachments
+        quotes={trajQuotes}
+        images={pastedImages}
+        attachments={attachments}
+        onRemoveQuote={(id) => setTrajQuotes((previous) => previous.filter((q) => q.id !== id))}
+        onRemoveImage={(index) => setPastedImages((previous) => previous.filter((_, i) => i !== index))}
+        onRemoveAttachment={(index) => setAttachments((previous) => previous.filter((_, i) => i !== index))}
+      />
+      <ComposerEditor
+        promptScrollRef={promptScrollRef}
+        editorRef={promptRef}
+        placeholderText={placeholderText}
+        inert={inert}
+        optimizing={optimizing}
+        composerReady={composerReady}
+        mentionOpen={mentionOpen}
+        mentionLoading={mentionLoading}
+        mentionItems={mentionItems}
+        mentionActive={mentionActive}
+        composingRef={composingRef}
+        onDraftChange={onDraftChange}
+        syncPromptHeight={syncPromptHeight}
+        refreshMenus={refreshMenus}
+        onCopy={onEditorCopy}
+        onCut={(event) => onEditorCopy(event, true)}
+        onPaste={onEditorPaste}
+        onDragOver={onEditorDragOver}
+        onDrop={onEditorDrop}
+        onKeyDown={onPromptKeyDown}
+        onOpenPicker={onOpenPicker}
+      />
+      <ComposerMenus
+        mentionOpen={mentionOpen}
+        mentionItems={mentionItems}
+        mentionLoading={mentionLoading}
+        mentionQuery={mentionQuery}
+        mentionActive={mentionActive}
+        setMentionActive={setMentionActive}
+        mentionMenuRef={mentionMenuRef}
+        closeMention={closeMention}
+        pickMention={pickMention}
+        slashOpen={slashOpen}
+        slashItems={slashItems}
+        slashActive={slashActive}
+        setSlashActive={setSlashActive}
+        slashMenuRef={slashMenuRef}
+        closeSlash={closeSlash}
+        pickSlash={pickSlash}
+      />
+      <ComposerToolbar
+        panelAnchorRef={composerPanelRef}
+        inert={inert}
+        optimizing={optimizing}
+        sending={sending}
+        running={running}
+        prompt={prompt}
+        promptEmpty={promptEmpty}
+        primaryStops={primaryStops}
+        contextProjectPath={contextProjectPath}
+        filesAvailable={activeSession?.cwd_alive !== false}
+        activeId={activeId}
+        sessions={sessions}
+        showAttachRow={showAttachRow}
+        permission={permission}
+        permissionBusy={permissionBusy}
+        showApproveForMe={showApproveForMe}
+        selection={selection}
+        catalog={catalog}
+        activeEffort={activeEffort}
+        effortLevels={effortLevels}
+        optimizedPrompt={optimizedPrompt}
+        context={context}
+        onOpenContextMenu={openContextMenu}
+        onPickFiles={() => { void onPickFiles() }}
+        onInsertFile={insertContextFile}
+        onAddContextSession={addContextSession}
+        onInsertCommand={insertContextCommand}
+        onPermissionChange={requestPermissionChange}
+        onSelectionChange={applySelection}
+        onUndoOptimize={handleUndoOptimize}
+        onOptimize={() => { void handleOptimize() }}
+        onStop={() => { void stop() }}
+        onSend={() => { void send() }}
+      />
     </div>
   )
 
@@ -2063,38 +1291,12 @@ export default function SessionsPage({
               ) : activeSession?.subagent ? (
                 /* 外形沿用输入面板(.prompt-panel):这块坐的就是输入框的位置,
                    长得像输入框才不突兜;元信息是自解释的短句,不画标签表单。 */
-                <div className="prompt-panel child-banner" data-testid="child-banner">
-                  <div className="child-banner-head">
-                    <span className="child-banner-glyph" aria-hidden="true">
-                      <IconAgentSpawn size={14} />
-                    </span>
-                    <span className="child-banner-tag" title={descriptorText}>
-                      {t('childSubagentLabel')}
-                      <span className="child-banner-model">{subagentModel}</span>
-                    </span>
-                    <button
-                      type="button"
-                      className="child-banner-back"
-                      onClick={() => activeSession.parent_session && go(activeSession.parent_session, null)}
-                    >
-                      {t('runtimeBackParent')}
-                    </button>
-                  </div>
-                  <div className="child-banner-facts" data-testid="child-snapshot" title={descriptorText}>
-                    {subagentFacts.map((fact) => (
-                      <span
-                        className="child-fact"
-                        key={fact.key}
-                        data-fact={fact.key}
-                        title={fact.hint}
-                        aria-label={`${fact.label}：${fact.value}`}
-                      >
-                        {fact.value}
-                      </span>
-                    ))}
-                  </div>
-                  <p className="child-banner-note">{t('runtimeChildReadonly')}</p>
-                </div>
+                <ChildSubagentBanner
+                  descriptorText={descriptorText}
+                  subagentModel={subagentModel}
+                  subagentFacts={subagentFacts}
+                  onBack={() => activeSession.parent_session && go(activeSession.parent_session, null)}
+                />
               ) : composerCard}
               {phase === 'active' && (
                 <StatsBar nodes={transcriptNodes} totals={sessionTotals} openTurnStartedAt={openTurnAt} />
@@ -2134,41 +1336,12 @@ export default function SessionsPage({
         />
       )}
       {rewindReq && (
-        <ConfirmDialog
-          open
-          title={t('rewindConfirmTitle')}
-          desc={
-            (rewindReq.changes.length > 0
-              ? t('rewindConfirmDesc', {
-                  removed: rewindReq.removedMessages,
-                  files: rewindReq.changes.length,
-                })
-              : t('rewindConfirmSimple', { removed: rewindReq.removedMessages })) +
-            // 运行中回退会先替用户打断本轮:这件事必须在确认前说清楚。
-            (running ? ` ${t('rewindConfirmInterrupt')}` : '')
-          }
-          danger
-          confirmLabel={t('rewind')}
+        <RewindDialog
+          request={rewindReq}
+          running={running}
           onConfirm={() => void confirmRewind()}
           onCancel={() => setRewindReq(null)}
-        >
-          {rewindReq.changes.length > 0 && (
-            <div className="rewind-file-list">
-              {rewindReq.changes.map((change) => (
-                <div key={change.path} className="rewind-file-row">
-                  <span className={`rewind-file-action ${change.action}`}>
-                    {change.action === 'restore' ? t('rewindRestore') : t('rewindDelete')}
-                  </span>
-                  <code title={change.root}>
-                    {change.root
-                      ? `${change.root.split(/[\\/]/).filter(Boolean).pop() ?? change.root}/${change.path}`
-                      : change.path}
-                  </code>
-                </div>
-              ))}
-            </div>
-          )}
-        </ConfirmDialog>
+        />
       )}
     </div>
   )

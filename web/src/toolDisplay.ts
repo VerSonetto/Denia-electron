@@ -515,8 +515,13 @@ export interface DiffLine {
   oldNo?: number
   /** 新文本中的行号(仅 context/add 有);1-based。 */
   newNo?: number
-  /** 折叠占位行:表示此处省略了 skipped 行。 */
+  /** 折叠占位行:这里省略了一段未改动的行。 */
   fold?: boolean
+  /**
+   * 折叠占位行保存被省略的原始行:展开时原地还原,不再重新计算 diff。
+   * 只出现在 `fold: true` 的行上。
+   */
+  hidden?: DiffLine[]
 }
 
 export interface EditDiff {
@@ -526,7 +531,7 @@ export interface EditDiff {
   lines: DiffLine[]
   removed: number
   added: number
-  /** diff 过长被折叠:中间省略的行数。 */
+  /** 被折叠的未改动行总数(所有折叠段之和)。 */
   skipped: number
 }
 
@@ -539,10 +544,10 @@ export interface EditDiffs {
   diffs: EditDiff[]
 }
 
-/** 头部与折叠区各保留的上下文行数。 */
+/** 每段改动前后保留的上下文行数。 */
 const CONTEXT = 3
-/** 超过这个行数就折叠中间(工具行里不该挂一整屏 diff)。 */
-const MAX_LINES = 40
+/** 纯上下文 diff 超过这个行数时,仍折叠首尾之间的空白区。 */
+const MAX_UNCHANGED_LINES = 40
 
 /**
  * write_file 的行级 diff:整文件覆盖写成的一次性"全量 diff"。
@@ -678,20 +683,61 @@ export function diffLines(
   }
   const removed = mid.filter((item) => item.kind === 'del').length
   const added = mid.filter((item) => item.kind === 'add').length
-  return { path: shortPath(path), startLine, ...foldMiddle(lines), removed, added }
+  return { path: shortPath(path), startLine, ...foldUnchanged(lines), removed, added }
 }
 
-/** 折叠过长的 diff:只保留头尾各 CONTEXT 行,中间压成一行占位。 */
-function foldMiddle(lines: DiffLine[]): { lines: DiffLine[]; skipped: number } {
-  if (lines.length <= MAX_LINES) return { lines, skipped: 0 }
-  const headSlice = lines.slice(0, CONTEXT)
-  const tailSlice = lines.slice(lines.length - CONTEXT)
-  const skipped = lines.length - headSlice.length - tailSlice.length
-  if (skipped <= CONTEXT) return { lines, skipped: 0 }
-  return {
-    lines: [...headSlice, { kind: 'context', text: '', fold: true }, ...tailSlice],
-    skipped,
+/**
+ * 只折叠"未改动"的行,不折叠改动本身。
+ *
+ * 旧实现固定保留整段 diff 的首尾各 3 行,改动落在中间时会被整段藏掉 ——
+ * 展开后反而看不到改了什么。现在按改动位置切成 hunk:每处改动保留前后
+ * 各 `CONTEXT` 行,离得远的未改动段压成可展开的折叠行。改动行因此永远
+ * 可见,折叠行也知道自己省掉的是哪一段。
+ */
+function foldUnchanged(lines: DiffLine[]): { lines: DiffLine[]; skipped: number } {
+  if (lines.length <= MAX_UNCHANGED_LINES) return { lines, skipped: 0 }
+
+  const keep = new Array<boolean>(lines.length).fill(false)
+  let changed = false
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]!.kind === 'context') continue
+    changed = true
+    const from = Math.max(0, i - CONTEXT)
+    const to = Math.min(lines.length - 1, i + CONTEXT)
+    for (let j = from; j <= to; j++) keep[j] = true
   }
+
+  // 没有任何增删行(编辑前后文本一致):没有 hunk 可围绕,退回首尾各
+  // CONTEXT 行。这种情况只用于预览,真正的写操作不会走到这里。
+  if (!changed) {
+    for (let i = 0; i < Math.min(CONTEXT, lines.length); i++) keep[i] = true
+    for (let i = Math.max(0, lines.length - CONTEXT); i < lines.length; i++) keep[i] = true
+  }
+
+  const out: DiffLine[] = []
+  let skipped = 0
+  for (let i = 0; i < lines.length; ) {
+    if (keep[i]) {
+      out.push(lines[i]!)
+      i++
+      continue
+    }
+    let end = i
+    while (end < lines.length && !keep[end]) end++
+    const hidden = lines.slice(i, end)
+    const first = hidden[0]!
+    out.push({
+      kind: 'context',
+      text: '',
+      ...(first.oldNo === undefined ? {} : { oldNo: first.oldNo }),
+      ...(first.newNo === undefined ? {} : { newNo: first.newNo }),
+      fold: true,
+      hidden,
+    })
+    skipped += hidden.length
+    i = end
+  }
+  return { lines: out, skipped }
 }
 
 /** LCS 的 DP 单元格预算:超出即放弃逐行对齐(保护超大替换不卡 UI)。 */

@@ -14,8 +14,8 @@
  * falls back to plain text (no highlighting, still monospace) — never an error.
  *
  * Coverage note: the file reader highlights whole files, so this allowlist
- * also has to cover every extension the backend tags (see `language_hint` in
- * `crates/server/src/api/fs.rs`). A file type missing here degrades to plain
+ * also has to cover every extension the backend tags (see `language` in
+ * `electron/src/host/server.ts`). A file type missing here degrades to plain
  * text in that panel only — markdown fences are unaffected.
  */
 
@@ -95,8 +95,8 @@ const LAZY_GRAMMARS = new Map<string, () => Promise<LangModule>>([
  * a label like `constructor` or `__proto__` must miss instead of resolving an
  * inherited property and crashing the renderer inside shiki.
  *
- * The file reader's tags come from the backend's `language_hint`
- * (`crates/server/src/api/fs.rs`), which maps a file extension to one of these
+ * The file reader's tags come from the backend's `language` field
+ * (`electron/src/host/server.ts`), which maps a file extension to one of these
  * ids. Every id that function can emit MUST resolve here, or the file reader
  * silently renders plain text for that extension — a `.proto` or `.ps1` would
  * look broken while markdown fences around the same language highlight fine.

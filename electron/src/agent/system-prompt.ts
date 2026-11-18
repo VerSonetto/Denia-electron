@@ -1,8 +1,8 @@
 // System prompt assembly: the factory persona, the shipped discipline
 // sections, and role additions for subagents.
 //
-// The section set, their order and their wording mirror the Rust host
-// (`crates/tools/src/prompt.rs`): a section that belongs to a tool only
+// The section set, their order and their wording mirror the original Rust
+// host: a section that belongs to a tool only
 // appears when that tool is actually on the table, so a subagent never reads
 // rules for tools it cannot call.
 //

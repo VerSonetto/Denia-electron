@@ -18,7 +18,7 @@
  * - 保留 `allow-popups` 让文档里的 `target="_blank"` 链接仍能点开。
  *
  * 与之配套，服务端对预览资源另有三道独立防线（路径校验 / MIME 白名单 /
- * 严格 CSP 禁脚本，见 `crates/server/src/api/fs.rs`）。前端 sandbox 与服务端
+ * 严格 CSP 禁脚本，见 `electron/src/host/server.ts` 的预览路由）。前端 sandbox 与服务端
  * CSP 互相独立：任一层配漏，另一层仍在。
  *
  * # 相对引用为什么能工作

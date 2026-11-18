@@ -973,7 +973,7 @@ export function setSessionPermission(
   })
 }
 
-/** 权限能力探测:Electron 宿主额外提供「自动审批」;Rust 宿主返回 404。 */
+/** 权限能力探测:宿主额外提供「自动审批」;旧宿主返回 404。 */
 export interface PermissionCatalog {
   modes: string[]
   default?: string
