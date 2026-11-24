@@ -455,6 +455,17 @@ export function bashMayWrite(command: string): boolean {
     'ln -',
     'chmod ',
     'chown ',
+    // Windows PowerShell is the default shell on many machines; its cmdlets
+    // do not use the POSIX markers above.
+    'set-content ',
+    'add-content ',
+    'clear-content ',
+    'out-file ',
+    'new-item ',
+    'set-item ',
+    'copy-item ',
+    'move-item ',
+    'rename-item ',
   ]
   return markers.some((marker) => lower.includes(marker))
 }
@@ -468,6 +479,8 @@ const DELETE_PROGRAMS = new Set([
   'erase',
   'rd',
   'remove-item',
+  'move-item',
+  'rename-item',
   '-delete',
 ])
 

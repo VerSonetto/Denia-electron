@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { PermissionState } from '../core/permission.ts'
 import { bashMayWrite } from '../core/permission.ts'
-import { killTree, shellChoice } from '../tools/bash.ts'
+import { killTree, shellChoice, shellInvocation } from '../tools/bash.ts'
 
 export const DEFAULT_JOB_TIMEOUT_MS = 600_000
 export const MAX_ACTIVE_JOBS = 8
@@ -137,7 +137,8 @@ export class JobManager {
     const shell = shellChoice()
     let child: ChildProcess
     try {
-      child = spawn(shell.file, [...shell.args, input.command], {
+      const call = shellInvocation(shell, input.command)
+      child = spawn(call.file, call.args, {
         cwd: input.cwd,
         windowsHide: true,
         windowsVerbatimArguments: shell.verbatim,

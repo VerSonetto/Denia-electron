@@ -5,6 +5,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  bashMayDelete,
+  bashMayWrite,
   decideAction,
   legacyModeOf,
   modeOf,
@@ -94,6 +96,25 @@ test('read-only forbids writes and any command it cannot prove read-only', () =>
     decideAction({ state, action: 'read', insideProject: true, shell: readCommand }).kind,
     'allow',
   )
+})
+
+test('PowerShell write cmdlets count as writes and deletes', () => {
+  for (const command of [
+    'Set-Content out.txt hi',
+    'Add-Content out.txt hi',
+    'Clear-Content out.txt',
+    'Out-File out.txt',
+    'New-Item -ItemType File out.txt',
+    'Set-Item out.txt',
+    'Copy-Item a.txt b.txt',
+    'Move-Item a.txt b.txt',
+    'Rename-Item a.txt b.txt',
+  ]) {
+    assert.equal(bashMayWrite(command), true, command)
+  }
+  assert.equal(bashMayWrite('Get-Content out.txt'), false)
+  assert.equal(bashMayDelete('Remove-Item out.txt'), true)
+  assert.equal(bashMayDelete('Move-Item a.txt b.txt'), true)
 })
 
 test('full access allows everything and never asks', () => {

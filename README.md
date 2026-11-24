@@ -6,7 +6,7 @@ Electron + TypeScript 的本地 agent 桌面端，复用 `web/` 的 React 控制
 
 ## 目录
 
-- `electron/`：主进程、HTTP/SSE 宿主、agent loop、工具、MCP、子代理、
+- `electron/`：主进程、HTTP/SSE 宿主、pi agent 内核、工具、MCP、子代理、
   浏览器、会话存储与桌面打包
 - `web/`：React 控制台；Vite 开发服务器把 `/api` 代理到本地宿主
 - `scripts/`：本地检查与联调脚本

@@ -263,11 +263,17 @@ function permissionSection(permission: PermissionState): string {
 function shellNote(): string {
   const choice = shellChoice()
   const platform = process.platform
-  if (choice.label === 'cmd') {
-    return `bash 工具在 ${platform} 上通过 cmd.exe 执行(工具名沿用 bash);命令请写 cmd 语法,不要用 bash 或 PowerShell 语法。`
+  const name = choice.file.replaceAll('\\', '/').split('/').pop() || choice.label
+  switch (choice.dialect) {
+    case 'cmd':
+      return `bash 工具在 ${platform} 上通过 cmd.exe 执行(工具名沿用 bash);命令请写 cmd 语法,不要用 bash 或 PowerShell 语法。`
+    case 'powershell':
+      return `bash 工具在 ${platform} 上通过 ${name} 执行(工具名沿用 bash);命令请写 PowerShell 语法,不要用 bash 语法。`
+    case 'wsl':
+      return `bash 工具在 ${platform} 上通过 ${name}(WSL)执行(工具名沿用 bash);命令在 Linux 环境运行,请写 bash 语法,Windows 路径需写成 /mnt/... 形式。`
+    default:
+      return `bash 工具在 ${platform} 上通过 ${name} 执行;命令请写 bash 语法,不要用 PowerShell 语法。`
   }
-  const shell = platform === 'win32' ? 'Git Bash' : 'bash'
-  return `bash 工具在 ${platform} 上通过 ${shell} 执行;命令请写 bash 语法,不要用 PowerShell 语法。`
 }
 
 /**

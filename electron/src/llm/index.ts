@@ -1,30 +1,20 @@
-// Protocol dispatch: one adapter per wire protocol.
+// LLM entry point.
 //
-// Each adapter only translates its own request/stream shapes; the shared
-// `StreamAssembler` keeps the emitted `StreamChunk` vocabulary identical so
-// the UI never needs to know which provider produced a turn.
+// pi-ai owns the provider protocols. Denia only keeps the mappings between its
+// settings/wire vocabulary and pi, plus a one-shot chunk stream for side calls
+// that do not run an agent turn (title, compaction, review, prompt optimizer).
 
-import type { StreamChunk } from '../core/wire.ts'
-import { streamAnthropic } from './anthropic-messages.ts'
-import { streamOpenAi } from './openai-completions.ts'
-import { streamOpenAiResponses } from './openai-responses.ts'
-import { LlmRequestError, type GenerateRequest } from './types.ts'
-
+export {
+  assistantBlocksOf,
+  completeText,
+  createPiStreamFn,
+  meaningfulUsage,
+  streamFor,
+  thinkingLevelOf,
+  toPiMessages,
+  toPiModel,
+  toPiTools,
+  tokenUsageOf,
+} from './pi.ts'
 export type { GenerateRequest } from './types.ts'
 export { LlmRequestError } from './types.ts'
-
-export function streamFor(request: GenerateRequest): AsyncGenerator<StreamChunk> {
-  switch (request.provider.protocol ?? 'openai-completions') {
-    case 'openai-completions':
-      return streamOpenAi(request)
-    case 'openai-responses':
-      return streamOpenAiResponses(request)
-    case 'anthropic-messages':
-      return streamAnthropic(request)
-    default:
-      throw new LlmRequestError(
-        `未知协议:${String(request.provider.protocol)}`,
-        'unsupported-protocol',
-      )
-  }
-}

@@ -8,9 +8,11 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
 
 已经跑通的主链路：
 
-- **agent loop**：turn/step、流式 chunk、工具调用、并行执行、取消、死循环检测
-- **LLM 适配器**：`openai-completions`、`openai-responses`、`anthropic-messages`，
-  共享 `StreamAssembler` 保证三条流发出同一套 `StreamChunk`
+- **agent 内核（pi）**：`@earendil-works/pi-agent-core` 负责 turn/工具循环、流式事件、
+  并行执行、取消与队列；宿主只把它们翻译回既有会话事件
+- **LLM 协议层（pi-ai）**：`openai-completions`、`openai-responses`、
+  `anthropic-messages` 由 `@earendil-works/pi-ai` 统一处理；Denia 只保留
+  提供商配置、消息映射和 `StreamChunk` 翻译
 - **会话存储**：沿用旧版的 `~/.denia`，`sessions/<id>/session.jsonl` 格式
   对齐（header version 0 / UUID id / seq 连续）；崩溃遗留轮次加载时补
   `turn-end {aborted, disposed}`
@@ -18,6 +20,10 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
   `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；项目读写 `projects.json` 的 map+order 结构（一个项目可包含多个目录）；随附 preset（standard / creator / minimal）与旧版对齐
 - **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、
   `todo_write`、`exit_plan`、`skill`
+- **shell 选择**：`bash` 工具与后台任务跟随系统默认终端——Windows 读取
+  Windows Terminal 默认 profile 的 commandline（PowerShell / cmd / Git Bash /
+  WSL 都识别），Windows Terminal 不是默认终端或配置不可读时回退 `ComSpec`；
+  PowerShell 命令自动加 UTF-8 前导，避免 `>` 写出 UTF-16
 - **权限（三层模型）**：四个预设 = 沙箱档案 × 审批策略 × 审批人——
   只读 / 项目编辑 / 自动审批（Approve for me）/ 完全访问；四值决策
   （allow / prompt / prompt-user / forbid）；五值审批（accept、accept-for-session、
@@ -59,6 +65,39 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
 远程访问（局域网直连 / 设备配对）已实现，接口契约见
 [REMOTE-ACCESS.md](REMOTE-ACCESS.md)。对外地址由设置中的 `publicUrl` 提供，
 可用于反向代理或隧道；宿主本身不内置隧道进程。
+
+## pi 内核
+
+agent 内核由两个 pi 包承担：
+
+- `@earendil-works/pi-agent-core`：每个 Denia turn 创建一个 `Agent`。它负责
+  assistant 流、工具参数校验、并行/串行执行、abort 与 steering 语义；
+- `@earendil-works/pi-ai`：三种 wire protocol、thinking 级别、usage 归一化、
+  重试和 prompt-cache 提示。
+
+Denia 仍然拥有会话日志与产品语义，二者通过 hooks 连接：
+
+| pi hook | Denia 用途 |
+| --- | --- |
+| `prepareRequest` | 从事件日志重建 canonical transcript；执行注入、microcompact、自动摘要、冻结 system 前缀 |
+| `beforeToolCall` | 权限 gate、用户审批 / 自动审查、MCP 懒加载、`exit_plan` |
+| `finishTurn` | loop guard（重复检测、提醒与硬停）、最大步数 |
+| `subscribe` | 把 pi 事件翻译成 `turn/step/assistant-chunk/tool-call/tool-result` 会话事件 |
+
+关键设计：
+
+- **日志是唯一事实源**：pi 的 `Agent` 每个 turn 从 `sessions/<id>/session.jsonl`
+  重建，不把 pi 内存状态当持久化存储；rewind、重启和子代理投影都沿用旧规则。
+- **工具面与执行面分离**：system message 只声明当前权限可见的 schema；pi 的
+  运行期 loadout 仍包含隐藏工具，这样模型越权调用时能拿到 Denia 的可读拒绝，
+  而不是 pi 的 “Tool not found”。
+- **MCP 懒加载**：未加载工具以空参数占位 schema 存在；首次调用返回真实
+  JSON Schema 并标记加载，下一次请求才下发完整定义。
+- **提供商兼容**：继续读 `settings.yaml` 的 `llm-openai.providers`。宿主把
+  Denia 的 `supportsPromptCacheKey`、`longCache`、`headers` 映射到 pi 的
+  `compat`；自定义 OpenAI 兼容端点只在 `defaultMaxTokens` 显式配置时发送
+  `max_tokens`（Anthropic 的 `max_tokens` 必填，保留默认值），不主动发送
+  `store`，避免严格网关拒绝请求。
 
 ## 权限模型
 
@@ -124,6 +163,9 @@ Vite 地址，前端热更新直接生效。`DENIA_VITE_PORT` 可换 Vite 端口
 - `DENIA_PORT`：监听端口（`0` 表示随机）
 - `DENIA_WEB_DIR`：前端构建产物目录（默认 `../web/dist`）
 - `DENIA_WEB_URL`：开发时改加载 Vite 地址（`web/` 的 `/api` 代理需指向本宿主）
+- `DENIA_SHELL`：覆盖 `bash` 工具与后台任务使用的 shell（默认跟随 Windows
+  Terminal 的默认 profile；Windows Terminal 不可用时回退到 `ComSpec`，
+  macOS/Linux 用 `bash -c`）
 - `DENIA_OPENAI_BASE_URL` / `DENIA_OPENAI_API_KEY` / `DENIA_OPENAI_MODELS`：
   在既没有 `settings.yaml` 也没有 `config.json` 时构造默认提供商
 
@@ -205,7 +247,9 @@ src/
   main.ts                 Electron 主进程（起宿主 + 开窗口）
   host/server.ts          本地 HTTP/SSE 宿主与静态资源
   host/services.ts        loop ↔ MCP / 子代理 / 技能 / 记忆 / 注入的接缝
-  agent/loop.ts           turn/step 主循环
+  agent/loop.ts           pi Agent 之上的 Denia turn 编排
+  agent/approval-dispatch.ts  审批询问、自动审查与决策落盘
+  agent/tool-runtime.ts  Denia Tool → pi AgentTool 适配与并发预算
   agent/history.ts        会话事件 → 模型消息（基线通道折叠、压缩区间）
   agent/system-prompt.ts  基础提示 + 子代理角色/约束 + 额外段
   agent/session-title.ts  标题生成
@@ -214,7 +258,8 @@ src/
   subagents/              定义仓库、派遣解析、后台运行时
   skills/                 分层发现、解析、管理、内置技能
   context/                项目记忆、项目指令
-  llm/                    三个协议适配器 + 共享 SSE/块组装
+  llm/pi.ts               pi 模型/消息/一次性补全桥
+  llm/chunks.ts           pi assistant events → Wire StreamChunk
   session/store.ts        JSONL 会话日志
   tools/                  bash / 文件 / 搜索 / todo / mcp / skill
   config.ts               提供商、home、设置描述
@@ -229,9 +274,9 @@ scripts/
 ## 验证现状
 
 - `npm run typecheck` 通过
-- `npm test`：全部通过，覆盖 agent loop、协议适配器、权限/审批、MCP
-  三种传输、父子代理派遣/完成投递/fork、技能、项目记忆、项目指令、
-  标题与手动压缩
+- `npm test`：249 个用例全部通过，覆盖 pi 内核 turn/工具链路、三种协议的
+  桥接、权限/审批、MCP 三种传输、父子代理派遣/完成投递/fork、技能、
+  项目记忆、项目指令、标题与手动压缩、shell 解析与取消收尾
 - 前端 `cd web && npx tsc -b && npx vite build` 通过
 - `DENIA_SMOKE_SHOT=<png>`：Electron 启动后自动截图退出，用于验证真实窗口
   加载（本次迁移已用真实构建产物截图确认）

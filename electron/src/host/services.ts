@@ -166,9 +166,20 @@ export class HostServices implements SessionServices {
     }
     const loaded = this.loadedOf(sessionId)
     for (const def of snapshot.toolDefs()) {
-      if (!loaded.has(def.name)) continue
       if (!this.allowed(header, def.name)) continue
-      out.push(this.mcpToolOf(def.name, def.description, def.schema).schema)
+      if (loaded.has(def.name)) {
+        out.push(this.mcpToolOf(def.name, def.description, def.schema).schema)
+        continue
+      }
+      // pi rejects calls to tools it does not know before the permission hook
+      // can run. A schema-less placeholder keeps the lazy contract: the first
+      // call returns the real definition and marks the tool loaded, the next
+      // request carries the full schema and executes.
+      out.push({
+        name: def.name,
+        description: `${def.description.trim() || 'MCP 外部工具'}\n(参数定义尚未加载;首次调用会返回完整 JSON Schema,按该 schema 重新调用即可执行。)`,
+        parameters: { type: 'object', properties: {}, additionalProperties: true },
+      })
     }
     for (const schema of this.subagents.toolSchemas(sessionId)) {
       if (!this.allowed(header, schema.name)) continue
