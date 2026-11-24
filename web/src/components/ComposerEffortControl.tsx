@@ -14,6 +14,28 @@ const BURST_POINTS = [
   [24, -9], [20, 10], [-9, 21], [-25, -5],
 ]
 
+/**
+ * 最高档填充里向右漂流的微粒。`speed` 是穿过整条填充的时长，`delay` 取负数
+ * 把起始相位错开，浮层一打开整条轨道就已经铺满粒子；`bob` 是各自的上下摆动幅度，
+ * 让相邻轨道不会同步起伏。
+ */
+const FLOW_PARTICLES = [
+  { lane: 26, size: 2.6, speed: 2.9, delay: -0.2, bob: 1.3, peak: 0.9 },
+  { lane: 58, size: 1.7, speed: 4.4, delay: -2.3, bob: 1.9, peak: 0.55 },
+  { lane: 36, size: 3.1, speed: 3.6, delay: -1.0, bob: 1.1, peak: 1 },
+  { lane: 72, size: 2.0, speed: 5.1, delay: -3.6, bob: 2.2, peak: 0.5 },
+  { lane: 46, size: 1.5, speed: 2.6, delay: -2.2, bob: 0.9, peak: 0.75 },
+  { lane: 18, size: 2.2, speed: 3.3, delay: -1.3, bob: 1.6, peak: 0.65 },
+  { lane: 80, size: 2.5, speed: 4.8, delay: -0.9, bob: 1.4, peak: 0.85 },
+  { lane: 52, size: 2.8, speed: 3.9, delay: -2.5, bob: 2.1, peak: 0.7 },
+  { lane: 30, size: 1.4, speed: 3.1, delay: -1.0, bob: 0.8, peak: 0.95 },
+  { lane: 66, size: 2.3, speed: 4.2, delay: -0.4, bob: 1.5, peak: 0.6 },
+  { lane: 42, size: 2.9, speed: 5.3, delay: -4.1, bob: 1.8, peak: 0.55 },
+  { lane: 22, size: 1.8, speed: 3.7, delay: -1.7, bob: 1.2, peak: 0.8 },
+  { lane: 62, size: 1.9, speed: 2.8, delay: -2.6, bob: 0.9, peak: 0.7 },
+  { lane: 76, size: 1.5, speed: 4.6, delay: -1.2, bob: 1.7, peak: 0.9 },
+]
+
 /** 档位保持模型目录的顺序；只有关闭浮层时才更新会话配置。 */
 export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
   efforts: ReasoningEffortInfo[]
@@ -208,7 +230,16 @@ export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
                       transition={{ duration: reduceMotion ? 0 : 0.3 }}>
                       <EffortMaxFill reducedMotion={reduceMotion} reveal={burst > 0} />
                       {!reduceMotion && <span className="effort-particles" aria-hidden="true">
-                        {Array.from({ length: 8 }, (_, at) => <span key={at} style={{ '--particle-index': at } as CSSProperties} />)}
+                        {FLOW_PARTICLES.map((particle, at) => <span className="effort-particle" key={at} style={{
+                          '--particle-lane': `${particle.lane}%`,
+                          '--particle-size': `${particle.size}px`,
+                          '--particle-speed': `${particle.speed}s`,
+                          '--particle-delay': `${particle.delay}s`,
+                          '--particle-bob': `${particle.bob}px`,
+                          '--particle-peak': particle.peak,
+                        } as CSSProperties}>
+                          <span />
+                        </span>)}
                       </span>}
                     </motion.span>}
                   </AnimatePresence>
