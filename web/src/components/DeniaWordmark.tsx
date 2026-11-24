@@ -1,4 +1,5 @@
 import { useId } from 'react'
+import { DENIA_GLYPH_PATHS } from './deniaGlyph'
 
 export function DeniaWordmark() {
   const cuts = useId()
@@ -11,9 +12,7 @@ export function DeniaWordmark() {
         </mask>
       </defs>
       <g transform="translate(-112 -118)">
-        <path d="M218 128H257C340 128 387 178 387 256C387 334 340 384 257 384H204L226 330H255C307 330 333 304 333 256C333 208 307 182 255 182H196Z" />
-        <path d="M139 128H178V307L124 329V143Q124 128 139 128Z" />
-        <path d="M124 352L178 330V372Q178 384 166 384H136Q124 384 124 372Z" />
+        {DENIA_GLYPH_PATHS.map((d) => <path key={d} d={d} />)}
       </g>
       <g transform="translate(312)" >
         <g mask={`url(#${cuts})`}>
