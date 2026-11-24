@@ -30,6 +30,40 @@ function stdioConfig(): McpServerConfig {
   })
 }
 
+// Regression: on Windows a stdio MCP command that resolves to a .cmd/.bat shim
+// (npx, npm, pnpm, ...) used to be spawned directly, which fails with
+// `spawn EINVAL`. The .cmd shim below wraps the real stdio fixture and must
+// complete a full handshake + tool call through the cmd.exe route.
+test('stdio MCP: .cmd shim command connects and calls tools on Windows', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const shim = path.resolve(import.meta.dirname, 'fixtures', 'mcp-stdio-shim.cmd')
+  const manager = new McpManager()
+  await manager.reload([
+    normalizeServerConfig({
+      id: 'shimfixture',
+      transport: 'stdio',
+      command: shim,
+      // Include a metacharacter-bearing arg to prove verbatim per-token
+      // quoting preserves it; the fixture ignores unknown args.
+      args: ['--flag=a b', '--other=c&d'],
+    }),
+  ])
+  const server = manager.snapshot().servers[0]
+  assert.equal(server?.status, 'connected', server?.error)
+  const result = await manager.callPaged({
+    qualified: 'mcp__shimfixture__echo',
+    arguments: { text: 'via shim' },
+    offset: 0,
+    limit: 100,
+    legacyResume: false,
+    session: 's1',
+  })
+  assert.equal(result.text, 'echo:via shim')
+  assert.equal(result.isError, false)
+  await manager.shutdownAll()
+})
+
 async function waitFor<T>(fn: () => Promise<T | null> | T | null, timeoutMs = 20_000): Promise<T> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {

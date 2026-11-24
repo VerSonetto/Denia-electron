@@ -1,6 +1,6 @@
-// Project instructions (AGENTS.md): discovery across every project
-// directory, budgeted rendering and the idempotence rule (only inject when the
-// body actually changed).
+// Project instructions (AGENTS.md): one file per selected project root,
+// budgeted rendering and the idempotence rule (only inject when the body
+// actually changed).
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -24,26 +24,16 @@ const INTRO_EMPTY_REPLACEMENT =
   '项目指令:此完整项目指令基线取代之前所有项目指令基线。当前没有激活的项目指令。'
 const TRUNCATED_NOTICE = '\n\n（项目指令超出字节预算，已截断。）'
 
-export function projectRootOf(cwd: string): string {
-  let current = path.resolve(cwd)
-  while (true) {
-    if (fs.existsSync(path.join(current, '.git'))) return current
-    const parent = path.dirname(current)
-    if (parent === current) return path.resolve(cwd)
-    current = parent
-  }
-}
-
 /**
- * Discover AGENTS.md files for one project.
+ * Discover one AGENTS.md per selected project root.
  *
- * `roots` is the project's directory list; `touched` may live under any root.
- * Global (`~`) instructions are only included for top-level sessions.
+ * `roots` are the directories the user selected for the project; only the
+ * file directly inside each root is considered. Global (`~`) instructions
+ * are only included for top-level sessions.
  */
 export function discoverProjectInstructions(
   home: string,
   roots: string | readonly string[],
-  touched: string[],
   maxSourceBytes: number,
   scope: InstructionScope,
 ): InstructionFile[] {
@@ -51,20 +41,6 @@ export function discoverProjectInstructions(
   const rootList = (typeof roots === 'string' ? [roots] : [...roots])
     .map((root) => path.resolve(root))
     .filter((root, index, list) => list.indexOf(root) === index)
-  const dirs: string[] = []
-  const projectRoots = new Map<string, string>()
-  const push = (dir: string): void => {
-    if (!dirs.includes(dir)) dirs.push(dir)
-  }
-  if (scope === 'global-and-project') push(home)
-  for (const root of rootList) {
-    const projectRoot = projectRootOf(root)
-    projectRoots.set(root, projectRoot)
-    for (const dir of ancestorChain(projectRoot, root)) push(dir)
-    for (const file of touched) {
-      for (const dir of descendantDirs(root, file)) push(dir)
-    }
-  }
   const basenames = new Map<string, number>()
   for (const root of rootList) {
     const base = path.basename(root) || root
@@ -75,17 +51,20 @@ export function discoverProjectInstructions(
     return (basenames.get(base) ?? 0) > 1 ? root : base
   }
   const files: InstructionFile[] = []
-  for (const dir of dirs) {
-    if (scope === 'project-only' && sameDir(dir, homeKey)) continue
-    const owner = rootList.find((root) => isInside(root, dir))
-    const projectRoot = owner ? projectRoots.get(owner)! : dir
+  if (scope === 'global-and-project') {
+    const global = loadFile(home, home, scope, maxSourceBytes)
+    if (global) files.push(global)
+  }
+  for (const root of rootList) {
+    // The home directory is already covered as the global instruction above,
+    // and subagents must not load it at all.
+    if (sameDir(root, homeKey)) continue
     const file = loadFile(
-      dir,
-      projectRoot,
+      root,
       home,
       scope,
       maxSourceBytes,
-      rootList.length > 1 && owner ? rootLabel(owner) : undefined,
+      rootList.length > 1 ? rootLabel(root) : undefined,
     )
     if (file) files.push(file)
   }
@@ -105,43 +84,8 @@ function sameDir(dir: string, homeKey: string): boolean {
   return key === homeKey || key.toLowerCase() === homeKey.toLowerCase()
 }
 
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(target))
-  if (relative === '') return true
-  if (path.isAbsolute(relative)) return false
-  return relative !== '..' && !relative.startsWith('..' + path.sep)
-}
-
-function ancestorChain(root: string, cwd: string): string[] {
-  const chain: string[] = []
-  let current = path.resolve(cwd)
-  while (isInside(root, current)) {
-    chain.push(current)
-    const parent = path.dirname(current)
-    if (parent === current) break
-    current = parent
-  }
-  return chain.reverse()
-}
-
-function descendantDirs(root: string, touched: string): string[] {
-  const absolute = path.isAbsolute(touched) ? touched : path.join(root, touched)
-  const parent = path.dirname(absolute)
-  if (!isInside(root, parent) || parent === path.resolve(root)) return []
-  const chain: string[] = []
-  let current = parent
-  while (isInside(root, current) && current !== path.resolve(root)) {
-    chain.push(current)
-    const next = path.dirname(current)
-    if (next === current) break
-    current = next
-  }
-  return chain.reverse()
-}
-
 function loadFile(
   dir: string,
-  projectRoot: string,
   home: string,
   scope: InstructionScope,
   maxSourceBytes: number,
@@ -163,12 +107,11 @@ function loadFile(
   }
   const content = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')
   const isGlobal = sameDir(dir, canonicalKey(home))
-  const relative = path.relative(projectRoot, file).replace(/\\/g, '/')
   const displayPath = isGlobal
     ? '~/AGENTS.md'
     : rootLabel
-      ? `${rootLabel}/${relative}`
-      : relative
+      ? `${rootLabel}/AGENTS.md`
+      : 'AGENTS.md'
   return { displayPath, content, scope, sourcePath: file }
 }
 

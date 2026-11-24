@@ -62,6 +62,7 @@ import {
   safeDecode,
 } from './http.ts'
 import { handleIntegrationsApi } from './routes/integrations.ts'
+import { handleLlmApi } from './routes/llm.ts'
 import { handleMcpApi } from './routes/mcp.ts'
 import { handleSessionsApi } from './routes/sessions.ts'
 import { handleSettingsApi } from './routes/settings.ts'
@@ -502,6 +503,11 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       fileHistory,
       broadcast,
     }, req, res, pathname, url, method)) return
+
+    if (await handleLlmApi({
+      home,
+      config: () => config,
+    }, req, res, pathname, method)) return
 
     if (await handleSettingsApi({
       home,

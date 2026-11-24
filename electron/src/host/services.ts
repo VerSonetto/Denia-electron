@@ -333,7 +333,6 @@ export class HostServices implements SessionServices {
     const files = discoverProjectInstructions(
       this.home,
       roots,
-      touchedPathsOf(events, roots[0]!),
       1_048_576,
       header.subagent ? 'project-only' : 'global-and-project',
     )
@@ -453,26 +452,4 @@ export class HostServices implements SessionServices {
     this.mcpTools.set(name, tool)
     return tool
   }
-}
-
-/** Paths touched by file tools in this session (project instructions). */
-function touchedPathsOf(events: Envelope[], cwd: string): string[] {
-  const out: string[] = []
-  for (const event of events) {
-    if (event.type !== 'tool-call') continue
-    if (!['read_file', 'write_file', 'edit', 'grep', 'glob', 'ls'].includes(event.name)) continue
-    try {
-      const args = JSON.parse(event.arguments) as unknown
-      if (typeof args !== 'object' || args === null || Array.isArray(args)) continue
-      const raw = (args as Record<string, unknown>).path
-      if (typeof raw !== 'string' || raw.trim() === '') continue
-      const absolute = raw.startsWith('/') || /^[A-Za-z]:[\\/]/.test(raw)
-        ? raw
-        : `${cwd}/${raw}`
-      if (!out.includes(absolute)) out.push(absolute)
-    } catch {
-      /* unparsable arguments do not contribute touched paths */
-    }
-  }
-  return out.slice(-32)
 }

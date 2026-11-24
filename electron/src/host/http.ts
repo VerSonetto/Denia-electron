@@ -69,6 +69,16 @@ export function writeSse(res: ServerResponse, payload: unknown): void {
   }
 }
 
+/** Named SSE frame; the web client reads `event: error` as a failure frame. */
+export function writeSseEvent(res: ServerResponse, event: string, payload: unknown): void {
+  if (res.writableEnded || res.destroyed) return
+  try {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`)
+  } catch {
+    /* client went away; close handler cleans up */
+  }
+}
+
 export function mimeOf(file: string): string {
   const ext = path.extname(file).toLowerCase()
   switch (ext) {

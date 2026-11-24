@@ -197,7 +197,7 @@ test('project memory: deterministic root, index projection, search and rebuild',
   assert.ok(health.indexLines > 0)
 })
 
-test('project instructions: scope, rendering and idempotence', () => {
+test('project instructions: one file per selected root, scope, rendering and idempotence', () => {
   const home = tempDir('denia-rules-home-')
   const project = tempDir('denia-rules-project-')
   const sub = path.join(project, 'packages', 'app')
@@ -207,18 +207,27 @@ test('project instructions: scope, rendering and idempotence', () => {
   fs.writeFileSync(path.join(project, 'AGENTS.md'), 'project rule')
   fs.writeFileSync(path.join(sub, 'AGENTS.md'), 'sub rule')
 
-  const all = discoverProjectInstructions(home, sub, [], 1_048_576, 'global-and-project')
-  assert.deepEqual(all.map((file) => file.displayPath), ['~/AGENTS.md', 'AGENTS.md', 'packages/app/AGENTS.md'])
-  const child = discoverProjectInstructions(home, sub, [], 1_048_576, 'project-only')
-  assert.deepEqual(child.map((file) => file.displayPath), ['AGENTS.md', 'packages/app/AGENTS.md'])
+  // The selected root is the project root: only that root's AGENTS.md plus the global one.
+  const all = discoverProjectInstructions(home, project, 1_048_576, 'global-and-project')
+  assert.deepEqual(all.map((file) => file.displayPath), ['~/AGENTS.md', 'AGENTS.md'])
+  assert.deepEqual(all.map((file) => file.content), ['global rule', 'project rule'])
+  const child = discoverProjectInstructions(home, project, 1_048_576, 'project-only')
+  assert.deepEqual(child.map((file) => file.displayPath), ['AGENTS.md'])
+
+  // The selected root is a subdirectory: only that subdirectory's AGENTS.md is
+  // read; ancestor instructions are no longer discovered.
+  const fromSub = discoverProjectInstructions(home, sub, 1_048_576, 'global-and-project')
+  assert.deepEqual(fromSub.map((file) => file.content), ['global rule', 'sub rule'])
+  assert.ok(!fromSub.some((file) => file.content === 'project rule'))
 
   const rendered = renderProjectInstructions(all, 1_048_576, null)
   assert.ok(rendered?.includes('global rule'))
   assert.ok(rendered?.includes('project rule'))
+  assert.ok(!rendered?.includes('sub rule'))
   assert.equal(renderProjectInstructions(all, 1_048_576, rendered), null, 'unchanged body is idempotent')
   fs.writeFileSync(path.join(project, 'AGENTS.md'), 'project rule v2')
   const changed = renderProjectInstructions(
-    discoverProjectInstructions(home, sub, [], 1_048_576, 'global-and-project'),
+    discoverProjectInstructions(home, project, 1_048_576, 'global-and-project'),
     1_048_576,
     rendered,
   )

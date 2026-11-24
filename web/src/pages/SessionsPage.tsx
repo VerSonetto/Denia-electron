@@ -157,7 +157,8 @@ export default function SessionsPage({
   const {
     transcriptNodes,
     sessionTotals,
-    openTurnAt,
+    openTurn,
+    openTurnStartedAt,
     axisAnchors,
     setAxisAnchors,
     axisJump,
@@ -1293,7 +1294,7 @@ export default function SessionsPage({
                 />
               ) : composerCard}
               {phase === 'active' && (
-                <StatsBar nodes={transcriptNodes} totals={sessionTotals} openTurnStartedAt={openTurnAt} />
+                <StatsBar nodes={transcriptNodes} totals={sessionTotals} openTurn={openTurn} openTurnStartedAt={openTurnStartedAt} />
               )}
             </div>
           </div>

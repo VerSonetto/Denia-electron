@@ -26,7 +26,8 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
   按严格 JSON 审查，超时/失败一律拒绝；项目记忆写入是独立的 memory-write 类
 - **审查面板**：按项目目录聚合 Git 状态；同一仓库自动去重；可切单个目录审查、Diff、提交与推送，也可对全部目录批量提交/推送；非 Git 目录显式标注
 - **HTTP/SSE 宿主**：会话列表/创建/快照/分页/发消息/取消/引导、follow SSE、
-  全局事件 SSE、模型目录、设置、项目、文件树/文件读取、审批应答
+  全局事件 SSE、模型目录与流式 chat（提示词优化 / 连通性探测）、设置、项目、
+  文件树/文件读取、审批应答
 - **MCP**：stdio / Streamable HTTP / HTTP+SSE 三种传输；`mcp__<server>__<tool>`
   命名与冲突过滤；`mcp_list` 目录 + 首次调用懒加载参数；按字符分页与
   `result_id` 续读（续读不重新执行外部工具）；`/api/mcp` 管理端点（增删改、
@@ -44,7 +45,7 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
 - **项目记忆**：`<home>/memories/projects/<slug>-<sha16>/memory/` 桶；
   `MEMORY.md` 索引注入（剔除历史区、行/字节预算）；memory-write 权限类；
   `/api/memories/projects` 列表/读写/检索/重建/体检
-- **项目指令**：`AGENTS.md` 分层发现（全局 + 每个项目目录的祖先链 + 触达文件后代链），
+- **项目指令**：`AGENTS.md` 每个所选项目目录根各读一个（外加全局 `~/AGENTS.md`），
   子代理仅项目级；按正文变化幂等注入；`/api/global-rules` 读写
 - **标题 / 上下文**：首轮后后台生成 `session-title`；`/context-breakdown`
   近似 token 拆分与压力；手动压缩按整轮摘要并落 `compaction-summary`

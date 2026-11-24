@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { SessionAnchor } from '../../api'
-import { openTurnStartedAt, type TranscriptNode } from '../../fold'
+import type { TranscriptNode } from '../../fold'
 import { attach } from '../../sessionStreams'
 import {
   applyTotalsEvent,
@@ -63,8 +63,15 @@ export function useSessionTranscriptStats(activeId: string | null) {
     },
     [],
   )
-  /** 进行中轮次的起点:耗时胶囊据此实时跳动(闭合后自动归零)。 */
-  const openTurnAt = useMemo(() => openTurnStartedAt(transcriptNodes) ?? null, [transcriptNodes])
+  /**
+   * 未闭合轮次的起点:直接吃事件,不等 transcript 节点的 200ms 节流。
+   *
+   * 只存布尔不够 —— 耗时胶囊还要本轮起点;而节点尚未刷到时,按节点推导
+   * 的起点要么缺失,要么还是上一轮的尾巴。这里在 turn-start 写入事件时间,
+   * turn-end 立即清空,重连快照从未闭合表重建。null 即"已闭合",状态栏
+   * 用它给轮次计数补上进行中的这一轮。
+   */
+  const [liveTurnStartedAt, setLiveTurnStartedAt] = useState<number | null>(null)
   // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
   const [axisAnchors, setAxisAnchors] = useState<SessionAnchor[]>([])
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
@@ -82,6 +89,7 @@ export function useSessionTranscriptStats(activeId: string | null) {
     // 会话的耗时/token。
     totalsRef.current = { totals: emptyTotals(), openTurns: new Map() }
     setSessionTotals(emptyTotals())
+    setLiveTurnStartedAt(null)
     setAxisAnchors([])
     setAxisJump(null)
   }, [])
@@ -94,11 +102,18 @@ export function useSessionTranscriptStats(activeId: string | null) {
         // 未闭合轮次表用页面事件重建;之后的重连重快照同样以新基准校正。
         totalsRef.current = resetTotals(totalsFromPage(meta?.totals), events)
         setSessionTotals({ ...totalsRef.current.totals })
+        const starts = [...totalsRef.current.openTurns.values()]
+        setLiveTurnStartedAt(starts.length > 0 ? Math.max(...starts) : null)
       },
       onEnvelope: (event) => {
         // 累计统计的实时增量:结算/工具调用/轮次闭合才动累计值,流式帧不动。
         if (applyTotalsEvent(totalsRef.current, event)) {
           setSessionTotals({ ...totalsRef.current.totals })
+        }
+        // 轮次开关与起点不吃节流:turn-start 立即写入,turn-end 立即清空。
+        if (event.type === 'turn-start' || event.type === 'turn-end') {
+          const starts = [...totalsRef.current.openTurns.values()]
+          setLiveTurnStartedAt(starts.length > 0 ? Math.max(...starts) : null)
         }
       },
     })
@@ -110,7 +125,8 @@ export function useSessionTranscriptStats(activeId: string | null) {
   return {
     transcriptNodes,
     sessionTotals,
-    openTurnAt,
+    openTurn: liveTurnStartedAt !== null,
+    openTurnStartedAt: liveTurnStartedAt,
     axisAnchors,
     setAxisAnchors,
     axisJump,

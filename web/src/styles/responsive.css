@@ -600,13 +600,16 @@
   .composer-image-remove { opacity: 1; }
 }
 /* ---- 输入区停靠面板(手机):触摸目标与行距 ----
-   桌面上的胶囊只有 22px、队列动作键 24px,手指按不准;这里只改尺寸与间距,
+   桌面上的胶囊只有 26px、队列动作键 24px,手指按不准;这里只改尺寸与间距,
    不碰配色与圆角。 */
 @media (max-width: 820px) {
-  /* 375px 下状态栏本来就要折行,间距收回 6px 多换一列的宽度。 */
-  .stats-bar { gap: 6px; }
-  /* 抬到 32px:次级触摸目标够用,又不至于把折行后的状态栏吃掉半屏。 */
-  .stats-pill { min-height: 32px; padding: 6px 10px; }
+  /* 375px 下状态栏本来就要折行,簇间收 5px 多换一列宽度。 */
+  .stats-bar { gap: 5px; }
+  /* 抬到 30px:次级触摸目标够用,又不至于把折行后的状态栏吃掉半屏。 */
+  .stats-cluster { height: 30px; font-size: 13px; }
+  .stats-cell { padding: 4px 6px; }
+  .stats-label { font-size: 12px; }
+  .stats-value { font-size: 13px; }
   /* 可点面板头与目标条同样给到手指尺寸(46px 含边框,三者仍对齐)。
      左内边距不能写成padding: 12px 简写 —— 那会把左侧重置回 12px,面板内容
      又比输入卡控件多缩进 3px。 */

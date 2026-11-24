@@ -64,6 +64,11 @@
 /electron/node_modules/
 /electron/dist/
 /electron/release/
+# 一次性发布验证产物(release-final / release-new / release-verify* 等)
+/electron/release-*/
+# 本机联调临时 home / user-data 与命令行调试输出
+/.denia-tmp/
+/electron/-y
 
 # esbuild 偶发把输出写到包根目录,构建产物不入库
 /electron/main.js

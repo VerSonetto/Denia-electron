@@ -5,7 +5,7 @@
 // JSON-RPC frame and returns the matching response.
 
 import { spawn } from 'node:child_process'
-import type { ChildProcess } from 'node:child_process'
+import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
@@ -145,13 +145,28 @@ class StdioTransport implements McpTransport {
     cwd: string | null,
   ): Promise<StdioTransport> {
     const resolved = resolveProgram(command)
-    const child = spawn(resolved.program, args, {
+    let program: string
+    let argv: string[]
+    let options: SpawnOptions = {
       cwd: cwd ?? undefined,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: resolved.consoleShim,
       detached: false,
-    })
+    }
+    if (resolved.consoleShim) {
+      // Windows cannot spawn .cmd/.bat directly (CreateProcess only runs real
+      // executables); Node surfaces that failure as `spawn EINVAL`. Route the
+      // shim through cmd.exe with verbatim, per-token quoting so args such as
+      // `a b`, `c&d` and embedded quotes reach the shim unchanged.
+      program = process.env.ComSpec?.trim() || 'cmd.exe'
+      argv = ['/d', '/s', '/c', cmdLine(resolved.program, args)]
+      options = { ...options, windowsVerbatimArguments: true }
+    } else {
+      program = resolved.program
+      argv = args
+    }
+    const child = spawn(program, argv, options)
     await new Promise<void>((resolve, reject) => {
       const onSpawn = (): void => {
         child.off('error', onError)
@@ -299,6 +314,18 @@ function resolveProgram(command: string): { program: string; consoleShim: boolea
     }
   }
   return { program: command, consoleShim: false }
+}
+
+/**
+ * Build the command line passed to `cmd.exe /d /s /c` for a .cmd/.bat shim.
+ * Tokens containing cmd metacharacters are quoted individually; the whole
+ * line is quoted once more as the `/c` argument. Paired with
+ * `windowsVerbatimArguments`, this preserves each argument exactly.
+ */
+function cmdLine(program: string, args: string[]): string {
+  const quote = (token: string): string =>
+    /^[\w.\\/:=@+-]+$/.test(token) ? token : `"${token.replace(/"/g, '\\"')}"`
+  return `"${[program, ...args].map(quote).join(' ')}"`
 }
 
 // ---------------------------------------------------------------------------
