@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { optimizePromptText } from '../../promptOptimizer';
 import { notify } from '../../appStore';
 import { t } from '../../i18n';
@@ -8,7 +8,7 @@ import type { ModelSelection } from '../../types';
 export function usePromptOptimize({
   activeId,
   selection,
-  inert,
+  composerScope,
   running,
   sending,
   prompt,
@@ -16,7 +16,7 @@ export function usePromptOptimize({
 }: {
   activeId: string | null
   selection: ModelSelection | null
-  inert: boolean
+  composerScope: string | null
   running: boolean
   sending: boolean
   prompt: string
@@ -28,28 +28,34 @@ export function usePromptOptimize({
   const [optimizedPrompt, setOptimizedPrompt] = useState<string | null>(null)
   const originalPromptRef = useRef('')
   const optimizeAbortRef = useRef<AbortController | null>(null)
-  const optimizingRef = useRef(false)
 
+  // 欢迎页切项目时 activeId 仍是 null；请求和撤销都归属于发起它的草稿。
+  useLayoutEffect(() => {
+    setOptimizing(false)
+    setOptimizedPrompt(null)
+    originalPromptRef.current = ''
+    return () => {
+      optimizeAbortRef.current?.abort()
+      optimizeAbortRef.current = null
+    }
+  }, [composerScope])
+
+  const canOptimize = Boolean(composerScope && selection && prompt.trim() && !optimizing && !running && !sending)
   const handleOptimize = async () => {
-    if (!activeId || !selection || optimizing || optimizingRef.current || inert || running || sending) return
+    if (!canOptimize || !selection || optimizeAbortRef.current) return
     const original = prompt
-    if (!original.trim()) return
-    const sessionId = activeId
     const controller = new AbortController()
-    optimizeAbortRef.current?.abort()
     optimizeAbortRef.current = controller
-    optimizingRef.current = true
-    originalPromptRef.current = original
     setOptimizedPrompt(null)
     setOptimizing(true)
     try {
       const optimized = await optimizePromptText({
-        sessionId,
+        sessionId: activeId,
         prompt: original,
         selection,
         signal: controller.signal,
       })
-      if (activeId !== sessionId || optimizeAbortRef.current !== controller) return
+      if (optimizeAbortRef.current !== controller) return
       applyDraftRef.current(optimized)
       originalPromptRef.current = original
       setOptimizedPrompt(optimized)
@@ -60,7 +66,6 @@ export function usePromptOptimize({
     } finally {
       if (optimizeAbortRef.current === controller) {
         optimizeAbortRef.current = null
-        optimizingRef.current = false
         setOptimizing(false)
       }
     }
@@ -73,12 +78,10 @@ export function usePromptOptimize({
 
   return {
     optimizing,
-    setOptimizing,
-    optimizingRef,
+    canOptimize,
     optimizedPrompt,
     setOptimizedPrompt,
     originalPromptRef,
-    optimizeAbortRef,
     handleOptimize,
     handleUndoOptimize,
   }

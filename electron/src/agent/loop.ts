@@ -62,6 +62,12 @@ import {
 import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.ts'
 import { deriveHistory, deriveSurface, hasOpenTurn, lastTurn } from './history.ts'
 import type { SurfaceItem } from './history.ts'
+import {
+  LOOP_GUARD_CHANNEL,
+  LOOP_GUARD_STRONG_REMINDER,
+  LOOP_GUARD_WEAK_REMINDER,
+  LoopGuard,
+} from './loop-guard.ts'
 import { CacheWarmer } from './cache-warm.ts'
 import { compactSession } from './compact.ts'
 import { loadConsoleCacheSettings } from './console-settings.ts'
@@ -86,7 +92,6 @@ import type { JobManager } from '../jobs/manager.ts'
 /** 单轮步骤默认不设上限:靠用户取消、循环检测与上下文预算收束。 */
 const MAX_STEPS = Number.POSITIVE_INFINITY
 const MAX_PARALLEL = 10
-const LOOP_THRESHOLD = 5
 /** Consecutive auto-summary failures before a session stops retrying. */
 const MAX_COMPACTION_FAILURES = 3
 /**
@@ -200,8 +205,57 @@ function archivedCallNote(call: ToolCallRef): string {
   return `[工具调用归档] ${target || '写入'} 已成功写入;调用参数与结果因体积过大已移出上下文,文件内容以磁盘为准,需要时用 read_file 回读。`
 }
 
+interface CallExecution {
+  output: ToolOutput
+  /** True when the driver can prove the tool body was not entered. */
+  notExecuted: boolean
+}
+
 function abortedReason(): TurnEndReason {
   return { kind: 'aborted', cause: { kind: 'user' } }
+}
+
+/** Latest real user/agent message after an already-processed boundary. */
+function latestInboundSeq(events: readonly Envelope[], afterSeq = 0): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.seq <= afterSeq) break
+    if (event.type === 'agent-delivery') return event.seq
+    if (event.type === 'user-message' && !event.injected) return event.seq
+  }
+  return afterSeq
+}
+
+/** Latest permission change after an already-processed boundary. */
+function latestPermissionSeq(events: readonly Envelope[], afterSeq = 0): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.seq <= afterSeq) break
+    if (event.type === 'permission-mode' || event.type === 'permission-selection') return event.seq
+  }
+  return afterSeq
+}
+
+/**
+ * New input after the current request (real user message, delivered agent
+ * message, queued inbox entry or permission change) deserves a step before a
+ * reminder is injected or a hard stop is taken.
+ */
+function hasNewInputSince(events: readonly Envelope[], afterSeq: number): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.seq <= afterSeq) break
+    if (
+      event.type === 'agent-inbox' ||
+      event.type === 'agent-delivery' ||
+      event.type === 'permission-mode' ||
+      event.type === 'permission-selection' ||
+      (event.type === 'user-message' && !event.injected)
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 /**
@@ -332,6 +386,37 @@ export class SessionDriver {
   }
 
   /**
+   * Events that form the model-visible transcript. Legacy children resume
+   * from a frozen projection; a loop-guard reminder created during the
+   * current turn is appended to that projection so the next request is
+   * guaranteed to carry it (the projection itself is not rewritten).
+   */
+  private modelEventsFor(
+    sessionId: string,
+    events: Envelope[],
+    role: SubagentPromptContext | null,
+  ): Envelope[] {
+    if (!role?.legacy) return events
+    const projected = this.services?.historyFor?.(sessionId, events) ?? events
+    const seen = new Set(projected.map((event) => event.seq))
+    // Only the current turn's reminder may be appended to the frozen
+    // projection; older turns stay exactly as the projection recorded them.
+    let turnStartSeq = 0
+    for (const event of events) {
+      if (event.type === 'turn-start') turnStartSeq = event.seq
+    }
+    const reminders = events.filter(
+      (event) =>
+        event.type === 'user-message' &&
+        event.channel === LOOP_GUARD_CHANNEL &&
+        event.seq > turnStartSeq &&
+        !seen.has(event.seq),
+    )
+    if (reminders.length === 0) return projected
+    return [...projected, ...reminders].sort((a, b) => a.seq - b.seq)
+  }
+
+  /**
    * Current prompt composition for the context panel: the same inputs the
    * next request will use (frozen system prefix, effective tool schemas and
    * the model-visible surface), split by source. Pure estimate — the total
@@ -354,9 +439,7 @@ export class SessionDriver {
       } catch {
         role = null
       }
-      const events = role?.legacy
-        ? (this.services?.historyFor?.(sessionId, session.events) ?? session.events)
-        : session.events
+      const events = this.modelEventsFor(sessionId, session.events, role)
       const surface = deriveSurface(events)
       const permission = this.permissionStateOf(sessionId)
       const schemas = this.schemasFor(permission, sessionId, session.header)
@@ -638,7 +721,14 @@ export class SessionDriver {
     append({ type: 'turn-start', turn })
     turnOpen = true
 
-    const signatures = new Map<string, number>()
+    // Fresh per-turn detector: a new turn always starts with a clean count.
+    const loopGuard = new LoopGuard()
+    const guardBaselineEvents = this.store.read(sessionId)?.events ?? []
+    // The new turn starts from a clean detector; only events appended after
+    // the current log tail can be new input for this turn.
+    const guardBaselineSeq = guardBaselineEvents[guardBaselineEvents.length - 1]?.seq ?? 0
+    let loopGuardInboundSeq = guardBaselineSeq
+    let loopGuardPermissionSeq = guardBaselineSeq
     // One summary attempt per turn: a second pass over the same turn would
     // re-summarize history the user has not refilled yet.
     let compactionAttempted = false
@@ -700,7 +790,17 @@ export class SessionDriver {
           return
         }
         let events = this.store.read(sessionId)?.events ?? []
-        let modelEvents = role?.legacy ? this.services?.historyFor?.(sessionId, events) ?? events : events
+        // A real user/agent message or an explicit permission change is a
+        // business boundary: earlier repetition cannot be used after it. Scan
+        // only the tail that appeared since the last processed boundary.
+        const scannedToSeq = events[events.length - 1]?.seq ?? 0
+        const inboundSeq = latestInboundSeq(events, loopGuardInboundSeq)
+        if (inboundSeq > loopGuardInboundSeq) loopGuard.reset()
+        loopGuardInboundSeq = Math.max(loopGuardInboundSeq, scannedToSeq)
+        const permissionSeq = latestPermissionSeq(events, loopGuardPermissionSeq)
+        if (permissionSeq > loopGuardPermissionSeq) loopGuard.reset()
+        loopGuardPermissionSeq = Math.max(loopGuardPermissionSeq, scannedToSeq)
+        let modelEvents = this.modelEventsFor(sessionId, events, role)
         let surface = deriveSurface(modelEvents)
         let messages = withCacheProvenance(surface)
         const permission = this.permissionStateOf(sessionId)
@@ -737,6 +837,9 @@ export class SessionDriver {
         // update at the end of the cached history.
         const frozen = frozenSystem(framedCurrent, events, surface)
         const system = frozen.system
+        // The frozen prefix does not change the request header, so an effective
+        // system update must break the repetition run by itself.
+        if (frozen.update !== null) loopGuard.reset()
         if (frozen.update !== null) {
           append({
             type: 'user-message',
@@ -745,9 +848,7 @@ export class SessionDriver {
             channel: SYSTEM_UPDATE_CHANNEL,
           })
           events = this.store.read(sessionId)?.events ?? events
-          modelEvents = role?.legacy
-            ? this.services?.historyFor?.(sessionId, events) ?? events
-            : events
+          modelEvents = this.modelEventsFor(sessionId, events, role)
           surface = deriveSurface(modelEvents)
           messages = withCacheProvenance(surface)
         }
@@ -756,7 +857,10 @@ export class SessionDriver {
         // actually changes.
         const header = buildRequestHeader(selection, system, schemas)
         const previousHeader = lastRequestHeader(events)
-        if (!previousHeader || !sameRequestHeader(previousHeader.header, header)) {
+        const headerChanged =
+          previousHeader !== null && !sameRequestHeader(previousHeader.header, header)
+        if (headerChanged) loopGuard.reset()
+        if (!previousHeader || headerChanged) {
           append({
             type: 'request-header',
             turn,
@@ -767,7 +871,7 @@ export class SessionDriver {
           })
         }
 
-        append({
+        const requestContext = append({
           type: 'request-context',
           turn,
           step,
@@ -852,6 +956,10 @@ export class SessionDriver {
         }
 
         const roots = this.rootsOf(sessionId, session.header)
+        // Permission/approval events emitted while the batch runs are business
+        // boundaries for loop detection (never counted as repetition). Only a
+        // flag is kept: tool-output chunks may carry large bodies.
+        let approvalBoundary = false
         const batch = await this.executeCalls(calls, {
           sessionId,
           cwd: session.header.cwd,
@@ -868,6 +976,13 @@ export class SessionDriver {
             ? { fileHistory: this.services.fileHistory(sessionId, roots) }
             : {}),
           emit: (event) => {
+            if (
+              event.type === 'approval-decided' ||
+              event.type === 'permission-selection' ||
+              event.type === 'permission-mode'
+            ) {
+              approvalBoundary = true
+            }
             append(event)
           },
         }, (next) => {
@@ -875,6 +990,7 @@ export class SessionDriver {
         })
 
         const outputs = batch.outputs
+        const recordedOutputs: ToolOutput[] = new Array(calls.length)
         if (batch.aborted) {
           for (let index = 0; index < calls.length; index += 1) {
             if (outputs[index]) continue
@@ -891,6 +1007,7 @@ export class SessionDriver {
             content: '[工具错误] 工具没有返回结果',
             isError: true,
           }
+          recordedOutputs[index] = output
           const appended = append({
             type: 'tool-result',
             turn,
@@ -938,15 +1055,53 @@ export class SessionDriver {
         append({ type: 'step-end', turn, step })
         stepOpen = false
 
-        // Loop guard: the same tool call repeated verbatim is a stuck loop,
-        // not progress. Close the turn before burning more tokens.
-        for (const call of calls) {
-          const signature = `${call.name}\u0000${call.arguments}`
-          const repeats = (signatures.get(signature) ?? 0) + 1
-          signatures.set(signature, repeats)
-          if (repeats >= LOOP_THRESHOLD) {
-            closeTurn({ kind: 'loop-detected', repeats })
-            return
+        // Loop guard: one fingerprint per fully settled batch, observed only
+        // after step-end. A user approval or permission change in this batch is
+        // a business boundary, not stagnation.
+        if (approvalBoundary) {
+          loopGuard.reset()
+        } else {
+          const decision = loopGuard.observe({
+            calls: calls.map((call, index) => {
+              const output = recordedOutputs[index]!
+              return {
+                name: call.name,
+                arguments: call.arguments,
+                content: output.content,
+                isError: output.isError,
+                ...(output.errorIdentity ? { errorIdentity: output.errorIdentity } : {}),
+                notExecuted: batch.notExecuted[index] === true,
+                truncated: output.truncation !== undefined,
+                missing: batch.missing[index] === true,
+              }
+            }),
+          })
+          if (decision.kind === 'strong-reminder' || decision.kind === 'weak-reminder') {
+            // Input that arrived after the request wins over the reminder.
+            const latest = this.store.read(sessionId)?.events ?? []
+            if (hasNewInputSince(latest, requestContext?.seq ?? 0)) {
+              loopGuard.reset()
+            } else {
+              append({
+                type: 'user-message',
+                text:
+                  decision.kind === 'strong-reminder'
+                    ? LOOP_GUARD_STRONG_REMINDER
+                    : LOOP_GUARD_WEAK_REMINDER,
+                injected: true,
+                channel: LOOP_GUARD_CHANNEL,
+              })
+            }
+          } else if (decision.kind === 'stop') {
+            // A real user/agent message or a queued inbox entry that arrived
+            // after the request gets the next step before a hard stop.
+            const latest = this.store.read(sessionId)?.events ?? []
+            if (hasNewInputSince(latest, requestContext?.seq ?? 0)) {
+              loopGuard.reset()
+            } else {
+              closeTurn({ kind: 'loop-detected', repeats: decision.repeats })
+              return
+            }
           }
         }
       }
@@ -1194,20 +1349,28 @@ export class SessionDriver {
     calls: ToolCallRef[],
     ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
     onSelectionChange: (next: ModelSelection) => void,
-  ): Promise<{ outputs: ToolOutput[]; aborted: boolean }> {
+  ): Promise<{
+    outputs: ToolOutput[]
+    aborted: boolean
+    notExecuted: boolean[]
+    missing: boolean[]
+  }> {
     const outputs: ToolOutput[] = new Array(calls.length)
+    const notExecuted: boolean[] = new Array(calls.length).fill(false)
+    const missing: boolean[] = new Array(calls.length).fill(true)
     const inFlight = new Map<number, Promise<void>>()
     let next = 0
     let aborted = false
     // Resolves the moment the user stops the turn. Every pool wait races it:
     // a tool that cannot be interrupted must never keep the turn (and the UI's
     // running state) alive after stop.
+    let onAbort = (): void => {}
     const stopSignal = new Promise<void>((resolve) => {
       if (ctx.cancel.aborted) {
         resolve()
         return
       }
-      const onAbort = () => resolve()
+      onAbort = () => resolve()
       ctx.cancel.addEventListener('abort', onAbort, { once: true })
     })
 
@@ -1221,76 +1384,90 @@ export class SessionDriver {
         permission: state,
         confined: confinedFor(state, call),
         callId: call.id,
-      }).then((output) => {
-        outputs[index] = output
+      }).then((outcome) => {
+        outputs[index] = outcome.output
+        notExecuted[index] = outcome.notExecuted
+        missing[index] = false
       })
       inFlight.set(index, task)
       void task.finally(() => inFlight.delete(index))
     }
 
-    while (next < calls.length || inFlight.size > 0) {
-      if (ctx.cancel.aborted) {
-        aborted = true
-        break
-      }
-      let started = false
-      while (next < calls.length && inFlight.size < this.settings.maxParallel) {
-        const state = this.permissionStateOf(ctx.sessionId)
+    try {
+      while (next < calls.length || inFlight.size > 0) {
         if (ctx.cancel.aborted) {
           aborted = true
           break
         }
-        const call = calls[next]!
-        const intercepted = this.services?.intercept?.(call, ctx.sessionId)
-        if (intercepted) {
-          outputs[next] = intercepted
-          next += 1
-          started = true
-          continue
-        }
-        const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
-        if (gate.decision.kind === 'forbid') {
-          outputs[next] = toolError(gate.decision.reason)
-          next += 1
-          started = true
-          continue
-        }
-        if (gate.decision.kind === 'prompt' || gate.decision.kind === 'prompt-user') {
-          // Interactive reviews are serial: drain the pool first.
-          if (inFlight.size > 0) break
-          const outcome = await Promise.race([
-            this.dispatchReviewed(call, gate, state, ctx, onSelectionChange),
-            stopSignal.then(() => null),
-          ])
-          if (outcome === null) {
+        let started = false
+        while (next < calls.length && inFlight.size < this.settings.maxParallel) {
+          const state = this.permissionStateOf(ctx.sessionId)
+          if (ctx.cancel.aborted) {
             aborted = true
-            next += 1
             break
           }
-          outputs[next] = outcome.output
-          if (outcome.abort) aborted = true
+          const call = calls[next]!
+          const intercepted = this.services?.intercept?.(call, ctx.sessionId)
+          if (intercepted) {
+            outputs[next] = intercepted
+            missing[next] = false
+            next += 1
+            started = true
+            continue
+          }
+          const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
+          if (gate.decision.kind === 'forbid') {
+            outputs[next] = toolError(gate.decision.reason)
+            notExecuted[next] = true
+            missing[next] = false
+            next += 1
+            started = true
+            continue
+          }
+          if (gate.decision.kind === 'prompt' || gate.decision.kind === 'prompt-user') {
+            // Interactive reviews are serial: drain the pool first.
+            if (inFlight.size > 0) break
+            const outcome = await Promise.race([
+              this.dispatchReviewed(call, gate, state, ctx, onSelectionChange),
+              stopSignal.then(() => null),
+            ])
+            if (outcome === null) {
+              aborted = true
+              next += 1
+              break
+            }
+            outputs[next] = outcome.output
+            notExecuted[next] = outcome.notExecuted
+            missing[next] = false
+            if (outcome.abort) aborted = true
+            next += 1
+            started = true
+            continue
+          }
+          // Allow: an uncertified shell command must not overlap with the pool.
+          if (call.name === 'bash' && inFlight.size > 0) break
+          launch(next, state)
           next += 1
           started = true
+        }
+        if (inFlight.size > 0) {
+          await Promise.race([...inFlight.values(), stopSignal])
+          if (ctx.cancel.aborted) {
+            aborted = true
+            break
+          }
           continue
         }
-        // Allow: an uncertified shell command must not overlap with the pool.
-        if (call.name === 'bash' && inFlight.size > 0) break
-        launch(next, state)
-        next += 1
-        started = true
+        if (next >= calls.length) break
+        if (!started) break
       }
-      if (inFlight.size > 0) {
-        await Promise.race([...inFlight.values(), stopSignal])
-        if (ctx.cancel.aborted) {
-          aborted = true
-          break
-        }
-        continue
-      }
-      if (next >= calls.length) break
-      if (!started) break
+    } finally {
+      // One listener per batch, not per step: release it as soon as this
+      // batch settles so long legal turns do not accumulate AbortSignal
+      // listeners on the turn controller.
+      ctx.cancel.removeEventListener('abort', onAbort)
     }
-    return { outputs, aborted: aborted || ctx.cancel.aborted }
+    return { outputs, aborted: aborted || ctx.cancel.aborted, notExecuted, missing }
   }
 
   /** Record the approval, resolve it (user or automatic reviewer), then act. */
@@ -1300,7 +1477,7 @@ export class SessionDriver {
     state: PermissionState,
     ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
     onSelectionChange: (next: ModelSelection) => void,
-  ): Promise<{ output: ToolOutput; abort: boolean }> {
+  ): Promise<{ output: ToolOutput; abort: boolean; notExecuted: boolean }> {
     const append = ctx.emit
     const requestId = randomUUID()
     const reason = 'reason' in gate.decision ? gate.decision.reason : undefined
@@ -1361,29 +1538,33 @@ export class SessionDriver {
     if (!isAutoReview) append({ type: 'approval-decided', request_id: requestId, outcome })
 
     if (ctx.cancel.aborted) {
-      return { output: toolError('审批已被取消(轮次被中断)。'), abort: true }
+      return { output: toolError('审批已被取消(轮次被中断)。'), abort: true, notExecuted: true }
     }
     switch (answer.choice) {
       case 'accept':
-        return { output: await this.runAllowed(call, gate, ctx, answer, onSelectionChange), abort: false }
+        return { ...(await this.runAllowed(call, gate, ctx, answer, onSelectionChange)), abort: false }
       case 'accept-for-session':
         if (gate.cacheKey) this.grantsOf(ctx.sessionId).add(gate.cacheKey)
-        return { output: await this.runAllowed(call, gate, ctx, answer, onSelectionChange), abort: false }
+        return { ...(await this.runAllowed(call, gate, ctx, answer, onSelectionChange)), abort: false }
       case 'accept-with-rule':
         if (gate.proposedRule) await this.policy.appendAllow(gate.proposedRule)
         if (gate.cacheKey) this.grantsOf(ctx.sessionId).add(gate.cacheKey)
-        return { output: await this.runAllowed(call, gate, ctx, answer, onSelectionChange), abort: false }
+        return { ...(await this.runAllowed(call, gate, ctx, answer, onSelectionChange)), abort: false }
       case 'decline':
         if (isPlan) {
           const feedback = answer.plan?.feedback?.trim()
           const text = feedback
             ? `用户拒绝了该计划。请按以下补充建议修订计划后重新提交:\n${feedback}`
             : '用户拒绝了该计划。请修订计划后重新提交;不确定用户的顾虑时,先用 ask 工具询问。'
-          return { output: { content: text, isError: false }, abort: false }
+          return { output: { content: text, isError: false }, abort: false, notExecuted: true }
         }
-        return { output: toolError('用户拒绝了该操作;请改用项目目录内的方案,或先询问用户。'), abort: false }
+        return {
+          output: toolError('用户拒绝了该操作;请改用项目目录内的方案,或先询问用户。'),
+          abort: false,
+          notExecuted: true,
+        }
       case 'cancel':
-        return { output: toolError('审批已被取消(用户中断了本轮)。'), abort: true }
+        return { output: toolError('审批已被取消(用户中断了本轮)。'), abort: true, notExecuted: true }
     }
   }
 
@@ -1397,14 +1578,17 @@ export class SessionDriver {
     ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
     answer: ApprovalAnswer,
     onSelectionChange: (next: ModelSelection) => void,
-  ): Promise<ToolOutput> {
+  ): Promise<CallExecution> {
     const state = this.permissionStateOf(ctx.sessionId)
     if (call.name === 'exit_plan') {
-      return this.applyPlanApproval(ctx.sessionId, answer, ctx.emit, onSelectionChange)
+      return {
+        output: this.applyPlanApproval(ctx.sessionId, answer, ctx.emit, onSelectionChange),
+        notExecuted: true,
+      }
     }
     const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
     if (recheck.decision.kind === 'forbid') {
-      return toolError(`批准后重新判权被拒绝:${recheck.decision.reason}`)
+      return { output: toolError(`批准后重新判权被拒绝:${recheck.decision.reason}`), notExecuted: true }
     }
     return this.runOne(call, {
       ...ctx,
@@ -1496,17 +1680,27 @@ export class SessionDriver {
     return entries.slice(-12)
   }
 
-  private async runOne(call: ToolCallRef, ctx: ToolContext): Promise<ToolOutput> {
+  private async runOne(call: ToolCallRef, ctx: ToolContext): Promise<CallExecution> {
     if (ctx.cancel.aborted) {
-      return { content: '[工具错误] 命令被用户中断', isError: true, errorIdentity: { name: call.name, code: 'cancelled' } }
+      return {
+        output: {
+          content: '[工具错误] 命令被用户中断',
+          isError: true,
+          errorIdentity: { name: call.name, code: 'cancelled' },
+        },
+        notExecuted: true,
+      }
     }
     const tool = this.registry.get(call.name)
     if (!tool && !this.services?.executeExtra) {
       const available = this.registry.names().join(', ')
       return {
-        content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
-        isError: true,
-        errorIdentity: { name: call.name, code: 'unknown-tool' },
+        output: {
+          content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'unknown-tool' },
+        },
+        notExecuted: true,
       }
     }
     let args: Record<string, unknown>
@@ -1518,9 +1712,12 @@ export class SessionDriver {
       args = parsed as Record<string, unknown>
     } catch (error) {
       return {
-        content: `[工具错误] 参数解析失败:${errorMessage(error)}\n原始参数:${call.arguments.slice(0, 2000)}`,
-        isError: true,
-        errorIdentity: { name: call.name, code: 'bad-arguments' },
+        output: {
+          content: `[工具错误] 参数解析失败:${errorMessage(error)}\n原始参数:${call.arguments.slice(0, 2000)}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'bad-arguments' },
+        },
+        notExecuted: true,
       }
     }
     try {
@@ -1530,20 +1727,33 @@ export class SessionDriver {
       if (!output) {
         const available = this.registry.names().join(', ')
         return {
-          content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
-          isError: true,
-          errorIdentity: { name: call.name, code: 'unknown-tool' },
+          output: {
+            content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
+            isError: true,
+            errorIdentity: { name: call.name, code: 'unknown-tool' },
+          },
+          notExecuted: true,
         }
       }
-      return this.commitToolOutput(ctx.sessionId, call, output)
+      return { output: this.commitToolOutput(ctx.sessionId, call, output), notExecuted: false }
     } catch (error) {
       if (ctx.cancel.aborted) {
-        return { content: '[工具错误] 命令被用户中断', isError: true, errorIdentity: { name: call.name, code: 'cancelled' } }
+        return {
+          output: {
+            content: '[工具错误] 命令被用户中断',
+            isError: true,
+            errorIdentity: { name: call.name, code: 'cancelled' },
+          },
+          notExecuted: true,
+        }
       }
       return {
-        content: `[工具错误] ${errorMessage(error)}`,
-        isError: true,
-        errorIdentity: { name: call.name, code: 'tool-panic' },
+        output: {
+          content: `[工具错误] ${errorMessage(error)}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'tool-panic' },
+        },
+        notExecuted: false,
       }
     }
   }

@@ -23,7 +23,7 @@ export function ComposerToolbar({
   optimizing,
   sending,
   running,
-  prompt,
+  canOptimize,
   promptEmpty,
   primaryStops,
   contextProjectPath,
@@ -57,7 +57,7 @@ export function ComposerToolbar({
   optimizing: boolean
   sending: boolean
   running: boolean
-  prompt: string
+  canOptimize: boolean
   promptEmpty: boolean
   primaryStops: boolean
   contextProjectPath: string | null
@@ -142,15 +142,7 @@ export function ComposerToolbar({
           className={`icon-btn composer-opt-btn${optimizedPrompt ? ' undo' : ''}${optimizing ? ' busy' : ''}`}
           title={optimizedPrompt ? t('optimizeUndo') : t('optimizePromptHint')}
           aria-label={optimizing ? t('optimizing') : optimizedPrompt ? t('optimizeUndo') : t('optimizePrompt')}
-          disabled={
-            inert ||
-            optimizing ||
-            running ||
-            sending ||
-            !activeId ||
-            !selection ||
-            (!optimizedPrompt && !prompt.trim())
-          }
+          disabled={!canOptimize}
           onClick={() => {
             if (optimizedPrompt) onUndoOptimize()
             else onOptimize()

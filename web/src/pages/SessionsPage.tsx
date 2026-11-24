@@ -218,7 +218,8 @@ export default function SessionsPage({
     el.style.height = `${el.scrollHeight}px`
   }, [])
 
-  const inert = !activeId && !activeProject
+  const composerScope = activeId ? `session:${activeId}` : activeProject ? `project:${activeProject.id}` : null
+  const inert = composerScope === null
 
   /* 占位提示跟内容走,不跟 DOM 结构走:浏览器删掉最后一段文字后会补一个
    * 占位 `<br>`,`:empty` 因此不再匹配、提示消失。看观察器而不是只改输入
@@ -235,9 +236,9 @@ export default function SessionsPage({
   const composingRef = useRef(false)
   const inputHistory = useInputHistory({ sessionId: activeId })
   const {
-    optimizing, setOptimizing, optimizingRef, optimizedPrompt, setOptimizedPrompt,
-    originalPromptRef, optimizeAbortRef, handleOptimize, handleUndoOptimize,
-  } = usePromptOptimize({ activeId, selection, inert, running, sending, prompt, applyDraftRef })
+    optimizing, canOptimize, optimizedPrompt, setOptimizedPrompt,
+    originalPromptRef, handleOptimize, handleUndoOptimize,
+  } = usePromptOptimize({ activeId, selection, composerScope, running, sending, prompt, applyDraftRef })
   const onDraftChange = useCallback((text: string) => {
     inputHistory.resetBrowse()
     setPrompt(text)
@@ -279,12 +280,6 @@ export default function SessionsPage({
   const closeMentionRef = useRef(closeMention)
   closeMentionRef.current = closeMention
   useEffect(() => {
-    optimizeAbortRef.current?.abort()
-    optimizeAbortRef.current = null
-    optimizingRef.current = false
-    setOptimizing(false)
-    setOptimizedPrompt(null)
-    originalPromptRef.current = ''
     setSending(false)
     setPendingMessages([])
     sendingRef.current = false
@@ -328,7 +323,6 @@ export default function SessionsPage({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([])
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
-  const composerScope = activeId ? `session:${activeId}` : activeProject ? `project:${activeProject.id}` : null
   const composerSnapshotRef = useRef<ComposerSnapshot>({ text: '', images: [], attachments: [], quotes: [], queue: [] })
   const composerReadyRef = useRef(false)
   // postMessage 镜像:每渲染重赋(赋值处在 postMessage 定义之后),
@@ -1114,7 +1108,7 @@ export default function SessionsPage({
         optimizing={optimizing}
         sending={sending}
         running={running}
-        prompt={prompt}
+        canOptimize={composerReady && canOptimize}
         promptEmpty={promptEmpty}
         primaryStops={primaryStops}
         contextProjectPath={contextProjectPath}
