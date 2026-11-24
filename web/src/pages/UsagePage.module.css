@@ -44,6 +44,24 @@
   padding: 32px var(--usage-pad) 72px;
 }
 
+/* 嵌在设置页里:滚动与外边距由设置面板负责,这里只保留内容本身。 */
+.page[data-embedded] {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  background: transparent;
+}
+
+.page[data-embedded] .content {
+  max-width: none;
+  padding: 0;
+}
+
+.headerTop[data-embedded] {
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
 /* ---------- 页头 ---------- */
 
 .header {

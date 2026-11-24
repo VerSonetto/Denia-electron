@@ -17,7 +17,7 @@ try {
   for (const hash of ['', '#s=123', '#extensions/unknown', '#extensions/mcp/extra']) assert.equal(extensionTabFromHash(hash), null)
   const app = readFileSync(join(root, 'src/App.tsx'), 'utf8')
   assert.ok(app.indexOf('sidebar-extensions-btn') > app.indexOf("{t('newSession')}"), '拓展管理入口必须在新建会话下方')
-  const settings = readFileSync(join(root, 'src/components/SettingsModal.tsx'), 'utf8')
+  const settings = readFileSync(join(root, 'src/pages/SettingsPage.tsx'), 'utf8')
   assert.ok(!settings.includes("'mcp'") && !settings.includes('onOpenExtensions'), '设置中不再保留 MCP 或拓展管理入口')
   assert.ok(app.includes('!isMobile && !extensionTab'), '管理页面不应被会话侧面板挤占')
   assert.ok(app.includes('if (tab) return'), '拓展路由不应清除当前会话')

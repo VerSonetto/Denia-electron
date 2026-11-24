@@ -249,16 +249,14 @@ try {
   assert.ok(page.includes("role=\"tab\""))
   assert.ok(page.includes('aria-selected'))
   assert.ok(page.includes('lifetime'), '总览条读 lifetime,不随区间缩水')
+  const settingsRoute = readFileSync(join(root, 'src/settingsRoute.ts'), 'utf8')
+  assert.ok(settingsRoute.includes("'#usage'"), '旧用量地址仍可直达设置内用量分类')
+  assert.ok(settingsRoute.includes("'usage'"), '设置分类包含用量')
+  const settingsPage = readFileSync(join(root, 'src/pages/SettingsPage.tsx'), 'utf8')
+  assert.ok(settingsPage.includes('<UsagePage embedded'), '用量统计嵌入设置页')
   const app = readFileSync(join(root, 'src/App.tsx'), 'utf8')
-  assert.ok(app.includes("hash === '#usage'"), '用量页可直达')
-  assert.ok(app.includes('sidebar-usage-btn'), '侧栏有入口')
-  const railStart = app.indexOf('className="sidebar-rail"')
-  assert.ok(railStart >= 0, '收起态侧栏应常驻')
-  const railSource = app.slice(railStart, app.indexOf('</aside>', railStart))
-  assert.ok(
-    railSource.includes('openUsage') && railSource.includes("t('usagePageTitle')"),
-    '收起态侧栏也有入口',
-  )
+  assert.ok(app.includes('settingsTabFromHash'), '整页路由驱动设置界面')
+  assert.ok(!app.includes('sidebar-usage-btn'), '用量不再占用侧栏独立入口')
   const api = readFileSync(join(root, 'src/api.ts'), 'utf8')
   assert.ok(api.includes('/api/usage?range='), '请求带区间参数')
 

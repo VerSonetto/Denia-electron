@@ -30,6 +30,10 @@ export function IconSettingsModels(props: IconProps) {
   return <Icon {...props}><rect x="5" y="5" width="10" height="10" rx="2" /><rect x="8" y="8" width="4" height="4" rx=".5" /><path d="M8 2.5V5m4-2.5V5M8 15v2.5m4-2.5v2.5M2.5 8H5m-2.5 4H5m10-4h2.5M15 12h2.5" /></Icon>
 }
 
+export function IconSettingsUsage(props: IconProps) {
+  return <Icon {...props}><path d="M3 17h14M6 17v-5m4 5V8m4 9v-3" /></Icon>
+}
+
 export function IconSettingsMemory(props: IconProps) {
   return <Icon {...props}><path d="M5 3h10a1 1 0 0 1 1 1v13H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 0v14M8 7h5M8 10h4" /></Icon>
 }

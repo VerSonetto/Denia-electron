@@ -8,6 +8,7 @@ import { UpdateBadge } from './components/updates/UpdateBadge'
 import { ensureStartupUpdateCheck, useUpdateDialogOpen } from './updateStore'
 import { loadComposer } from './composerMemory'
 import { extensionTabFromHash, type ExtensionTab } from './extensionsRoute'
+import { settingsHash, settingsTabFromHash, type SettingsTab } from './settingsRoute'
 import * as api from './api'
 import {
   addSessionLocal,
@@ -79,7 +80,6 @@ import {
   IconNewSession,
   IconExtensions,
   IconSessionSearch,
-  IconUsage,
 } from './components/icons'
 import { ProjectDialog } from './components/ProjectDialog'
 import { ConfirmDialog } from './components/ConfirmDialog'
@@ -87,13 +87,12 @@ import { SidebarProjects } from './components/sidebar/SidebarProjects'
 import { DesktopTitleBar } from './components/DesktopTitleBar'
 
 // 设置/浏览器面板按需加载,减少首屏主包体积。
-const LazySettingsModal = lazy(() =>
-  import('./components/SettingsModal').then((module) => ({ default: module.SettingsModal })),
+const LazySettingsPage = lazy(() =>
+  import('./pages/SettingsPage').then((module) => ({ default: module.SettingsPage })),
 )
 const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
 const LazyExtensionsPage = lazy(() => import('./pages/ExtensionsPage'))
 const LazyVersionPage = lazy(() => import('./pages/VersionPage'))
-const LazyUsagePage = lazy(() => import('./pages/UsagePage'))
 const LazyUpdateDialog = lazy(() => import('./components/updates/UpdateDialog').then((module) => ({ default: module.UpdateDialog })))
 import type { ProjectRecord, SessionSummary } from './types'
 
@@ -119,36 +118,45 @@ export default function App() {
   // running 集合:服务端 SSE 推送驱动(侧栏圆点与状态栏同源)。
   const runningIds = useRunningIds()
 
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(() => settingsTabFromHash(window.location.hash))
   const [versionOpen, setVersionOpen] = useState(() => window.location.hash === '#version')
-  const [usageOpen, setUsageOpen] = useState(() => window.location.hash === '#usage')
+  // 从设置里点进版本页时记住来源分类:版本页的"返回"回到设置,而不是
+  // 直接掉回会话。从更新弹窗打开时没有来源,自然回不到设置。
+  const [versionReturnTab, setVersionReturnTab] = useState<SettingsTab | null>(null)
   const [extensionTab, setExtensionTab] = useState<ExtensionTab | null>(() => extensionTabFromHash(window.location.hash))
   const updateDialogOpen = useUpdateDialogOpen()
   const openVersion = useCallback(() => {
-    setSettingsOpen(false)
+    setVersionReturnTab(settingsTab)
+    setSettingsTab(null)
     setExtensionTab(null)
-    setUsageOpen(false)
     setVersionOpen(true)
     window.location.hash = 'version'
-  }, [])
-  const closeVersion = useCallback(() => setVersionOpen(false), [])
-  const openUsage = useCallback(() => {
-    setSettingsOpen(false)
+  }, [settingsTab])
+  const closeVersion = useCallback(() => {
+    setVersionOpen(false)
+    setSettingsTab(versionReturnTab)
+    setVersionReturnTab(null)
+  }, [versionReturnTab])
+  const openSettings = useCallback((tab: SettingsTab = 'general') => {
     setVersionOpen(false)
     setExtensionTab(null)
-    setUsageOpen(true)
-    window.location.hash = 'usage'
+    setSettingsTab(tab)
+    window.location.hash = settingsHash(tab)
   }, [])
-  const closeUsage = useCallback(() => setUsageOpen(false), [])
+  const changeSettingsTab = useCallback((tab: SettingsTab) => {
+    setSettingsTab(tab)
+    window.location.hash = settingsHash(tab)
+  }, [])
+  const closeSettings = useCallback(() => setSettingsTab(null), [])
   const openExtensions = useCallback((tab: ExtensionTab = 'skills') => {
     setVersionOpen(false)
-    setUsageOpen(false)
+    setSettingsTab(null)
     setExtensionTab(tab)
     window.location.hash = `extensions/${tab}`
   }, [])
-  const leaveExtensions = useCallback(() => {
+  const leavePageViews = useCallback(() => {
     setVersionOpen(false)
-    setUsageOpen(false)
+    setSettingsTab(null)
     setExtensionTab(null)
   }, [])
   // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内。
@@ -520,24 +528,33 @@ export default function App() {
       firstRenderRef.current = false
       return
     }
-    const target = versionOpen ? '#version' : extensionTab ? `#extensions/${extensionTab}` : usageOpen ? '#usage' : activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
+    const target = versionOpen
+      ? '#version'
+      : settingsTab
+        ? settingsHash(settingsTab)
+        : extensionTab
+          ? `#extensions/${extensionTab}`
+          : activeId === null
+            ? ''
+            : `#s=${encodeURIComponent(activeId)}`
     if (window.location.hash !== target) {
       window.history.replaceState(null, '', target || window.location.pathname)
     }
-  }, [activeId, extensionTab, versionOpen, usageOpen])
+  }, [activeId, extensionTab, settingsTab, versionOpen])
 
   useEffect(() => {
     const onHashChange = () => {
       const version = window.location.hash === '#version'
       setVersionOpen(version)
-      // 版本与用量互斥:两者都是整页视图,而 hash 只记得住一个。
-      const usage = !version && window.location.hash === '#usage'
-      setUsageOpen(usage)
       if (version) {
+        setSettingsTab(null)
         setExtensionTab(null)
         return
       }
-      if (usage) {
+      // 整页视图互斥,hash 只记得住一个:设置优先于拓展,拓展优先于会话。
+      const settings = settingsTabFromHash(window.location.hash)
+      setSettingsTab(settings)
+      if (settings) {
         setExtensionTab(null)
         return
       }
@@ -658,7 +675,7 @@ export default function App() {
 
   const startSession = useCallback(
     async (targetProjectId?: string) => {
-      leaveExtensions()
+      leavePageViews()
       const activeProject = getActiveProject()
       const target =
         projects.find((project) => project.id === targetProjectId) ??
@@ -698,7 +715,7 @@ export default function App() {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [projects, activeSession, recentProject, leaveExtensions],
+    [projects, activeSession, recentProject, leavePageViews],
   )
 
   /* ---- 创建项目 ---- */
@@ -777,6 +794,7 @@ export default function App() {
   const openSession = useCallback(
     (id: string, projectId?: string) => {
       setVersionOpen(false)
+      setSettingsTab(null)
       setExtensionTab(null)
       // 手机上选中会话后自动收起抽屉 —— 否则用户点完还得再点一次遮罩
       // 才能看到刚打开的对话。
@@ -884,6 +902,7 @@ export default function App() {
       data-mobile={isMobile || undefined}
       data-drawer={isMobile && drawerOpen ? 'open' : undefined}
       data-sidebar-moving={sidebarMoving || undefined}
+      data-full-page={settingsTab || versionOpen ? true : undefined}
     >
       {isMobile && drawerOpen && (
         <div
@@ -933,10 +952,6 @@ export default function App() {
               aria-current={extensionTab ? 'page' : undefined} onClick={() => openExtensions()}>
               <IconExtensions size={16} /><span>{t('extensionsTitle')}</span>
             </button>
-            <button type="button" className={`sidebar-new-btn sidebar-nav-btn sidebar-usage-btn${usageOpen ? ' active' : ''}`}
-              aria-current={usageOpen ? 'page' : undefined} onClick={openUsage}>
-              <IconUsage size={16} /><span>{t('usagePageTitle')}</span>
-            </button>
             </nav>
             <div className="sidebar-region">
               <div className="sidebar-region-head">
@@ -975,8 +990,8 @@ export default function App() {
               <SidebarProjects
                 sessions={sessions}
                 projects={projects}
-                activeId={extensionTab || versionOpen || usageOpen ? null : activeId}
-                secondaryId={extensionTab || versionOpen || usageOpen ? null : split?.secondaryId ?? null}
+                activeId={extensionTab || versionOpen || settingsTab ? null : activeId}
+                secondaryId={extensionTab || versionOpen || settingsTab ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
@@ -991,8 +1006,12 @@ export default function App() {
             <nav className="sidebar-foot" aria-label={t('navSettings')}>
               <button
                 type="button"
-                className="sidebar-nav"
-                onClick={() => setSettingsOpen(true)}
+                className={`sidebar-nav${settingsTab ? ' active' : ''}`}
+                aria-current={settingsTab ? 'page' : undefined}
+                onClick={() => {
+                  openSettings()
+                  setDrawerOpen(false)
+                }}
               >
                 <IconGear size={16} />
                 <span>{t('navSettings')}</span>
@@ -1024,16 +1043,10 @@ export default function App() {
             aria-current={extensionTab ? 'page' : undefined} onClick={() => { openExtensions(); setDrawerOpen(false) }}>
             <IconExtensions size={18} />
           </button>
-          <button type="button" className={`rail-btn${usageOpen ? ' accent' : ''}`}
-            style={railIndex(2)}
-            aria-label={t('usagePageTitle')} title={t('usagePageTitle')}
-            aria-current={usageOpen ? 'page' : undefined} onClick={() => { openUsage(); setDrawerOpen(false) }}>
-            <IconUsage size={18} />
-          </button>
           <button
             type="button"
             className="rail-btn"
-            style={railIndex(3)}
+            style={railIndex(2)}
             title={t('addProject')}
             aria-label={t('addProject')}
             onClick={() => setProjectDialogOpen(true)}
@@ -1043,7 +1056,7 @@ export default function App() {
           <button
             type="button"
             className="rail-btn"
-            style={railIndex(4)}
+            style={railIndex(3)}
             title={t('searchSessions')}
             aria-label={t('searchSessions')}
             onClick={expandSidebarWithSearch}
@@ -1052,13 +1065,14 @@ export default function App() {
           </button>
           <UpdateBadge collapsed />
           <div className="rail-spacer" />
-          <div className="rail-foot" style={railIndex(6)}>
+          <div className="rail-foot" style={railIndex(5)}>
             <button
               type="button"
-              className="rail-btn"
+              className={`rail-btn${settingsTab ? ' accent' : ''}`}
               title={t('navSettings')}
               aria-label={t('navSettings')}
-              onClick={() => setSettingsOpen(true)}
+              aria-current={settingsTab ? 'page' : undefined}
+              onClick={() => { openSettings(); setDrawerOpen(false) }}
             >
               <IconGear size={16} />
             </button>
@@ -1087,7 +1101,7 @@ export default function App() {
         <DesktopTitleBar />
         {/* 手机端顶栏:抽屉开关 + 品牌。桌面端由 CSS 隐藏 —— 桌面有常驻
             侧栏,不需要这个入口。 */}
-        {isMobile && (
+        {isMobile && !settingsTab && !versionOpen && (
           <div className="mobile-bar">
             <button
               type="button"
@@ -1112,9 +1126,15 @@ export default function App() {
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
                 <LazyVersionPage onBack={closeVersion} />
               </Suspense>
-            ) : usageOpen ? (
+            ) : settingsTab ? (
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
-                <LazyUsagePage onBack={closeUsage} />
+                <LazySettingsPage
+                  tab={settingsTab}
+                  notify={notify}
+                  onBack={closeSettings}
+                  onTabChange={changeSettingsTab}
+                  onOpenVersion={openVersion}
+                />
               </Suspense>
             ) : extensionTab ? (
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
@@ -1165,7 +1185,7 @@ export default function App() {
           {/* 侧边面板在手机上不渲染:390px 宽放不下「对话 + 面板」两列,
               面板会把自己挤成一条缝,还会把主列的输入区顶出屏幕。
               手机用户要终端/文件,用抽屉里的入口或直接开新会话更实际。 */}
-          {!isMobile && !extensionTab && !versionOpen && !usageOpen && (
+          {!isMobile && !extensionTab && !versionOpen && !settingsTab && (
           <SidePane
             sessionId={activeId}
             state={pane.state}
@@ -1214,18 +1234,6 @@ export default function App() {
           )}
         </div>
       </main>
-      {settingsOpen && (
-        <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
-          <LazySettingsModal
-            notify={notify}
-            onOpenVersion={openVersion}
-            onClose={() => {
-              setSettingsOpen(false)
-              applyConsoleSettings()
-            }}
-          />
-        </Suspense>
-      )}
       {updateDialogOpen && (
         <Suspense fallback={null}>
           <LazyUpdateDialog onOpenVersion={openVersion} />

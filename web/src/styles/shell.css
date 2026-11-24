@@ -132,6 +132,15 @@
   grid-template-columns: 56px minmax(0, 1fr);
 }
 
+/* 设置/版本是整窗界面:应用侧栏整体让位,主列独占整个窗口。 */
+.shell[data-full-page] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.shell[data-full-page] .sidebar {
+  display: none;
+}
+
 .sidebar {
   /* 收起开关 right 固定 = 收起后正好落在 36px 轨道的中心线上。 */
   position: relative;

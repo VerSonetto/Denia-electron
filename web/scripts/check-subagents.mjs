@@ -244,9 +244,10 @@ assert(
 )
 assert('显式模型选择进入保存载荷', settings.includes('onModelChange') && settings.includes('model: profile.model'))
 
-const modal = read('web/src/components/SettingsModal.tsx')
-assert('设置弹窗挂载子代理页', modal.includes('<SubagentSettings notify={notify} />'))
-assert('设置弹窗注册子代理标签', modal.includes("| 'subagents'"))
+const modal = read('web/src/pages/SettingsPage.tsx')
+assert('设置页挂载子代理页', modal.includes('<SubagentSettings notify={notify} />'))
+const settingsRoute = read('web/src/settingsRoute.ts')
+assert('设置路由注册子代理标签', settingsRoute.includes("'subagents'"))
 
 // 生成的 wire 类型包含运行快照字段（bindings 漂移守卫）。
 const generated = read('web/src/generated/core.ts')

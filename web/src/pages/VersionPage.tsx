@@ -27,9 +27,11 @@ export default function VersionPage({ onBack }: { onBack: () => void }) {
     <section className="version-page update-scope" aria-labelledby="version-page-title">
       <div className="version-page-inner">
         <header className="version-page-header">
-          <button type="button" className="update-back-button" onClick={onBack}><IconArrowLeft size={17} /><span>{text.back}</span></button>
+          <div className="version-page-header-top">
+            <button type="button" className="update-back-button" onClick={onBack}><IconArrowLeft size={17} /><span>{text.back}</span></button>
+            <span className="update-eyebrow version-header-edition">{text.edition}</span>
+          </div>
           <h1 id="version-page-title" ref={titleRef} tabIndex={-1}>{text.pageTitle}</h1>
-          <span className="update-eyebrow version-header-edition">{text.edition}</span>
         </header>
 
         <section className="version-hero" aria-label={text.currentVersion}>

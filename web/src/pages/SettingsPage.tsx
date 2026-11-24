@@ -1,27 +1,26 @@
-import { SubagentSettings } from './settings/SubagentSettings'
-import { MessagingSettings } from './settings/MessagingSettings'
-import { RuntimeSettings } from './settings/RuntimeSettings'
-import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
-import { MemorySettings } from './settings/MemorySettings'
-import { SetmActions, SetmBtn, SetmCard, SetmTiles } from './settings/setm'
+import { SubagentSettings } from '../components/settings/SubagentSettings'
+import { MessagingSettings } from '../components/settings/MessagingSettings'
+import { RuntimeSettings } from '../components/settings/RuntimeSettings'
+import { RemoteAccessSettings } from '../components/settings/RemoteAccessSettings'
+import { MemorySettings } from '../components/settings/MemorySettings'
+import { SetmActions, SetmBtn, SetmCard, SetmTiles } from '../components/settings/setm'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import { subscribeServerEvents } from '../serverEvents'
-import { DropdownField } from './ui/controls'
+import { DropdownField } from '../components/ui/controls'
 import { useIsMobile } from '../hooks/useIsMobile'
 import type { Notify } from '../App'
 import {
   IconArrowLeft,
   IconChevron,
-  IconClose,
   IconUpdate,
-} from './icons'
-import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsChannels, IconSettingsRuntime, IconSettingsAppearance, IconSettingsRemote } from './SettingsIcons'
-import { LlmPanel } from './llm/LlmPanel'
-import { AgentPresetSettings } from './settings/AgentPresetSettings'
+} from '../components/icons'
+import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsChannels, IconSettingsRuntime, IconSettingsAppearance, IconSettingsRemote, IconSettingsUsage } from '../components/SettingsIcons'
+import { LlmPanel } from '../components/llm/LlmPanel'
+import { AgentPresetSettings } from '../components/settings/AgentPresetSettings'
 import { normalizePermissionChoice, type PermissionChoice } from '../types'
-import { defaultPermissionLevels } from './PermissionSelector'
+import { defaultPermissionLevels } from '../components/PermissionSelector'
 import {
   QUEUE_DEFAULT_ACTIONS,
   normalizeQueueDefaultAction,
@@ -34,33 +33,12 @@ import {
   setConversationFoldMode,
   type ConversationFoldMode,
 } from '../features/conversation/foldMode'
-
-type SettingsTab =
-  | 'runtime'
-  | 'subagents'
-  | 'general'
-  | 'presets'
-  | 'prompts'
-  | 'models'
-  | 'memory'
-  | 'channels'
-  | 'remote'
-  | 'appearance'
+import { SETTINGS_TABS, type SettingsTab } from '../settingsRoute'
+import UsagePage from './UsagePage'
 
 const CONSOLE_NS = 'console'
 
-const TABS: SettingsTab[] = [
-  'general',
-  'subagents',
-  'presets',
-  'prompts',
-  'models',
-  'memory',
-  'channels',
-  'remote',
-  'runtime',
-  'appearance',
-]
+const TABS = SETTINGS_TABS
 
 /** 队列处理方式的文案映射;可选项本身来自 QUEUE_DEFAULT_ACTIONS。 */
 const QUEUE_LABELS: Record<QueueDefaultAction, Parameters<typeof t>[0]> = {
@@ -110,6 +88,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconSettingsPrompt size={size} />
     case 'models':
       return <IconSettingsModels size={size} />
+    case 'usage':
+      return <IconSettingsUsage size={size} />
     case 'memory':
       return <IconSettingsMemory size={size} />
     case 'channels':
@@ -135,6 +115,8 @@ function tabLabel(tab: SettingsTab): string {
       return t('settingsTabPrompts')
     case 'models':
       return t('settingsTabModels')
+    case 'usage':
+      return t('usagePageTitle')
     case 'memory':
       return t('memoryTab')
     case 'channels':
@@ -160,6 +142,8 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('settingsTabPromptsDesc')
     case 'models':
       return t('settingsTabModelsDesc')
+    case 'usage':
+      return t('usageTabDesc')
     case 'memory':
       return t('memoryTabDesc')
     case 'channels':
@@ -185,6 +169,8 @@ function paneTitle(tab: SettingsTab): string {
       return t('settingsPanePromptsTitle')
     case 'models':
       return t('settingsPaneModelsTitle')
+    case 'usage':
+      return t('usagePageTitle')
     case 'memory':
       return t('memoryPaneTitle')
     case 'channels':
@@ -210,6 +196,8 @@ function paneDesc(tab: SettingsTab): string {
       return t('settingsPanePromptsDesc')
     case 'models':
       return t('settingsPaneModelsDesc')
+    case 'usage':
+      return t('usagePageDescription')
     case 'memory':
       return t('memoryPaneDesc')
     case 'channels':
@@ -222,8 +210,18 @@ function paneDesc(tab: SettingsTab): string {
 }
 
 
-export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Notify; onClose: () => void; onOpenVersion: () => void }) {
-  const [tab, setTab] = useState<SettingsTab>('general')
+/**
+ * 设置页:主区域里的整页界面(与用量/拓展/版本页同级),不是浮层。
+ * 左侧是分类导航,右侧是当前分类;窄屏退化为「分类列表 → 面板」两屏。
+ * 当前分类由 URL 的 `#settings/<tab>` 决定,路由与退出由 App 负责。
+ */
+export function SettingsPage({ tab, notify, onBack, onOpenVersion, onTabChange }: {
+  tab: SettingsTab
+  notify: Notify
+  onBack: () => void
+  onOpenVersion: () => void
+  onTabChange: (tab: SettingsTab) => void
+}) {
   const [loading, setLoading] = useState(true)
   /** 是否已完成过首拉:决定重拉时要不要重新亮骨架屏。 */
   const loadedOnceRef = useRef(false)
@@ -255,8 +253,8 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
 
   const load = useCallback(async () => {
     // 骨架屏只在首拉出现。设置变更后的自动重拉(SSE settings-updated)不能
-    // 把整个面板连子弹窗一起卸载 —— 模型面板改成自动保存后,保存就发生在
-    // 弹窗开着的中途,一旦卸载用户正在填的表单就没了。
+    // 把整个面板连正在填的表单一起卸载 —— 模型面板改成自动保存后,保存就
+    // 发生在设置页开着的中途,一旦卸载用户正在填的表单就没了。
     if (!loadedOnceRef.current) setLoading(true)
     try {
       const [nextDescribe, nextPrompt, nextRules, permissionCatalog] = await Promise.all([
@@ -317,29 +315,6 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
       if (type === 'settings-updated') void load()
     })
   }, [load])
-
-  // 弹窗期间锁定 body 滚动并补偿滚动条宽度:遮罩下不再出现滚动条抖动。
-  useEffect(() => {
-    const body = document.body
-    const scrollbar = window.innerWidth - document.documentElement.clientWidth
-    const prevOverflow = body.style.overflow
-    const prevPadding = body.style.paddingRight
-    body.style.overflow = 'hidden'
-    if (scrollbar > 0) body.style.paddingRight = `${scrollbar}px`
-    return () => {
-      body.style.overflow = prevOverflow
-      body.style.paddingRight = prevPadding
-    }
-  }, [])
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      // 内层抽屉/确认框已 preventDefault 的 Esc 不连弹窗一起关。
-      if (event.key === 'Escape' && !event.defaultPrevented) onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
 
   const saveConsole = async () => {
     setSaving(true)
@@ -507,97 +482,76 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
   }))
 
   return (
-    <div
-      className="setm-backdrop"
-      // 遮罩单击不关窗(容易误触),双击才关;点在壳内不算外部点击。
-      onDoubleClick={(event) => {
-        if (event.target === event.currentTarget) onClose()
-      }}
-    >
+    <section className="setm-page" aria-label={t('settingsModalTitle')}>
+      <header className="setm-head">
+        <button type="button" className="setm-page-back" onClick={onBack}>
+          <IconArrowLeft size={16} />
+          <span>{t('settingsBackToApp')}</span>
+        </button>
+        <div className="setm-head-copy">
+          <h1>{t('settingsModalTitle')}</h1>
+          <p>{t('settingsModalSubtitle')}</p>
+        </div>
+      </header>
+
       <div
-        className="setm-shell"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('settingsModalTitle')}
+        className="setm-layout"
         data-mobile={isMobile || undefined}
         data-pane={isMobile && mobilePaneOpen ? 'open' : undefined}
       >
-        <aside className="setm-rail">
-          <div className="setm-rail-head">
-            <span className="setm-rail-kicker">Denia</span>
-            <h2>{t('settingsModalTitle')}</h2>
-            <p>{t('settingsModalSubtitle')}</p>
-          </div>
-          {/* 窄屏分类列表这一屏没有面板头部,关闭按钮必须单独给一个 ——
-              否则用户进来后找不到出口(只能靠 Esc,手机上不可用)。 */}
-          {isMobile && (
-            <button
-              type="button"
-              className="setm-rail-close"
-              onClick={onClose}
-              aria-label={t('close')}
-            >
-              <IconClose size={18} />
-            </button>
-          )}
-
-          <nav className="setm-rail-nav" aria-label={t('settingsModalTitle')}>
-            {TABS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={`setm-nav-item${tab === item ? ' active' : ''}`}
-                aria-current={tab === item ? 'page' : undefined}
-                onClick={() => {
-                  setTab(item)
-                  // 窄屏:选中分类即进入该面板。
-                  if (isMobile) setMobilePaneOpen(true)
-                }}
-              >
-                <span className="setm-nav-icon">{tabIcon(item)}</span>
-                <span className="setm-nav-copy">
+          <aside className="setm-rail">
+            <nav className="setm-rail-nav" aria-label={t('settingsModalTitle')}>
+              {TABS.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  className={`setm-nav-item${tab === item ? ' active' : ''}`}
+                  aria-current={tab === item ? 'page' : undefined}
+                  title={tabNavDesc(item)}
+                  onClick={() => {
+                    onTabChange(item)
+                    // 窄屏:选中分类即进入该面板。
+                    if (isMobile) setMobilePaneOpen(true)
+                  }}
+                >
+                  <span className="setm-nav-icon">{tabIcon(item)}</span>
                   <span className="setm-nav-label">{tabLabel(item)}</span>
-                  <span className="setm-nav-desc">{tabNavDesc(item)}</span>
-                </span>
+                  {isMobile && (
+                    <span className="setm-nav-chev" aria-hidden="true">
+                      <IconChevron size={14} />
+                    </span>
+                  )}
+                </button>
+              ))}
+            </nav>
+            <div className="setm-nav-foot">
+              <button type="button" className="setm-nav-item" onClick={onOpenVersion}>
+                <span className="setm-nav-icon"><IconUpdate size={16} /></span>
+                <span className="setm-nav-label">{t('versionPageTitle')}</span>
                 {isMobile && (
-                  <span className="setm-nav-chev" aria-hidden="true">
-                    <IconChevron size={14} />
-                  </span>
+                  <span className="setm-nav-chev" aria-hidden="true"><IconChevron size={14} /></span>
                 )}
               </button>
-            ))}
-            <button type="button" className="setm-nav-item" onClick={onOpenVersion}>
-              <span className="setm-nav-icon"><IconUpdate size={16} /></span>
-              <span className="setm-nav-copy">
-                <span className="setm-nav-label">{t('versionPageTitle')}</span>
-                <span className="setm-nav-desc">{t('versionPageDesc')}</span>
-              </span>
-              {isMobile && <span className="setm-nav-chev" aria-hidden="true"><IconChevron size={14} /></span>}
-            </button>
-          </nav>
-
-        </aside>
-
-        <main className="setm-panel">
-          <header className="setm-panel-head">
-            {isMobile && (
-              <button
-                type="button"
-                className="setm-panel-back"
-                onClick={() => setMobilePaneOpen(false)}
-                aria-label={t('settingsBackToTabs')}
-              >
-                <IconArrowLeft size={18} />
-              </button>
-            )}
-            <div>
-              <h3>{paneTitle(tab)}</h3>
-              <p>{paneDesc(tab)}</p>
             </div>
-            <button type="button" className="setm-panel-close" onClick={onClose} aria-label={t('close')}>
-              <IconClose size={18} />
-            </button>
-          </header>
+          </aside>
+
+          <main className="setm-panel">
+            <header className="setm-panel-head">
+              {isMobile && (
+                <button
+                  type="button"
+                  className="setm-panel-back"
+                  onClick={() => setMobilePaneOpen(false)}
+                  aria-label={t('settingsBackToTabs')}
+                >
+                  <IconArrowLeft size={18} />
+                </button>
+              )}
+              <div>
+                <h2>{paneTitle(tab)}</h2>
+                <p>{paneDesc(tab)}</p>
+              </div>
+            </header>
 
           <div className="setm-panel-body">
             {loading ? (
@@ -765,6 +719,7 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
 
                 {tab === 'presets' && <AgentPresetSettings notify={notify} />}
                 {tab === 'models' && <LlmPanel notify={notify} />}
+                {tab === 'usage' && <UsagePage embedded />}
 
 
                 {tab === 'memory' && <MemorySettings />}
@@ -774,7 +729,7 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
                 {tab === 'remote' && <RemoteAccessSettings />}
 
                 {tab === 'appearance' && (
-                  <section className="setm-section">
+                  <section className="setm-section setm-appearance">
                     <div className="setm-field-block">
                       <div className="setm-field-label">{t('themeLabel')}</div>
                       <SetmTiles
@@ -810,6 +765,6 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
           </div>
         </main>
       </div>
-    </div>
+    </section>
   )
 }

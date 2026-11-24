@@ -37,7 +37,11 @@ import styles from './UsagePage.module.css'
  *
  * 热力图夹在各段之间,承担"这一年有没有断档"的时间感。
  */
-export default function UsagePage({ onBack }: { onBack: () => void }) {
+export default function UsagePage({ onBack, embedded = false }: {
+  onBack?: () => void
+  /** 嵌在设置页里:去掉自己的页头与返回按钮,版式交给外层。 */
+  embedded?: boolean
+}) {
   const locale = getLocale()
   const [range, setRange] = useState<UsageRange>('30d')
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null)
@@ -72,8 +76,8 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
   }, [])
 
   useEffect(() => {
-    titleRef.current?.focus({ preventScroll: true })
-  }, [])
+    if (!embedded) titleRef.current?.focus({ preventScroll: true })
+  }, [embedded])
 
   useEffect(() => {
     load(range, snapshot === null ? 'first' : 'switch')
@@ -83,15 +87,43 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
 
   const ranges: UsageRange[] = snapshot?.ranges ?? [range]
 
+  const rangeTabs = (
+    <div className={styles.tabs} role="tablist" aria-label={t('usageRangeTitle')}>
+      {ranges.map((option) => (
+        <button
+          key={option}
+          type="button"
+          role="tab"
+          aria-selected={range === option}
+          className={styles.tab}
+          onClick={() => setRange(option)}
+        >
+          {t(USAGE_RANGE_LABELS[option] as Parameters<typeof t>[0])}
+        </button>
+      ))}
+    </div>
+  )
+
   return (
-    <section className={styles.page} aria-labelledby="usage-page-title">
+    <section
+      className={styles.page}
+      data-embedded={embedded || undefined}
+      aria-labelledby={embedded ? undefined : 'usage-page-title'}
+      aria-label={embedded ? t('usagePageTitle') : undefined}
+    >
       <div className={styles.content}>
         <header className={styles.header}>
-          <div className={styles.headerTop}>
-            <button type="button" className={styles.back} onClick={onBack}>
-              <IconArrowLeft size={15} />
-              <span>{t('usageBack')}</span>
-            </button>
+          <div className={styles.headerTop} data-embedded={embedded || undefined}>
+            {embedded ? (
+              rangeTabs
+            ) : (
+              onBack && (
+                <button type="button" className={styles.back} onClick={onBack}>
+                  <IconArrowLeft size={15} />
+                  <span>{t('usageBack')}</span>
+                </button>
+              )
+            )}
             <button
               type="button"
               className={styles.refresh}
@@ -102,17 +134,21 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
               <span>{refreshing ? t('usageRefreshing') : t('usageRefresh')}</span>
             </button>
           </div>
-          <div className={styles.titleRow}>
-            <h1 id="usage-page-title" ref={titleRef} tabIndex={-1}>
-              {t('usagePageTitle')}
-            </h1>
-            {snapshot !== null && (
-              <span className={styles.timezone} title={snapshot.timeZone}>
-                {snapshot.timeZone}
-              </span>
-            )}
-          </div>
-          <p className={styles.lede}>{t('usagePageDescription')}</p>
+          {!embedded && (
+            <>
+              <div className={styles.titleRow}>
+                <h1 id="usage-page-title" ref={titleRef} tabIndex={-1}>
+                  {t('usagePageTitle')}
+                </h1>
+                {snapshot !== null && (
+                  <span className={styles.timezone} title={snapshot.timeZone}>
+                    {snapshot.timeZone}
+                  </span>
+                )}
+              </div>
+              <p className={styles.lede}>{t('usagePageDescription')}</p>
+            </>
+          )}
         </header>
 
         {loading && snapshot === null ? (
@@ -137,23 +173,12 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
             <LifetimeStrip snapshot={snapshot} />
             <Heatmap snapshot={snapshot} locale={locale} />
             <section className={styles.block} aria-label={t('usageRangeTitle')}>
-              <div className={styles.blockHead}>
-                <h2>{t('usageRangeTitle')}</h2>
-                <div className={styles.tabs} role="tablist" aria-label={t('usageRangeTitle')}>
-                  {ranges.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      role="tab"
-                      aria-selected={range === option}
-                      className={styles.tab}
-                      onClick={() => setRange(option)}
-                    >
-                      {t(USAGE_RANGE_LABELS[option] as Parameters<typeof t>[0])}
-                    </button>
-                  ))}
+              {!embedded && (
+                <div className={styles.blockHead}>
+                  <h2>{t('usageRangeTitle')}</h2>
+                  {rangeTabs}
                 </div>
-              </div>
+              )}
               <RangeOverview snapshot={snapshot} />
               <DailyTrend snapshot={snapshot} locale={locale} />
               <div className={styles.columns}>

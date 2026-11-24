@@ -43,7 +43,7 @@ assert.ok(api.includes("source?: 'user' | 'queue' | 'interject' | 'guide'"), '�
 
 /* ---- 队列消息默认处理方式（常规设置） ---- */
 
-const settings = web('components/SettingsModal.tsx')
+const settings = web('pages/SettingsPage.tsx')
 assert.ok(settings.includes('queueDefaultActionTitle'), '常规设置提供队列默认处理配置')
 // 选项清单只有一份来源(queueDefaults.ts),设置页必须从它渲染而不是另抄一份。
 const queueDefaults = web('features/conversation/queueDefaults.ts')
