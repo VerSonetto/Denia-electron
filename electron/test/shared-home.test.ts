@@ -30,6 +30,9 @@ llm-openai:
         name: Alpha 1
         inputModalities: [text, image]
         reasoningEfforts: [low, high]
+      - id: alpha-off
+        name: Alpha off
+        reasoningEfforts: [off]
     beta:
       apiKeyEnv: TEST_BETA_KEY
       baseURL: https://beta.example
@@ -39,7 +42,7 @@ llm-openai:
         name: Beta 1
 `
 
-test('settings.yaml providers and .credentials.yaml keys are picked up', () => {
+test('settings.yaml providers and .credentials.yaml keys are picked up', async () => {
   const home = tempHome()
   fs.writeFileSync(path.join(home, 'settings.yaml'), SETTINGS)
   fs.writeFileSync(
@@ -59,6 +62,18 @@ test('settings.yaml providers and .credentials.yaml keys are picked up', () => {
   assert.equal(config.providers[1]?.protocol, 'anthropic-messages')
   assert.equal(config.providers[1]?.apiKey, 'sk-beta')
   assert.deepEqual(config.default, { provider: 'alpha', model: 'alpha-1' })
+
+  const host = await startHost({ home, webDir: tempHome(), port: 0 })
+  try {
+    const catalog = (await (await fetch(`${host.baseUrl}/api/llm/catalog`)).json()) as {
+      groups: { id: string; models: { id: string; reasoning?: { efforts: { id: string }[] } }[] }[]
+    }
+    const alpha = catalog.groups.find((entry) => entry.id === 'alpha')
+    assert.deepEqual(alpha?.models.find((entry) => entry.id === 'alpha-1')?.reasoning?.efforts.map((e) => e.id), ['low', 'high'])
+    assert.equal(alpha?.models.find((entry) => entry.id === 'alpha-off')?.reasoning, undefined)
+  } finally {
+    await host.close()
+  }
 
   const describe = settingsDescribe(home, config)
   assert.equal(describe.documentPath, path.join(home, 'settings.yaml'))

@@ -37,7 +37,7 @@ const React = await import('react')
 const { act } = React
 const { createRoot } = await import('react-dom/client')
 const { ComposerEffortControl } = await import(pathToFileURL(bundle).href)
-const { reasoningEffortRank } = await import(pathToFileURL(catalogBundle).href)
+const { hasReasoningEffort, reasoningEffortRank } = await import(pathToFileURL(catalogBundle).href)
 const root = createRoot(w.document.getElementById('root'))
 const calls = []
 let patch
@@ -70,6 +70,12 @@ check('reasoningEffortRank maps each id to its absolute level', () => {
   assert.equal(reasoningEffortRank('xhigh'), 4)
   assert.equal(reasoningEffortRank('max'), 5)
   assert.equal(reasoningEffortRank('unknown-effort'), 0)
+})
+
+check('only-off reasoning is not an adjustable effort', () => {
+  assert.equal(hasReasoningEffort([]), false)
+  assert.equal(hasReasoningEffort([{ id: 'off' }]), false)
+  assert.equal(hasReasoningEffort([{ id: 'off' }, { id: 'high' }]), true)
 })
 
 try {

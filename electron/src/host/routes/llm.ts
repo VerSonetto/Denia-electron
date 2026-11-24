@@ -51,7 +51,7 @@ export async function handleLlmApi(
             : {}),
           ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
           ...(model.thinkingSupported ? { thinkingSupported: model.thinkingSupported } : {}),
-          ...(model.reasoningEfforts
+          ...(model.reasoningEfforts?.some((effort) => effort !== 'off')
             ? {
                 reasoning: {
                   efforts: model.reasoningEfforts.map((effort) => ({ id: effort, name: effort })),

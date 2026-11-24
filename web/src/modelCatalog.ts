@@ -61,6 +61,11 @@ export function defaultReasoningEfforts(): ReasoningEffortId[] {
   return [REASONING_EFFORT_OFF]
 }
 
+/** 模型是否提供可选强度;只有「关」时没有可调档位。 */
+export function hasReasoningEffort(efforts: readonly { id: string }[]): boolean {
+  return efforts.some((effort) => effort.id !== REASONING_EFFORT_OFF)
+}
+
 /** 从可用档位中选出最高强度;无强度档位时回退到「关」。 */
 export function highestReasoningEffort(
   effortIds: readonly string[],

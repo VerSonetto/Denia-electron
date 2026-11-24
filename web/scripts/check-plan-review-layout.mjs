@@ -41,10 +41,13 @@ const click = async selector => {
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) })
 }
 const check = (name, fn) => { fn(); console.log(`ok   ${name}`) }
-const catalog = { groups: [{ id: 'p', name: 'Provider', models: [{
-  id: 'm', name: 'Model', thinkingSupported: true,
-  reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
-}] }] }
+const catalog = { groups: [{ id: 'p', name: 'Provider', models: [
+  {
+    id: 'm', name: 'Model', thinkingSupported: true,
+    reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
+  },
+  { id: 'm-off', name: 'Model off', thinkingSupported: true, reasoning: { efforts: [{ id: 'off', name: 'Off' }] } },
+] }] }
 const decisions = []
 try {
   await act(async () => root.render(H('div', { className: 'harness' },
@@ -68,6 +71,12 @@ try {
   check('approval still submits with model controls available', () => {
     assert.equal(decisions.length, 1)
     assert.equal(decisions[0].decision, 'allow-once')
+  })
+  await act(async () => root.render(H(PlanReviewPanel, { title: 'Ship it', planText: '## Goal\n\nImplement the layout.', catalog,
+    selection: { provider: 'p', model: 'm-off', reasoningEffort: 'off' },
+    onDecision: async payload => { decisions.push(payload) }, onExit() {} })))
+  check('a thinking-off model has no reasoning control in the approval card', () => {
+    assert.equal(query('.plan-review-panel .effort-control'), null)
   })
   const css = readFileSync(join(web, 'src/styles/panels.css'), 'utf8')
   const card = /\.plan-review-panel\s*\{([^}]+)\}/.exec(css)?.[1] ?? ''

@@ -4,7 +4,7 @@ import type { ApprovalDecisionPayload } from '../api'
 import type { ModelCatalog, ModelSelection } from '../types'
 import { ComposerModelMenu } from './ComposerModelMenu'
 import { ComposerEffortControl } from './ComposerEffortControl'
-import { resolveSessionReasoningEffort } from '../modelCatalog'
+import { hasReasoningEffort, resolveSessionReasoningEffort } from '../modelCatalog'
 import { IconCheck, IconClose, IconPlan } from './icons'
 
 /**
@@ -99,7 +99,7 @@ export function PlanReviewPanel({
                 <span className="plan-review-model-label">{t('planReviewModelLabel')}</span>
                 <ComposerModelMenu catalog={catalog} selection={model} disabled={submitting}
                   onChange={(next) => { setModel(next); setModelPicked(true) }} />
-                {planEffort && (
+                {planEffort && hasReasoningEffort(planEfforts) && (
                   <ComposerEffortControl
                     key={`${model.provider}:${model.model}`}
                     efforts={planEfforts}

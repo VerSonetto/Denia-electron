@@ -9,6 +9,7 @@ import type {
   ReasoningEffortInfo,
   SessionSummary,
 } from '../types'
+import { hasReasoningEffort } from '../modelCatalog'
 import { ComposerContextMenu } from './ComposerContextMenu'
 import { ComposerEffortControl } from './ComposerEffortControl'
 import { ComposerModelMenu } from './ComposerModelMenu'
@@ -126,7 +127,7 @@ export function ComposerToolbar({
                 onChange={onSelectionChange}
               />
             )}
-            {selection && activeEffort && effortLevels.length > 0 && (
+            {activeEffort && hasReasoningEffort(effortLevels) && (
               <ComposerEffortControl
                 key={`${activeId}:${selection.provider}:${selection.model}`}
                 efforts={effortLevels}
