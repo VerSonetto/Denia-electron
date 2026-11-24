@@ -129,6 +129,23 @@ check('增量:缓存读进 turn-end', incrUsage.cacheReadTokens, 900)
 check('增量:推理进 turn-end', incrUsage.reasoningTokens, 7)
 check('两条路径的 turn-end 用量逐字一致', incrUsage, coldUsage)
 
+/* 10b) turn-end 先落盘、同轮又继续活动时，旧的收尾行必须撤销。
+        否则对话流中间会闪出一条“已中止”，尽管模型仍在输出。 */
+const lateEvents = [
+  { seq: 1, time: 1000, type: 'turn-start', turn: 1 },
+  { seq: 2, time: 1100, type: 'assistant-message', turn: 1, step: 1,
+    blocks: [{ type: 'text', text: 'part 1' }] },
+  { seq: 3, time: 1200, type: 'turn-end', turn: 1, reason: { kind: 'aborted' } },
+  { seq: 4, time: 1300, type: 'assistant-chunk', turn: 1, step: 2,
+    chunk: { type: 'text-delta', index: 0, text: 'part 2' } },
+]
+const coldLate = mod.foldEvents(lateEvents)
+check('冷启动:迟到的续流撤销提前的 turn-end', coldLate.filter((n) => n.kind === 'turn-end').length, 0)
+let incrLate = mod.foldEvents(lateEvents.slice(0, 3))
+incrLate = mod.applyEnvelope(incrLate, lateEvents[3])
+check('增量:迟到的续流撤销提前的 turn-end', incrLate.filter((n) => n.kind === 'turn-end').length, 0)
+check('增量与冷启动的续流一致', incrLate, coldLate)
+
 /* 10) 缓存命中率分母回归:`TokenUsage` 契约里 cacheRead 与 inputTokens 互斥
        (inputTokens 只含未缓存部分),所以分母是两者之和,命中率 = 命中/总prompt。
 

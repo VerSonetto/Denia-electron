@@ -4,6 +4,7 @@ import { useConversationFoldMode } from '../features/conversation/foldMode'
 import {
   assistantHasContent,
   assistantHasActions,
+  assistantActionsReady,
   groupProcessRows,
   groupToolRows,
   groupTranscript,
@@ -65,15 +66,24 @@ export function Transcript({
   // previous render),异常冒泡到根 →整页白屏。
   const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
   // 每个已完成轮次的最后一条助手消息挂复制/分支按钮;运行中/中间 step 不显示。
-  // 任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
-  const turnIndex = useMemo(() => {
-    const lastStep = new Map<number, number>()
-    const ended = new Set<number>()
-    for (const node of nodes) {
-      if (node.kind === 'assistant') lastStep.set(node.turn, node.step)
-      else if (node.kind === 'turn-end') ended.add(node.turn)
+  // 只按 turn 号找 turn-end 会把"收尾帧先到、同轮续流"的消息误判成已完成。
+  const actionIndex = useMemo(() => {
+    const ends = new Map<number, number>()
+    const lastAssistant = new Map<number, number>()
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index]
+      if (node.kind === 'turn-end') ends.set(node.turn, index)
+      else if (node.kind === 'assistant') lastAssistant.set(node.turn, index)
     }
-    return { lastStep, ended }
+    const ready = new Map<number, number>()
+    for (const [turn, endIndex] of ends) {
+      const index = lastAssistant.get(turn)
+      if (index === undefined) continue
+      const node = nodes[index]
+      if (node?.kind !== 'assistant' || !assistantActionsReady(node, endIndex, index)) continue
+      ready.set(turn, index)
+    }
+    return ready
   }, [nodes])
   const foldMode = useConversationFoldMode()
   const rows = useMemo(() => {
@@ -84,14 +94,13 @@ export function Transcript({
     return display.flatMap((row) => {
     const showActions = row.kind === 'node' && row.node.kind === 'assistant' &&
       row.node.displayPart !== 'process' &&
-      turnIndex.ended.has(row.node.turn) &&
-      row.node.step === turnIndex.lastStep.get(row.node.turn) &&
+      actionIndex.get(row.node.turn) === nodes.indexOf(row.node) &&
       assistantHasActions(row.node, onFork)
     if (row.kind === 'node' && (row.node.kind === 'turn-start' ||
       (row.node.kind === 'assistant' && !assistantHasContent(row.node) && !showActions))) return []
     return [{ row, showActions }]
     })
-  }, [viewNodes, turnIndex, onFork, foldMode])
+  }, [viewNodes, nodes, actionIndex, onFork, foldMode])
   if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }

@@ -450,6 +450,46 @@ export function deliveryProjection(
   }
 }
 
+/** Events that prove a preceding turn-end was premature. */
+function isLateTurnActivity(event: SessionEnvelope): boolean {
+  switch (event.type) {
+    case 'step-start':
+    case 'step-end':
+    case 'assistant-chunk':
+    case 'assistant-message':
+    case 'tool-call':
+    case 'tool-result':
+    case 'tool-output-chunk':
+    case 'compaction-summary':
+      return true
+    default:
+      return false
+  }
+}
+
+/** Drop a turn-end when the same turn keeps producing activity after it. */
+function removeStaleTurnEnd(nodes: TranscriptNode[], event: SessionEnvelope): void {
+  const index = staleTurnEndIndex(nodes, event)
+  if (index >= 0) nodes.splice(index, 1)
+}
+
+function dropStaleTurnEnd(nodes: TranscriptNode[], event: SessionEnvelope): TranscriptNode[] {
+  const index = staleTurnEndIndex(nodes, event)
+  if (index < 0) return nodes
+  const next = nodes.slice()
+  next.splice(index, 1)
+  return next
+}
+
+function staleTurnEndIndex(nodes: TranscriptNode[], event: SessionEnvelope): number {
+  if (!('turn' in event) || typeof event.turn !== 'number') return -1
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const node = nodes[index]
+    if (node.kind === 'turn-end' && node.turn === event.turn) return index
+  }
+  return -1
+}
+
 /**
  * The deterministic fold: identical output for cold history and live
  * streaming. Chunk deltas accumulate into an in-progress assistant node;
@@ -483,6 +523,7 @@ export function foldEvents(events: SessionEnvelope[], parentSessionId?: string):
   let lastSystemPrompt: string | null = null
 
   for (const event of events) {
+    if (isLateTurnActivity(event)) removeStaleTurnEnd(nodes, event)
     switch (event.type) {
       case 'agent-delivery':
         closeOpen()
@@ -801,13 +842,21 @@ export function applyEnvelopes(
   let copiedTools: Set<number> | null = null
   const flush = (): Extract<TranscriptNode, { kind: 'assistant' }> | null => {
     if (acc === null) return null
-    const settled = { ...acc.node, blocks: acc.blocks }
+    const settled: Extract<TranscriptNode, { kind: 'assistant' }> = {
+      ...acc.node,
+      blocks: acc.blocks,
+      streaming: false,
+    }
     current = current.slice(0, -1)
     current.push(settled)
     acc = null
     return settled
   }
   for (const event of events) {
+    if (isLateTurnActivity(event)) {
+      if (acc !== null) flush()
+      current = dropStaleTurnEnd(current, event)
+    }
     if (event.type === 'tool-output-chunk') {
       if (acc !== null) flush()
       if (toolIndices === null) {
@@ -894,6 +943,7 @@ function applyEnvelopeStep(
   nodes: TranscriptNode[],
   event: SessionEnvelope,
 ): TranscriptNode[] {
+  if (isLateTurnActivity(event)) nodes = dropStaleTurnEnd(nodes, event)
   switch (event.type) {
     case 'agent-delivery':
       return [
@@ -1670,4 +1720,14 @@ export function assistantHasActions(
 ): boolean {
   return node.blocks.some((block) => block.kind === 'text' && block.text.trim().length > 0) ||
     (onFork !== undefined && node.seq !== undefined)
+}
+
+/** A settled assistant node must precede its turn-end to expose actions. */
+export function assistantActionsReady(
+  node: TranscriptNode,
+  endIndex?: number,
+  nodeIndex?: number,
+): boolean {
+  return node.kind === 'assistant' && !node.streaming &&
+    (endIndex === undefined || nodeIndex === undefined || nodeIndex < endIndex)
 }

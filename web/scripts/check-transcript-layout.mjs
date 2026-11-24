@@ -143,8 +143,37 @@ await check('final actions render only when a real copy or branch button exists'
   assert.equal(forked, 50)
   await render([marker, assistant(1, [], { seq: undefined }), end], { onFork() {} })
   assert.equal(container.querySelector('.message-actions'), null)
-  await render([marker, assistant(1, [{ kind: 'text', text: 'answer' }]), end])
+  await render([marker, assistant(1, [{ kind: 'text', text: 'answer' }], { seq: 59 }), end])
   assert.equal(container.querySelectorAll('.message-actions button').length, 1)
+})
+await check('actions wait for settle when turn-end precedes live stream', async () => {
+  const settled = assistant(1, [{ kind: 'text', text: 'answer' }], { seq: 60 })
+  await render([marker, end, settled], { onFork() {} })
+  assert.equal(container.querySelector('.message-actions'), null)
+
+  await render([marker, end, { ...settled, step: 2, streaming: true }], { onFork() {} })
+  assert.equal(container.querySelector('.message-actions'), null)
+
+  await render([marker, end, settled, assistant(2, [{ kind: 'text', text: 'still streaming' }], { streaming: true })], { onFork() {} })
+  assert.equal(container.querySelectorAll('.message-actions').length, 0)
+
+  // 同一 turn 后来又收到续流时，旧的 turn-end 不能再给续流消息开按钮。
+  await render([marker, assistant(1, [{ kind: 'text', text: 'first' }], { seq: 61 }), end,
+    assistant(2, [{ kind: 'text', text: 'continued' }], { seq: 63 })], { onFork() {} })
+  assert.equal(container.querySelectorAll('.message-actions').length, 0)
+})
+await check('premature turn-end is not rendered mid-stream', async () => {
+  const events = [
+    { seq: 1, time: 1000, type: 'turn-start', turn: 1 },
+    { seq: 2, time: 1100, type: 'assistant-message', turn: 1, step: 1,
+      blocks: [{ type: 'text', text: 'part 1' }] },
+    { seq: 3, time: 1200, type: 'turn-end', turn: 1, reason: { kind: 'aborted' } },
+    { seq: 4, time: 1300, type: 'assistant-chunk', turn: 1, step: 2,
+      chunk: { type: 'text-delta', index: 0, text: 'part 2' } },
+  ]
+  await render(foldEvents(events))
+  assert.equal(container.querySelector('.turn-chrome'), null)
+  assert.equal(container.querySelectorAll('.msg-assistant').length, 2)
 })
 await check('eager rendering counts visible rows rather than hidden assistant nodes', async () => {
   const hidden = Array.from({ length: 40 }, (_, index) => assistant(index + 1, [toolBlock]))
