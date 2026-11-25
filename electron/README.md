@@ -35,7 +35,8 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
   全局事件 SSE、模型目录与流式 chat（提示词优化 / 连通性探测）、设置、项目、
   文件树/文件读取、审批应答
 - **MCP**：stdio / Streamable HTTP / HTTP+SSE 三种传输；`mcp__<server>__<tool>`
-  命名与冲突过滤；`mcp_list` 目录 + 首次调用懒加载参数；按字符分页与
+  命名与冲突过滤；已连接工具的完整参数定义直接声明在工具面上（首次调用即执行），
+  `mcp_list` 仅作清单发现；`tools/list` 游标翻页、按字符分页与
   `result_id` 续读（续读不重新执行外部工具）；`/api/mcp` 管理端点（增删改、
   启停、重连、逐工具开关）与 `settings.yaml` 的 `mcp` 命名空间持久化
 - **子代理 / 后台任务**：内置 explore / develop / verify + 用户级/项目级定义
@@ -80,7 +81,7 @@ Denia 仍然拥有会话日志与产品语义，二者通过 hooks 连接：
 | pi hook | Denia 用途 |
 | --- | --- |
 | `prepareRequest` | 从事件日志重建 canonical transcript；执行注入、microcompact、自动摘要、冻结 system 前缀 |
-| `beforeToolCall` | 权限 gate、用户审批 / 自动审查、MCP 懒加载、`exit_plan` |
+| `beforeToolCall` | 权限 gate、用户审批 / 自动审查、`exit_plan` |
 | `finishTurn` | loop guard（重复检测、提醒与硬停）、最大步数 |
 | `subscribe` | 把 pi 事件翻译成 `turn/step/assistant-chunk/tool-call/tool-result` 会话事件 |
 
@@ -91,8 +92,9 @@ Denia 仍然拥有会话日志与产品语义，二者通过 hooks 连接：
 - **工具面与执行面分离**：system message 只声明当前权限可见的 schema；pi 的
   运行期 loadout 仍包含隐藏工具，这样模型越权调用时能拿到 Denia 的可读拒绝，
   而不是 pi 的 “Tool not found”。
-- **MCP 懒加载**：未加载工具以空参数占位 schema 存在；首次调用返回真实
-  JSON Schema 并标记加载，下一次请求才下发完整定义。
+- **MCP 工具面**：已连接、已启用的 MCP 工具带完整参数定义进入工具面，模型第一次
+  调用就真正执行；连接快照变化（重连、启停、逐工具开关）时重建工具包装，声明不会
+  落后于实际连接。体量靠服务器/工具开关控制。
 - **提供商兼容**：继续读 `settings.yaml` 的 `llm-openai.providers`。宿主把
   Denia 的 `supportsPromptCacheKey`、`longCache`、`headers` 映射到 pi 的
   `compat`；自定义 OpenAI 兼容端点只在 `defaultMaxTokens` 显式配置时发送
@@ -263,7 +265,7 @@ src/
   session/store.ts        JSONL 会话日志
   tools/                  bash / 文件 / 搜索 / todo / mcp / skill
   config.ts               提供商、home、设置描述
-builtin-skills/           随包内置技能（skill-creator / denia-guide）
+builtin-skills/           随包内置技能（skill-creator / denia-guide / browser-guide）
 scripts/
   build.mjs               esbuild 打包
   dev.mjs                 打包后启动 Electron
