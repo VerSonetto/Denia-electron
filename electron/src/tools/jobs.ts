@@ -19,13 +19,13 @@ export function createJobTools(manager: JobManager): Tool[] {
   const jobStart: Tool = {
     schema: schema(
       'job_start',
-      '在会话工作目录启动后台命令，立即返回 job id。用 job_output 领取输出，job_kill 停止。',
+      '在会话工作目录启动后台命令,立即返回 job id。用 job_output 取输出,job_kill 停止。',
       {
         type: 'object',
         properties: {
-          command: { type: 'string', description: '要执行的 shell 命令。' },
-          label: { type: 'string', description: '一句话说明这个任务做什么（缺省取命令本身）。' },
-          timeout_ms: { type: 'integer', minimum: 1, description: '任务超时(毫秒)。' },
+          command: { type: 'string' },
+          label: { type: 'string', description: '一句话说明;缺省取命令本身。' },
+          timeout_ms: { type: 'integer', minimum: 1 },
         },
         required: ['command'],
         additionalProperties: false,
@@ -66,20 +66,13 @@ export function createJobTools(manager: JobManager): Tool[] {
   const jobOutput: Tool = {
     schema: schema(
       'job_output',
-      '立即读取任务当前增量输出，不在前台等待。未完成返回 pending，结束后结果自动送达当前会话；不要反复轮询，可以继续独立工作或先回复用户进度并结束本轮。结束后重复读取返回完整保留结果；ready 只表示结果可读取，执行成败见 job.status 和 exitCode。',
+      '读取任务当前增量输出,不在前台等待。未完成返回 pending,结束后结果自动送达;不要反复轮询。ready 只表示可读取,成败看 status 与 exitCode。',
       {
         type: 'object',
         properties: {
-          id: { type: 'string', description: 'job_start 返回的任务 id。' },
-          wait: {
-            type: 'boolean',
-            description: '兼容旧请求；true 也立即返回当前输出，未完成时由后台完成通知回传结果。',
-          },
-          timeout_ms: {
-            type: 'integer',
-            minimum: 1,
-            description: '兼容旧请求；不改变后台命令的执行超时。',
-          },
+          id: { type: 'string' },
+          wait: { type: 'boolean', description: '兼容旧请求;仍立即返回。' },
+          timeout_ms: { type: 'integer', minimum: 1 },
         },
         required: ['id'],
         additionalProperties: false,

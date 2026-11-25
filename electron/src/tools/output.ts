@@ -20,18 +20,18 @@ function guardLine(line: string): string {
 export const ReadToolOutputTool: Tool = {
   schema: schema(
     'read_tool_output',
-    '分页回读被截断的工具输出全文。工具结果因体积被截断时会给出 output_id,用本工具按行分页读取完整内容;不要为了看完整输出而重跑同一条命令。',
+    '分页回读被截断的工具输出。结果被截断时会给出 output_id,按行分页读全文;不要为看全文重跑命令。',
     {
       type: 'object',
       properties: {
-        output_id: { type: 'string', description: '产物 id,由被截断的工具结果给出。' },
-        offset: { type: 'integer', minimum: 1, default: 1, description: '1-based 起始行号,默认 1。' },
+        output_id: { type: 'string' },
+        offset: { type: 'integer', minimum: 1, default: 1 },
         limit: {
           type: 'integer',
           minimum: 1,
           maximum: MAX_PAGE_LINES,
           default: DEFAULT_PAGE_LINES,
-          description: `本页最多行数,默认 ${DEFAULT_PAGE_LINES},最大 ${MAX_PAGE_LINES}。`,
+          description: `默认 ${DEFAULT_PAGE_LINES},最大 ${MAX_PAGE_LINES}。`,
         },
       },
       required: ['output_id'],

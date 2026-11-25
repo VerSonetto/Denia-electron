@@ -473,20 +473,20 @@ export function killTree(child: ChildProcess): void {
 export const BashTool = {
   schema: schema(
     'bash',
-    'Run one shell command in the project and return its output. Commands run through the system default shell: the default Windows Terminal profile on Windows, bash on macOS/Linux, or DENIA_SHELL when set. The runtime context names the actual shell and the syntax to write. The primary project directory is the cwd; every project directory is exported in DENIA_PROJECT_DIRS. Prefer non-interactive commands; long-running work should be split into smaller commands.',
+    'Run one shell command and return its output. The runtime context names the shell and its syntax; cwd is the primary project directory, all project directories are in DENIA_PROJECT_DIRS. Prefer non-interactive commands; split long-running work.',
     {
       type: 'object',
       properties: {
-        command: { type: 'string', description: '要执行的 shell 命令。' },
+        command: { type: 'string', description: 'shell 命令。' },
         timeout_ms: {
           type: 'integer',
           minimum: 1,
           maximum: MAX_TIMEOUT_MS,
-          description: '超时时间(毫秒),默认 120000,最大 600000。',
+          description: '默认 120000,最大 600000。',
         },
         run_in_background: {
           type: 'boolean',
-          description: '后台执行并立即返回任务 id;用 job_output 读取输出、job_kill 停止。',
+          description: '后台执行,返回任务 id;用 job_output 读输出、job_kill 停止。',
         },
       },
       required: ['command'],

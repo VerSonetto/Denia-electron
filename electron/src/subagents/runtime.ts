@@ -1501,17 +1501,17 @@ function truncateUtf8(text: string, bytes: number): string {
 const SPAWN_SCHEMA: ToolSchema = {
   name: 'spawn_agent',
   description:
-    '创建独立子代理会话：继承工作目录、权限上限、父系统提示基础与模型默认值；角色提示是追加，不替换父 persona。始终后台执行，立即返回 childId 与 pending，完成结果自动通知父会话；pending 后不要轮询或重复等待，可以继续独立工作。派遣方式三选一：profile_id 用已保存的定义；inline 在调用时给出临时定义；两者都省略时使用默认的 develop 定义。profile_id 与 inline 互斥，也不与旧参数 persona/allowed_tools 混用。子代理禁止派遣子代理，也不能使用宿主配置与会话主控工具，且不会自动继承全局 AGENTS.md。',
+    '创建独立子代理会话：继承工作目录、权限上限与模型默认值,角色提示是追加;始终后台执行,立即返回 childId 与 pending,完成自动通知。派发:profile_id 用已保存定义,inline 给临时定义,都省略用默认 develop。子代理不能再派遣、不能用宿主配置工具、不继承全局 AGENTS.md。',
   parameters: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      prompt: { type: 'string', description: '交给子代理的完整任务说明（自包含：目标、范围、验收条件）。' },
-      description: { type: 'string', description: '一句话说明这次派遣做什么，用于父会话列表与结果通知。' },
-      profile_id: { type: 'string', description: '已保存定义的限定 id，如 builtin:explore / builtin:develop / builtin:verify / user:<id> / project:<id>。' },
+      prompt: { type: 'string', description: '完整任务说明（自包含：目标、范围、验收条件）。' },
+      description: { type: 'string' },
+      profile_id: { type: 'string', description: 'builtin:explore / builtin:develop / builtin:verify / user:<id> / project:<id>' },
       inline: {
         type: 'object',
-        description: '调用时创建的临时子代理定义（不落盘、不进管理目录）。',
+        description: '临时定义（不落盘），与 profile_id 互斥。',
         properties: {
           name: { type: 'string' },
           description: { type: 'string' },
@@ -1523,12 +1523,6 @@ const SPAWN_SCHEMA: ToolSchema = {
         required: ['name', 'description', 'tools'],
         additionalProperties: false,
       },
-      provider: { type: 'string' },
-      model: { type: 'string' },
-      reasoning_effort: { type: 'string' },
-      allowed_tools: { type: 'array', items: { type: 'string' } },
-      run_in_background: { type: 'boolean' },
-      persona: { type: 'string' },
     },
     required: ['prompt'],
   },
@@ -1538,13 +1532,13 @@ const FORK_SCHEMA: ToolSchema = {
   ...SPAWN_SCHEMA,
   name: 'fork_agent',
   description:
-    '以父会话已闭合的历史为种子创建子代理（工具调用与结果成对，不含全局指令与旧摘要注入）；沿用父模型（跨模型 fork 会被拒绝），其余行为同 spawn_agent。始终后台执行并立即返回 pending，完成结果自动通知父会话。',
+    '以父会话已闭合历史为种子创建子代理（不含全局指令与旧摘要），沿用父模型（跨模型会被拒绝），其余同 spawn_agent。始终后台执行并立即返回 pending。',
 }
 
 const CREATE_SCHEMA: ToolSchema = {
   name: 'create_subagent',
   description:
-    '创建一个永久子代理定义，写入用户级或项目级定义目录，会出现在设置 → 子代理管理页，用户可查看、编辑、删除。只应在用户明确要求固化一个长期角色时使用；一次性任务优先用 spawn_agent 的 inline 临时定义（不落盘）。同 id 默认拒绝覆盖，需显式 overwrite=true。',
+    '创建永久子代理定义（写入用户级或项目级目录,出现在设置 → 子代理管理页）。只在用户明确要求固化长期角色时用;一次性任务优先 inline。同 id 默认拒绝覆盖,需 overwrite=true。',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -1613,7 +1607,7 @@ const LIST_SCHEMA: ToolSchema = {
 const WAIT_SCHEMA: ToolSchema = {
   name: 'wait_agent',
   description:
-    '立即查看子代理结果，不在前台等待。未完成返回 pending，完成结果会自动送达父会话；不要循环调用，可以继续独立工作或先向用户回复进度并结束本轮。已结束则直接返回结果；ready 只表示结果可读取，不代表执行成功。',
+    '立即查看子代理结果,不在前台等待。未完成返回 pending,完成后自动送达父会话;不要循环调用。ready 只表示可读取,不代表成功。',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -1628,7 +1622,7 @@ const WAIT_SCHEMA: ToolSchema = {
 const TRACE_SCHEMA: ToolSchema = {
   name: 'session_trace',
   description:
-    '查看当前会话或直接父/子代理会话的结构化轨迹、日志与错误记录，用于自我审查和故障定位。默认只返回最近 50 条，可用 kind/level/query/since/limit 收窄。',
+    '查看当前会话或直接父/子的结构化轨迹与错误记录。默认最近 50 条,可用 kind/level/query/since/limit 收窄。',
   parameters: {
     type: 'object',
     additionalProperties: false,

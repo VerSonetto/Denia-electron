@@ -75,14 +75,14 @@ function* walk(root: string, relative = '', depth = 0): Generator<WalkEntry> {
 export const LsTool = {
   schema: schema(
     'ls',
-    '列出目录包含哪些条目(目录名尾部带 "/"),目录在前、文件在后。默认只列一层;要看更深请显式给 depth(上限 5)。',
+    '列出目录条目(目录名尾部带 "/"),目录在前。默认一层,要看更深给 depth(≤5)。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '要列出的目录,默认项目目录。' },
-        depth: { type: 'integer', minimum: 1, maximum: 5, description: '递归深度,默认 1。' },
-        max_results: { type: 'integer', minimum: 1, description: '最多返回的条目数,默认 200。' },
-        offset: { type: 'integer', minimum: 0, description: '跳过排序后前 N 条(从 0 开始)。' },
+        path: { type: 'string' },
+        depth: { type: 'integer', minimum: 1, maximum: 5 },
+        max_results: { type: 'integer', minimum: 1 },
+        offset: { type: 'integer', minimum: 0 },
       },
     },
   ),
@@ -209,14 +209,14 @@ function globToRegExp(pattern: string): RegExp {
 export const GlobTool = {
   schema: schema(
     'glob',
-    '按 glob 模式查找文件,返回匹配的文件路径(不含目录),按修改时间从新到旧排序。模式里没有 "/" 时匹配任意深度的文件名,所以 "*.ts" 会搜索整棵树;path 可传目录,缺省为项目目录。',
+    '按 glob 模式查找文件(不含目录),按修改时间从新到旧。模式无 "/" 时匹配任意深度的 basename。',
     {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: 'glob 模式(如 "**/*.ts"、"src/**/*.test.js"、"*.{rs,toml}")。' },
-        path: { type: 'string', description: '搜索目录,默认项目目录。' },
-        max_results: { type: 'integer', minimum: 1, description: '最多返回的路径数,默认 100。' },
-        offset: { type: 'integer', minimum: 0, description: '跳过排序后前 N 条。' },
+        pattern: { type: 'string' },
+        path: { type: 'string' },
+        max_results: { type: 'integer', minimum: 1 },
+        offset: { type: 'integer', minimum: 0 },
       },
       required: ['pattern'],
     },
@@ -282,16 +282,16 @@ function matchesInclude(relative: string, include: string | undefined): boolean 
 export const GrepTool = {
   schema: schema(
     'grep',
-    '用正则表达式搜索文件内容,结果按 path:line:content 逐行返回。默认尊重常见忽略目录(.git、node_modules);命中多时用 offset/max_matches 分页。',
+    '正则搜索文件内容,按 path:line:content 返回。默认跳过 .git、node_modules 等;命中多用 max_matches/offset 分页。',
     {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: '要搜索的正则表达式(JS 正则语法)。' },
-        path: { type: 'string', description: '搜索的文件或目录,默认项目目录。' },
-        include: { type: 'string', description: '单个文件 glob 过滤(如 "*.ts")。' },
-        ignore_case: { type: 'boolean', description: '大小写不敏感匹配,默认 false。' },
-        max_matches: { type: 'integer', minimum: 1, description: '最多返回的命中行数,默认 200。' },
-        offset: { type: 'integer', minimum: 0, description: '跳过排序后前 N 条命中。' },
+        pattern: { type: 'string' },
+        path: { type: 'string' },
+        include: { type: 'string', description: 'glob 过滤,如 "*.ts"。' },
+        ignore_case: { type: 'boolean' },
+        max_matches: { type: 'integer', minimum: 1 },
+        offset: { type: 'integer', minimum: 0 },
       },
       required: ['pattern'],
     },

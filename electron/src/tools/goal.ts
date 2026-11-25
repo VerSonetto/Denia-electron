@@ -10,7 +10,7 @@ import { schema, textOutput } from './types.ts'
 export class GoalReadTool implements Tool {
   readonly schema = schema(
     'goal_read',
-    'Read the current session goal and its status (objective, token budget, usage, iteration, verification history). Use it when you need to confirm what the runtime is tracking before continuing work.',
+    '读取当前会话目标与状态(目标、预算、用量、轮次、校验历史)。',
     {
       type: 'object',
       additionalProperties: false,

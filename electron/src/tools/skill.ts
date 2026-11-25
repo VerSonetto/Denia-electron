@@ -30,7 +30,7 @@ export class SkillTool implements Tool {
   readonly schema: ToolSchema = {
     name: 'skill',
     description:
-      '技能按作用域分为全局技能与项目技能：全局技能位于用户主目录的 ~/.denia/skills/（跨项目复用），项目技能位于项目 .denia/skills 等目录（随项目走），同名时项目技能优先，来源见返回的 source。可用技能以 <available_skills> 目录注入消息提供，先从目录取准确技能名；action=load 按 name 加载，SKILL.md 全文直接随工具结果返回（加载一次即可，目录只含摘要，未加载前不得凭摘要推断技能内容）；其余参考资料与脚本用 action=resource、name、path 按返回的 resourceBase 相对路径读取，禁止越界。',
+      '加载技能。名字从 <available_skills> 取准确值;action=load 返回 SKILL.md 全文(只加载一次,未加载前不得凭摘要推断)。其余资料用 action=resource + path,按返回的 resourceBase 相对路径读。同名时项目技能优先,来源见 source。',
     parameters: {
       type: 'object',
       additionalProperties: false,

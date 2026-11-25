@@ -23,24 +23,20 @@ function parseTodos(value: unknown): TodoItem[] | null {
 export const TodoWriteTool = {
   schema: schema(
     'todo_write',
-    '记录并更新当前工作的结构化任务清单。每次调用必须发送完整列表(没有部分更新)。用于规划多步工作并展示进度:开始前把每个具体步骤拆成一条 todo。同一时间最多一条 todo 处于 in_progress;任务完成的当下就标记 completed,全部完成才允许没有 in_progress 项。',
+    '记录并更新当前工作的任务清单,每次发送完整列表(无部分更新)。最多一条 in_progress;完成即标 completed。',
     {
       type: 'object',
       additionalProperties: false,
       properties: {
         todos: {
           type: 'array',
-          description: '完整任务列表,整体替换之前的列表。',
+          description: '完整列表,整体替换。',
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              content: { type: 'string', description: '任务内容——一句简短的祈使句。' },
-              status: {
-                type: 'string',
-                enum: ['pending', 'in_progress', 'completed'],
-                description: 'pending(未开始)| in_progress(进行中)| completed(已完成)。',
-              },
+              content: { type: 'string', description: '一句简短祈使句。' },
+              status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
             },
             required: ['content', 'status'],
           },

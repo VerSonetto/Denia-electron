@@ -55,13 +55,13 @@ function backupBeforeWrite(file: string, ctx: ToolContext): ToolOutput | null {
 export const ReadFileTool = {
   schema: schema(
     'read_file',
-    '读取项目目录中的一个 UTF-8 文本文件。相对路径锚定项目主目录;大文件用 offset/limit 分页读取。',
+    '读取一个 UTF-8 文本文件;相对路径锚定项目主目录,大文件用 offset/limit 分页。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '文件路径;相对路径锚定项目主目录。' },
-        offset: { type: 'integer', minimum: 1, default: 1, description: '1-based 起始行号,默认 1。' },
-        limit: { type: 'integer', minimum: 1, default: DEFAULT_READ_LIMIT, description: '本次最多读取的行数,默认 400。' },
+        path: { type: 'string' },
+        offset: { type: 'integer', minimum: 1, default: 1 },
+        limit: { type: 'integer', minimum: 1, default: DEFAULT_READ_LIMIT },
       },
       required: ['path'],
     },
@@ -122,12 +122,12 @@ export const ReadFileTool = {
 export const WriteFileTool = {
   schema: schema(
     'write_file',
-    '在项目目录写入一个 UTF-8 文本文件:自动创建父目录,已存在的文件会被整体覆盖。新建文件或全量重写用本工具;对现有文件做局部修改请优先用 edit。',
+    '写入 UTF-8 文本文件:自动创建父目录,已存在则整体覆盖。新建或全量重写用它;局部修改用 edit。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '目标文件路径;相对路径锚定项目主目录。' },
-        content: { type: 'string', description: '完整文件内容(整体覆盖写入)。' },
+        path: { type: 'string' },
+        content: { type: 'string' },
       },
       required: ['path', 'content'],
     },
@@ -211,26 +211,26 @@ function lineOfIndex(text: string, index: number): number {
 export const EditTool = {
   schema: schema(
     'edit',
-    '对项目内的一个 UTF-8 文本文件做精确字符串替换。推荐两种参数形式之一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次。多处编辑按数组顺序应用,任一项失败则整次不写入。',
+    '对项目内一个 UTF-8 文件做精确字符串替换。改一处用 old_string+new_string(可选 replace_all);多处只给 edits 数组。old_string 须逐字符一致,默认唯一。原子应用,任一失败则整次不写入。',
     {
       type: 'object',
       required: ['path'],
       additionalProperties: false,
       properties: {
-        path: { type: 'string', description: '要编辑的文件路径;相对路径锚定项目主目录。' },
-        old_string: { type: 'string', minLength: 1, description: '要被替换的原文,必须与文件内容逐字符一致。' },
-        new_string: { type: 'string', description: '替换成的新文本;删除内容时给空串。' },
-        replace_all: { type: 'boolean', description: 'true 时替换 old_string 的全部出现,默认只允许恰好出现一次。' },
+        path: { type: 'string', description: '相对路径锚定项目主目录。' },
+        old_string: { type: 'string', minLength: 1 },
+        new_string: { type: 'string' },
+        replace_all: { type: 'boolean', description: '替换全部出现,默认要求唯一。' },
         edits: {
           type: 'array',
           minItems: 1,
-          description: '多处编辑:按顺序原子应用同一文件的多个替换。',
+          description: '多处编辑:按顺序原子应用。',
           items: {
             type: 'object',
             properties: {
-              old_string: { type: 'string', minLength: 1, description: '要被替换的原文。' },
-              new_string: { type: 'string', description: '替换成的新文本。' },
-              replace_all: { type: 'boolean', description: '可选;true 时替换全部出现。' },
+              old_string: { type: 'string', minLength: 1 },
+              new_string: { type: 'string' },
+              replace_all: { type: 'boolean' },
             },
             required: ['old_string', 'new_string'],
             additionalProperties: false,

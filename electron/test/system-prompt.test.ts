@@ -73,19 +73,19 @@ test('the persona stays outside the priority frame', () => {
 
 test('tool-owned sections follow the tool surface', () => {
   const full = prompt()
-  assert.ok(full.includes('- bash 只跑构建'), 'bash discipline appears with bash')
-  assert.ok(full.includes('有目标时以达成目标为先'), 'goal discipline appears with goal_read')
+  assert.ok(full.includes('bash 与 job_start 只跑构建'), 'bash discipline appears with bash')
+  assert.ok(full.includes('用 goal_read 确认'), 'goal discipline appears with goal_read')
 
   const withBrowser = prompt({ tools: [...BASE_TOOL_NAMES, 'browser'].map(tool) })
-  assert.ok(withBrowser.includes('- browser 控制本机 Chrome/Edge'), 'browser discipline appears with browser')
+  assert.ok(withBrowser.includes('skill browser-guide'), 'browser discipline points at its manual')
   assert.ok(withBrowser.includes('shutdownBrowser'), 'the shutdown contract ships with the tool')
 
   const withoutBash = prompt({ tools: BASE_TOOL_NAMES.filter((name) => name !== 'bash').map(tool) })
-  assert.ok(!withoutBash.includes('- bash 只跑构建'), 'no bash discipline without bash')
+  assert.ok(!withoutBash.includes('bash 与 job_start 只跑构建'), 'no bash discipline without bash')
   assert.ok(withoutBash.includes('## 工具准则'), 'the group heading survives a removed tool')
 
   const withoutGoal = prompt({ tools: BASE_TOOL_NAMES.filter((name) => name !== 'goal_read').map(tool) })
-  assert.ok(!withoutGoal.includes('有目标时以达成目标为先'), 'no goal discipline without goal_read')
+  assert.ok(!withoutGoal.includes('用 goal_read 确认'), 'no goal discipline without goal_read')
 
   // This host has no ask / run_checks / web_fetch / browser / read_tool_output.
   for (const absent of ['ask 只在真正卡住时用', 'run_checks', 'web_fetch', 'shutdownBrowser', 'read_tool_output']) {

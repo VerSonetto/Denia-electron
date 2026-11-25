@@ -33,17 +33,17 @@ export function parseExitPlanArgs(raw: string): ExitPlanArgs {
 export const ExitPlanTool: Tool = {
   schema: schema(
     'exit_plan',
-    '计划模式专用:把完整执行计划呈交给用户审批。适用:改动会跨多个文件或模块;存在多个可行方案需要用户拍板;需求含糊,需先调研再设计;涉及架构或接口层面的选择。不适用:单行修复、错别字等小改动;需求明确且只有一种显然做法;纯问答或检索类请求(那属于研究,不属于计划)。仅当当前处于计划模式且调研完成后调用;提交后阻塞等待用户决策,等待期间不要继续其他操作;计划被拒绝且附带建议时,按建议修订后重新提交。',
+    '计划模式专用:把完整执行计划交用户审批。适用于跨多文件、多方案待定、需求含糊、架构级选择;小改动与纯问答不要用。提交后阻塞等待,期间不调其他工具;被拒且附建议时按建议修订后重提。',
     {
       type: 'object',
       properties: {
         title: {
           type: 'string',
-          description: '可选的计划短标题(一句话概括要做什么)。',
+          description: '一句话短标题。',
         },
         plan: {
           type: 'string',
-          description: '计划正文(markdown):目标、分步方案、涉及文件、风险与验证方式。',
+          description: 'markdown:目标、分步方案、涉及文件、风险、验证方式。',
         },
       },
       required: ['plan'],
