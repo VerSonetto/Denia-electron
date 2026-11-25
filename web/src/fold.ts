@@ -491,6 +491,16 @@ function staleTurnEndIndex(nodes: TranscriptNode[], event: SessionEnvelope): num
 }
 
 /**
+ * 关闭尾部仍在流式的助手节点。正常收尾由 `assistant-message` 完成;中止的
+ * 轮次没有这一帧,只能靠 turn-end 兜底,否则转圈光标会一直留着。
+ */
+function closeTailAssistant(nodes: TranscriptNode[]): TranscriptNode[] {
+  const last = nodes[nodes.length - 1]
+  if (last?.kind !== 'assistant' || !last.streaming) return nodes
+  return [...nodes.slice(0, -1), { ...last, streaming: false }]
+}
+
+/**
  * The deterministic fold: identical output for cold history and live
  * streaming. Chunk deltas accumulate into an in-progress assistant node;
  * the settled `assistant-message` replaces it with authoritative blocks.
@@ -750,7 +760,9 @@ export function foldEvents(events: SessionEnvelope[], parentSessionId?: string):
         break
     }
   }
-  closeOpen()
+  // 末尾仍是 assistant-chunk 时不要强制收尾:那说明这一 step 还在流式
+  // (实时窗口重建 / 向上翻页会带着尾部帧重折)。真正的收尾由
+  // assistant-message 或 turn-end 完成;这里只对齐增量路径的暂存。
   // 冷启动(切会话/重拉快照)是全量权威结果:把增量路径的暂存对齐到它,
   // 否则换会话后模块级暂存还留着上一个会话的值,新会话首条 system-prompt
   // 可能因与旧会话文本相同而被误吞,todo 也会比对出假变化。
@@ -842,19 +854,25 @@ export function applyEnvelopes(
   let copiedTools: Set<number> | null = null
   const flush = (): Extract<TranscriptNode, { kind: 'assistant' }> | null => {
     if (acc === null) return null
-    const settled: Extract<TranscriptNode, { kind: 'assistant' }> = {
+    // flush 只结束"本批累积",不是结算:同一 step 的后续帧还要并回这条
+    // 节点。真正的收尾是 `assistant-message`(或 turn-end 的兜底关闭),
+    // 提前把 streaming 置 false 会让下一帧另起一条助手消息 —— 正文被拆成
+    // 一段段气泡,assistant-message 到达时又因 last.streaming 为 false 而
+    // 再追加一条完整副本。
+    const flushed: Extract<TranscriptNode, { kind: 'assistant' }> = {
       ...acc.node,
       blocks: acc.blocks,
-      streaming: false,
     }
     current = current.slice(0, -1)
-    current.push(settled)
+    current.push(flushed)
     acc = null
-    return settled
+    return flushed
   }
   for (const event of events) {
     if (isLateTurnActivity(event)) {
-      if (acc !== null) flush()
+      // assistant-chunk 是流式节点的延续,不是边界;在这里 flush 会退化成
+      // 每个 delta 一条助手消息。只撤销可能提前落盘的 turn-end。
+      if (event.type !== 'assistant-chunk' && acc !== null) flush()
       current = dropStaleTurnEnd(current, event)
     }
     if (event.type === 'tool-output-chunk') {
@@ -1185,6 +1203,7 @@ function applyEnvelopeStep(
     }
     case 'turn-end': {
       incrementalStepStarts.clear()
+      nodes = closeTailAssistant(nodes)
       // 与冷启动路径共用 mergeUsage:反向扫本轮 assistant 步,四字段全累加。
       // 先前这里只加 input/output,缓存读与推理实时恒为 0、刷新后才有值。
       let usage: TokenUsage | null = null
