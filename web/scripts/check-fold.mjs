@@ -146,6 +146,35 @@ incrLate = mod.applyEnvelope(incrLate, lateEvents[3])
 check('增量:迟到的续流撤销提前的 turn-end', incrLate.filter((n) => n.kind === 'turn-end').length, 0)
 check('增量与冷启动的续流一致', incrLate, coldLate)
 
+/* 10c) 流式正文跨多个 SSE/动画帧到达时,必须并回同一条助手消息。
+        回归:flush 每批把 streaming 置 false,下一帧就另起一条节点 ——
+        界面上先出现一句被拆成好几段的正文,assistant-message 到达后再追加
+        一条完整副本。 */
+const streamStart = { seq: 1, time: 1000, type: 'turn-start', turn: 1 }
+const delta = (seq, text) => ({
+  seq, time: 1000 + seq, type: 'assistant-chunk', turn: 1, step: 1,
+  chunk: { type: 'text-delta', index: 0, text },
+})
+const streamChunks = [delta(2, '你'), delta(3, '好'), delta(4, '，世界')]
+let streamed = mod.foldEvents([streamStart])
+for (const chunk of streamChunks) streamed = mod.applyEnvelope(streamed, chunk)
+const streamedNodes = streamed.filter((n) => n.kind === 'assistant')
+check('逐帧增量:正文只落一条助手节点', streamedNodes.length, 1)
+check('逐帧增量:正文按 delta 顺序拼接', streamedNodes[0].blocks.map((b) => b.text).join(''), '你好，世界')
+check('逐帧增量:结算前保持 streaming', streamedNodes[0].streaming, true)
+
+const streamedBatch = mod.applyEnvelopes(mod.foldEvents([streamStart]), streamChunks)
+check('同批增量与逐帧增量一致', streamedBatch, streamed)
+
+const settledStream = mod.applyEnvelope(streamed, {
+  seq: 5, time: 2000, type: 'assistant-message', turn: 1, step: 1,
+  blocks: [{ type: 'text', text: '你好，世界' }],
+})
+const settledNodes = settledStream.filter((n) => n.kind === 'assistant')
+check('assistant-message 就地结算,不追加副本', settledNodes.length, 1)
+check('assistant-message 结算后 streaming 关闭', settledNodes[0].streaming, false)
+check('assistant-message 正文为权威全文', settledNodes[0].blocks[0].text, '你好，世界')
+
 /* 10) 缓存命中率分母回归:`TokenUsage` 契约里 cacheRead 与 inputTokens 互斥
        (inputTokens 只含未缓存部分),所以分母是两者之和,命中率 = 命中/总prompt。
 
