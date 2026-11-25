@@ -1,5 +1,5 @@
 // MCP subsystem tests: stdio/HTTP transports, pagination identity, host API,
-// lazy tool loading and the mcp_list catalog.
+// the declared tool surface and the mcp_list catalog.
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -266,24 +266,23 @@ test('HTTP MCP: session id, JSON responses and DELETE on shutdown', async () => 
   await new Promise<void>((resolve) => server.close(() => resolve()))
 })
 
-test('host MCP API + agent loop: mcp_list, lazy loading and execution', async () => {
+test('host MCP API + agent loop: declared schema, direct execution and mcp_list', async () => {
   const home = tempDir('denia-mcp-home-')
   const cwd = tempDir('denia-mcp-cwd-')
   const webDir = tempDir('denia-mcp-web-')
   const mock = await startMockGateway((request) => {
-    const tools = lastToolContents(request)
-    if (tools.some((content) => content.includes('echo:hello'))) {
+    const results = lastToolContents(request)
+    if (results.some((content) => content.includes('echo:hello'))) {
       return { text: 'mcp done' }
     }
-    if (tools.some((content) => content.includes('尚未加载参数定义'))) {
-      return {
-        calls: [{ name: 'mcp__fixture__echo', arguments: { text: 'hello' } }],
-      }
+    // The real parameter schema is declared up front, so the model calls the
+    // MCP tool straight away — no "load the definition first" round-trip.
+    return {
+      calls: [
+        { name: 'mcp_list', arguments: { server: 'fixture' } },
+        { name: 'mcp__fixture__echo', arguments: { text: 'hello' } },
+      ],
     }
-    if (tools.some((content) => content.includes('mcp__fixture__echo —'))) {
-      return { calls: [{ name: 'mcp__fixture__echo', arguments: { text: 'hello' } }] }
-    }
-    return { calls: [{ name: 'mcp_list', arguments: {} }] }
   })
   fs.writeFileSync(
     path.join(home, 'settings.yaml'),
@@ -369,11 +368,34 @@ test('host MCP API + agent loop: mcp_list, lazy loading and execution', async ()
     )
     const list = results.find((event) => event.content.includes('mcp__fixture__echo —'))
     assert.ok(list, 'mcp_list must expose connected tools')
-    const load = results.find((event) => event.content.includes('尚未加载参数定义'))
-    assert.ok(load, 'the first call must return the schema instead of executing')
-    assert.match(load?.content ?? '', /"text"/)
+
+    // The provider request carries the server's own parameters, not a stub.
+    // (The first request of the session is tool-less bookkeeping.)
+    const declared = (mock.requests.find((request) => (request.tools ?? []).length > 0)?.tools ??
+      []) as unknown as {
+      function: {
+        name: string
+        description?: string
+        parameters?: { properties?: Record<string, unknown> }
+      }
+    }[]
+    const names = declared.map((tool) => tool.function.name)
+    assert.ok(names.includes('mcp_list'), 'mcp_list stays on the surface for discovery')
+    const echo = declared.find((tool) => tool.function.name === 'mcp__fixture__echo')
+    assert.ok(echo, 'a connected MCP tool must be declared on the tool surface')
+    assert.deepEqual(
+      Object.keys(echo?.function.parameters?.properties ?? {}).sort(),
+      ['limit', 'offset', 'result_id', 'text'],
+      'the declared schema must carry the server parameters plus denia pagination fields',
+    )
+    assert.doesNotMatch(echo?.function.description ?? '', /尚未加载/)
+
     const executed = results.filter((event) => event.content.includes('echo:hello'))
-    assert.equal(executed.length, 1, 'the second call must execute against the server')
+    assert.equal(executed.length, 1, 'the first call must execute against the server')
+    assert.ok(
+      !results.some((event) => event.content.includes('尚未加载参数定义')),
+      'no schema-loading round-trip may remain',
+    )
   } finally {
     await host.close()
     await mock.close()

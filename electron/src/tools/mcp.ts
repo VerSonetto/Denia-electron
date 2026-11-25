@@ -88,7 +88,7 @@ export class McpListTool implements Tool {
   readonly schema: ToolSchema = {
     name: 'mcp_list',
     description:
-      '列出已接入的 MCP 外部工具清单(名称与用途)。需要 denia 内置能力之外的外部能力时,先用本工具查看有哪些 MCP 工具可用,再按清单里的名称直接调用。',
+      '列出已接入的 MCP 外部工具清单(名称与用途)。工具名称和参数定义已经直接声明在工具面上,可以直接调用;只有想确认某台服务器有哪些工具时才用本工具。',
     parameters: {
       type: 'object',
       properties: {

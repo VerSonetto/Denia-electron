@@ -142,7 +142,10 @@ export interface SessionServices {
     args: Record<string, unknown>,
     ctx: ToolContext,
   ): Promise<ToolOutput | undefined>
-  /** Intercept a call before policy/approval (MCP lazy loading). */
+  /**
+   * Settle a call before policy/approval. Returning an output skips execution
+   * and records that result; undefined lets the call run normally.
+   */
   intercept?(call: ToolCallRef, sessionId: string): ToolOutput | undefined
   /** Turn queued agent-inbox events into model-visible deliveries. */
   drainInbox?(sessionId: string): void

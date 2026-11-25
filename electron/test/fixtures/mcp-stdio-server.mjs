@@ -89,7 +89,15 @@ lines.on('line', (line) => {
   }
   if (message.method === 'notifications/initialized') return
   if (message.method === 'tools/list') {
-    respond(message.id, { tools })
+    // Paginate two tools per page so the client's cursor loop is exercised.
+    const pageSize = 2
+    const start = Number(message.params?.cursor ?? 0) || 0
+    const page = tools.slice(start, start + pageSize)
+    const next = start + page.length
+    respond(message.id, {
+      tools: page,
+      ...(next < tools.length ? { nextCursor: String(next) } : {}),
+    })
     return
   }
   if (message.method === 'tools/call') {

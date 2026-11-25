@@ -63,7 +63,7 @@ export interface ToolRuntimePort {
   sessionId: string
   header: SessionHeader
   registry: ToolRegistry
-  /** Results settled before execution (MCP intercept, plan approval, blocks). */
+  /** Results settled before execution (plan approval, blocked calls). */
   preResults: Map<string, ToolOutput>
   records: Map<string, ToolRecord>
   notExecuted: Set<string>

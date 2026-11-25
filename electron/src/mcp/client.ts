@@ -12,11 +12,14 @@ import {
   METHOD_TOOLS_LIST,
   callResultFrom,
   initializeParams,
-  parseToolsList,
+  parseToolsPage,
 } from './protocol.ts'
 import type { McpCallResult, McpToolDef } from './protocol.ts'
 import { createTransport } from './transport.ts'
 import type { McpTransport } from './transport.ts'
+
+/** Upper bound on `tools/list` pages (a page may hold 100+ tools). */
+const MAX_TOOL_PAGES = 50
 
 export class McpClient {
   private readonly name: string
@@ -59,8 +62,22 @@ export class McpClient {
   }
 
   async listTools(): Promise<McpToolDef[]> {
-    const result = await this.run(METHOD_TOOLS_LIST, undefined, REQUEST_TIMEOUT_MS)
-    return parseToolsList(result)
+    const tools: McpToolDef[] = []
+    let cursor: string | null = null
+    // Servers such as large reverse-engineering suites paginate the catalog;
+    // the page cap keeps a server that never clears its cursor bounded.
+    for (let page = 0; page < MAX_TOOL_PAGES; page += 1) {
+      const result = await this.run(
+        METHOD_TOOLS_LIST,
+        cursor === null ? undefined : { cursor },
+        REQUEST_TIMEOUT_MS,
+      )
+      const parsed = parseToolsPage(result)
+      tools.push(...parsed.tools)
+      cursor = parsed.nextCursor
+      if (cursor === null) break
+    }
+    return tools
   }
 
   async callTool(tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult> {

@@ -2,8 +2,8 @@
 // project memory.
 //
 // The loop owns turns; this module answers "which extra tools exist",
-// "execute that tool", and "what context should be injected now". MCP
-// lazy-loading and frozen subagent grants share one filter here.
+// "execute that tool", and "what context should be injected now". MCP tool
+// declarations and frozen subagent grants share one filter here.
 
 import type { PermissionState } from '../core/permission.ts'
 import type {
@@ -11,7 +11,6 @@ import type {
   ModelSelection,
   SessionHeader,
   TokenUsage,
-  ToolCallRef,
   ToolOutput,
   ToolSchema,
   TurnEndReason,
@@ -27,7 +26,6 @@ import type { SessionServices } from '../agent/loop.ts'
 import type { ToolContext } from '../tools/types.ts'
 import type { Tool } from '../tools/types.ts'
 import type { FileHistoryBackend } from '../tools/types.ts'
-import { textOutput } from '../tools/types.ts'
 import { McpListTool, McpTool } from '../tools/mcp.ts'
 import { createJobTools } from '../tools/jobs.ts'
 import { GoalReadTool } from '../tools/goal.ts'
@@ -94,7 +92,12 @@ export class HostServices implements SessionServices {
   private readonly apiBase: (() => string) | undefined
   /** Cached SYSTEM.md text; undefined = not read yet, null = factory persona. */
   private systemPrompt: string | null | undefined
-  private readonly loaded = new Map<string, Set<string>>()
+  /**
+   * MCP tool wrappers, keyed by qualified name. The cache is dropped whenever
+   * the connection snapshot changes, so a reconnected server's new schema and
+   * description reach the tool surface instead of the stale wrapper.
+   */
+  private mcpToolVersion = -1
   private readonly mcpTools = new Map<string, McpTool>()
   private readonly listTool: McpListTool
   private readonly goalRuntime: GoalRuntime | undefined
@@ -139,15 +142,6 @@ export class HostServices implements SessionServices {
     return this.rootsOf(header)
   }
 
-  private loadedOf(sessionId: string): Set<string> {
-    let set = this.loaded.get(sessionId)
-    if (!set) {
-      set = new Set()
-      this.loaded.set(sessionId, set)
-    }
-    return set
-  }
-
   private grantedTools(header: SessionHeader): Set<string> | null {
     if (!header.subagent) return null
     return new Set(header.subagent.effectiveTools ?? legacyChildTools(header.subagent.allowedTools))
@@ -159,27 +153,17 @@ export class HostServices implements SessionServices {
   }
 
   extraSchemas(sessionId: string, header: SessionHeader, state: PermissionState): ToolSchema[] {
+    void sessionId
     const out: ToolSchema[] = []
     const snapshot = this.mcp.snapshot()
     if (snapshot.hasConnected() && this.allowed(header, 'mcp_list')) {
       out.push(this.listTool.schema)
     }
-    const loaded = this.loadedOf(sessionId)
+    // Every connected MCP tool ships its real parameter schema, so the model
+    // can call it on the first try instead of fetching the definition first.
     for (const def of snapshot.toolDefs()) {
       if (!this.allowed(header, def.name)) continue
-      if (loaded.has(def.name)) {
-        out.push(this.mcpToolOf(def.name, def.description, def.schema).schema)
-        continue
-      }
-      // pi rejects calls to tools it does not know before the permission hook
-      // can run. A schema-less placeholder keeps the lazy contract: the first
-      // call returns the real definition and marks the tool loaded, the next
-      // request carries the full schema and executes.
-      out.push({
-        name: def.name,
-        description: `${def.description.trim() || 'MCP 外部工具'}\n(参数定义尚未加载;首次调用会返回完整 JSON Schema,按该 schema 重新调用即可执行。)`,
-        parameters: { type: 'object', properties: {}, additionalProperties: true },
-      })
+      out.push(this.mcpToolOf(snapshot.version, def.name, def.description, def.schema).schema)
     }
     for (const schema of this.subagents.toolSchemas(sessionId)) {
       if (!this.allowed(header, schema.name)) continue
@@ -201,19 +185,6 @@ export class HostServices implements SessionServices {
     return this.jobManager
   }
 
-  intercept(call: ToolCallRef, sessionId: string): ToolOutput | undefined {
-    if (!call.name.startsWith('mcp__')) return undefined
-    const snapshot = this.mcp.snapshot()
-    if (!snapshot.route(call.name)) return undefined
-    const loaded = this.loadedOf(sessionId)
-    if (loaded.has(call.name)) return undefined
-    loaded.add(call.name)
-    const definition = snapshot.schemaOf(call.name) ?? { type: 'object' }
-    return textOutput(
-      `本工具尚未加载参数定义,本次调用未执行。完整参数定义(JSON Schema)如下:\n${JSON.stringify(definition, null, 2)}\n请按参数定义重新调用本工具,即可正常执行。`,
-    )
-  }
-
   async executeExtra(
     name: string,
     args: Record<string, unknown>,
@@ -228,10 +199,12 @@ export class HostServices implements SessionServices {
     if (name.startsWith('mcp__')) {
       const snapshot = this.mcp.snapshot()
       if (!snapshot.route(name)) return undefined
-      this.loadedOf(ctx.sessionId).add(name)
-      const tool =
-        this.mcpTools.get(name) ??
-        this.mcpToolOf(name, snapshot.descriptionOf(name), snapshot.schemaOf(name))
+      const tool = this.mcpToolOf(
+        snapshot.version,
+        name,
+        snapshot.descriptionOf(name),
+        snapshot.schemaOf(name),
+      )
       return tool.execute(args, ctx)
     }
     const jobTool = this.jobTools.find((tool) => tool.schema.name === name)
@@ -450,13 +423,19 @@ export class HostServices implements SessionServices {
       .map((server) => server.id)
     return [
       `当前已接入的 MCP 服务器：${servers.join('、')}。`,
-      '- mcp__<服务器>__<工具> 是用户接入的第三方能力，不是内置功能，也不向用户解释“用 MCP”。同名能力内置优先，内置做不到才用外部。先用 mcp_list（可按 server 筛选）发现，再按清单名称调用；首次调用只返回 JSON Schema、不执行，按定义尽快重新调用执行，不猜参数、不反复装载同一工具。',
-      '- 长结果按字符分页：带尾部给出的 result_id 与更大的 offset 再调用同一工具可续读同一次结果（不会重新执行）；优先收窄查询，不靠翻页从头读到尾。',
+      '- mcp__<服务器>__<工具> 是用户接入的第三方能力，不是内置功能，也不向用户解释“用 MCP”。同名能力内置优先，内置做不到才用外部。这些工具的参数定义已直接声明在工具面上，按名称和参数直接调用即可执行；只有拿不准某个服务器有哪些工具时才用 mcp_list 查看清单。',
+      '- 长结果按字符分页：每个 MCP 工具都带可选的 offset / limit / result_id 参数。输出尾部给出 result_id 时，带上同一个 result_id 与更大的 offset 再调一次即可续读同一次结果（不会重新执行）；不带 result_id 的调用都是新调用，会真实执行。优先收窄查询，不靠翻页从头读到尾。',
       '- 失败先读错误里的可执行建议（常需在设置 → MCP 检查或重连），不反复重试同一调用，换内置工具或请用户处理。',
     ].join('\n')
   }
 
-  private mcpToolOf(name: string, description: string, schema: unknown): McpTool {
+  private mcpToolOf(version: number, name: string, description: string, schema: unknown): McpTool {
+    // A reload can change a tool's schema or retire it: rebuild the wrappers so
+    // the declared surface never lags behind the live connections.
+    if (version !== this.mcpToolVersion) {
+      this.mcpTools.clear()
+      this.mcpToolVersion = version
+    }
     const existing = this.mcpTools.get(name)
     if (existing) return existing
     const tool = new McpTool(name, description, schema, this.mcp)

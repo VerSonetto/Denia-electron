@@ -104,24 +104,33 @@ export function callResultFrom(value: unknown): McpCallResult {
   }
 }
 
-export function parseToolsList(value: unknown): McpToolDef[] {
-  if (typeof value !== 'object' || value === null) return []
-  const tools = (value as Record<string, unknown>).tools
-  if (!Array.isArray(tools)) return []
+export interface ToolsPage {
+  tools: McpToolDef[]
+  /** Opaque cursor for the next page; null on the last page. */
+  nextCursor: string | null
+}
+
+/** One `tools/list` page: servers may paginate large catalogs by cursor. */
+export function parseToolsPage(value: unknown): ToolsPage {
+  if (typeof value !== 'object' || value === null) return { tools: [], nextCursor: null }
+  const record = value as Record<string, unknown>
+  const tools = record.tools
+  const cursor = typeof record.nextCursor === 'string' && record.nextCursor !== '' ? record.nextCursor : null
+  if (!Array.isArray(tools)) return { tools: [], nextCursor: cursor }
   const out: McpToolDef[] = []
   for (const item of tools) {
     if (typeof item !== 'object' || item === null) continue
-    const record = item as Record<string, unknown>
-    const name = typeof record.name === 'string' ? record.name : ''
+    const tool = item as Record<string, unknown>
+    const name = typeof tool.name === 'string' ? tool.name : ''
     if (name.trim() === '') continue
-    const description = typeof record.description === 'string' ? record.description : ''
+    const description = typeof tool.description === 'string' ? tool.description : ''
     const schema =
-      record.inputSchema !== undefined && record.inputSchema !== null && typeof record.inputSchema === 'object'
-        ? record.inputSchema
+      tool.inputSchema !== undefined && tool.inputSchema !== null && typeof tool.inputSchema === 'object'
+        ? tool.inputSchema
         : { type: 'object' }
     out.push({ name, description, inputSchema: schema })
   }
-  return out
+  return { tools: out, nextCursor: cursor }
 }
 
 /**

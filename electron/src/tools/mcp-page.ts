@@ -48,27 +48,31 @@ export function decorateSchema(input: unknown): DecoratedSchema {
     type: 'integer',
     minimum: 0,
     default: 0,
-    description: '0-based 起始字符偏移;读某次结果的后续页时用它。默认 0。',
+    description: '起始字符偏移;续读同一结果时用。',
   }
   properties[fields.limit] = {
     type: 'integer',
     minimum: 1,
     maximum: MAX_PAGE_CHARS,
     default: PAGE_CHARS,
-    description: `本页返回的字符数;默认 ${PAGE_CHARS},最大 ${MAX_PAGE_CHARS}。`,
+    description: `本页字符数,默认 ${PAGE_CHARS},最大 ${MAX_PAGE_CHARS}。`,
   }
   properties[fields.resultId] = {
     type: 'string',
-    description:
-      '结果身份:上次输出的尾部若给了 result_id,带上它 + 更大的 offset 就能读后续页,不会重新执行工具;省略即发起一次新的真实调用。',
+    description: '上次输出尾部的 result_id;带上它 + 更大的 offset 续读同一结果,不会重新执行。',
   }
   schema.properties = properties
   return { schema, fields }
 }
 
+/**
+ * The tool description as the model sees it. Pagination is documented once in
+ * the MCP discipline section instead of repeating a paragraph on every tool:
+ * with dozens of connected tools that boilerplate was itself a large share of
+ * the declared surface.
+ */
 export function decorateDescription(description: string): string {
-  const base = description.trim() === '' ? 'MCP 外部工具。' : description.trim()
-  return `${base}\n(结果较长时按字符分页返回:调用会真实执行工具,尾部给出 result_id;要继续看后面的内容,带上同一个 result_id 与提示里的 offset 再调一次本工具(读同一次结果,不会重新执行)。不带 result_id 的调用都是新调用,会重新执行工具。)`
+  return description.trim() === '' ? 'MCP 外部工具。' : description.trim()
 }
 
 export interface PageArguments {

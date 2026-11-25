@@ -48,6 +48,8 @@ interface ConnectedServer {
 
 export class McpSnapshot {
   readonly servers: McpServerState[]
+  /** Bumped on every reload; caches keyed by tool name must be rebuilt. */
+  readonly version: number
   private readonly routes = new Map<string, [string, string]>()
   private readonly schemas = new Map<string, unknown>()
   private readonly descriptions = new Map<string, string>()
@@ -57,11 +59,13 @@ export class McpSnapshot {
     routes: Map<string, [string, string]>,
     schemas: Map<string, unknown>,
     descriptions: Map<string, string>,
+    version = 0,
   ) {
     this.servers = servers
     this.routes = routes
     this.schemas = schemas
     this.descriptions = descriptions
+    this.version = version
   }
 
   static empty(): McpSnapshot {
@@ -164,6 +168,7 @@ export class McpManager {
   private readonly builtinNames: Set<string>
   private connected = new Map<string, ConnectedServer>()
   private current = McpSnapshot.empty()
+  private revision = 0
   private reloadChain: Promise<void> = Promise.resolve()
   private readonly results = new Map<string, CachedResult>()
   private nextCacheSeq = 0
@@ -214,7 +219,8 @@ export class McpManager {
         }
       }
       dedupeQualifiedNames(states)
-      this.current = buildSnapshot(states, schemaSource, this.builtinNames)
+      this.revision += 1
+      this.current = buildSnapshot(states, schemaSource, this.builtinNames, this.revision)
     })
     return this.reloadChain
   }
@@ -464,6 +470,7 @@ function buildSnapshot(
   states: McpServerState[],
   schemas: Map<string, unknown>,
   builtinNames: Set<string>,
+  version: number,
 ): McpSnapshot {
   const routes = new Map<string, [string, string]>()
   const descriptions = new Map<string, string>()
@@ -477,7 +484,7 @@ function buildSnapshot(
       toolSchemas.set(tool.qualified, schemas.get(tool.qualified) ?? { type: 'object' })
     }
   }
-  return new McpSnapshot(states, routes, toolSchemas, descriptions)
+  return new McpSnapshot(states, routes, toolSchemas, descriptions, version)
 }
 
 /** Catalog text rendered for the `mcp_list` tool. */
@@ -505,7 +512,7 @@ export function renderToolCatalog(
       ? `没有名为 ${only} 的已连接 MCP 服务器;不带 server 参数再调一次可查看全部。`
       : '当前没有已连接的 MCP 服务器;可到设置 → MCP 检查服务器状态或重新连接。'
   }
-  const lines = ['已接入的 MCP 外部工具(按名称直接调用;首次调用只返回参数定义,不会执行):']
+  const lines = ['已接入的 MCP 外部工具(参数定义已直接声明在工具面上,按名称调用即可执行):']
   for (const server of visible) {
     lines.push('', `[服务器 ${server.id}]`)
     for (const tool of server.tools) {
