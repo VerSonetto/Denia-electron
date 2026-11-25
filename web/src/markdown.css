@@ -38,45 +38,51 @@
 .markdown {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-family: var(--font-reading);
   color: var(--label-primary);
 }
 
 .markdown strong {
-  font-weight: 600;
+  font-weight: var(--weight-strong);
 }
 
+/* 标题阶梯按 1.25 左右的间隔收敛到五档;标题上方的留白始终大于下方,
+   让"标题属于下面那段"读得出来,而不是浮在两段之间。 */
 .markdown h1 {
-  font-size: 24px;
-  font-weight: 600;
-  line-height: 1.35;
-  margin: 28px 0 14px;
+  font-size: 25px;
+  font-weight: var(--weight-strong);
+  line-height: 1.3;
+  letter-spacing: -0.012em;
+  margin: 34px 0 16px;
 }
 
 .markdown h2 {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 21px;
+  font-weight: var(--weight-strong);
   line-height: 1.35;
-  margin: 28px 0 14px;
+  letter-spacing: -0.01em;
+  margin: 30px 0 14px;
 }
 
 .markdown h3 {
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 1.4;
-  margin: 28px 0 14px;
+  font-size: 17.5px;
+  font-weight: var(--weight-strong);
+  line-height: 1.45;
+  margin: 26px 0 12px;
 }
 
 .markdown h4 {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.45;
-  margin: 14px 0;
+  font-size: 16px;
+  font-weight: var(--weight-strong);
+  line-height: 1.5;
+  margin: 20px 0 10px;
 }
 
 .markdown :where(h5, h6) {
-  font-size: 14px;
-  font-weight: 600;
-  margin: 14px 0;
+  font-size: 14.5px;
+  font-weight: var(--weight-strong);
+  line-height: 1.5;
+  margin: 18px 0 9px;
 }
 
 .markdown :where(h1, h2, h3, h4, h5, h6) strong {
@@ -84,7 +90,9 @@
 }
 
 .markdown p {
-  margin: 14px 0;
+  margin: 15px 0;
+  /* 避免段末孤字:浏览器会把最后一行的短尾词收回去。 */
+  text-wrap: pretty;
 }
 
 .markdown :where(h4, h5, h6) + :where(ul, ol) {
@@ -131,20 +139,20 @@
 }
 
 .markdown :where(ul, ol) {
-  margin: 14px 0;
-  padding-left: 18px;
+  margin: 15px 0;
+  padding-left: 20px;
 }
 
 .markdown li:not(:first-child) {
-  margin-top: 6px;
+  margin-top: 7px;
 }
 
 .markdown li > :where(ul, ol) {
-  margin-top: 4px;
+  margin-top: 5px;
 }
 
 .markdown li::marker {
-  line-height: 24px;
+  line-height: 26px;
   color: var(--label-secondary);
 }
 
@@ -173,14 +181,15 @@
   display: block;
   border: none;
   height: 1px;
-  margin: 28px 0;
+  margin: 30px 0;
   background: var(--border-l2);
 }
 
 .markdown blockquote {
   border-left: 2px solid var(--label-caption);
-  margin: 14px 0 0;
-  padding-left: 14px;
+  margin: 15px 0;
+  padding-left: 16px;
+  color: var(--label-secondary);
 }
 
 .markdown pre {
@@ -194,10 +203,13 @@
   align-items: center;
   box-sizing: border-box;
   font-family: var(--font-mono);
-  font-size: 0.875em !important;
+  /* 15px 正文下落在 12.9px:既明显小于正文,又不会缩成需要眯眼的注脚。 */
+  font-size: 0.86em !important;
+  font-weight: var(--weight-medium);
+  line-height: 1.35;
   background-color: var(--md-inline-code);
-  border-radius: 6px;
-  padding: 0 5px;
+  border-radius: 5px;
+  padding: 0.08em 0.32em;
 }
 
 .markdown :where(h1, h2, h3, h4, h5, h6) code {
@@ -265,13 +277,13 @@
 
 .md-code-banner {
   background: var(--md-code-banner);
-  padding: 9px 14px;
+  padding: 8px 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  font-size: 11px;
-  line-height: 18px;
+  font-size: var(--text-caption);
+  line-height: 16px;
   border-top-left-radius: 12px;
   border-top-right-radius: 12px;
 }
@@ -279,8 +291,10 @@
 .md-code-infostring {
   color: var(--label-primary);
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 18px;
+  font-size: var(--text-caption);
+  font-weight: var(--weight-medium);
+  line-height: 16px;
+  letter-spacing: 0.01em;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -301,13 +315,20 @@
   color: inherit;
   cursor: pointer;
   font: inherit;
+  font-size: var(--text-caption);
+  font-weight: var(--weight-medium);
+  transition: color 120ms var(--ease);
+}
+
+.md-code-copy:hover {
+  color: var(--label-primary);
 }
 
 .md-code-block :where(pre) {
   font-family: var(--font-mono);
-  font-size: 12.5px;
-  line-height: 1.6;
-  padding: 16px;
+  font-size: var(--text-code);
+  line-height: var(--leading-code);
+  padding: 16px 18px;
   margin: 0 !important;
   overflow-x: auto;
   white-space: pre-wrap;
@@ -370,7 +391,8 @@
   border-bottom: 1px solid var(--border-l3);
   border-top: none;
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: var(--weight-strong);
+  line-height: 1.5;
   max-width: min(30vw, 320px);
   min-width: 100px;
 }
@@ -378,7 +400,8 @@
 .md-table-scroll td {
   padding: 10px 16px;
   border-bottom: 1px solid var(--border-l2);
-  font-size: 13px;
+  font-size: 13.5px;
+  line-height: 1.55;
   max-width: min(30vw, 320px);
   min-width: 100px;
 }
@@ -393,5 +416,5 @@
 }
 
 .md-table-scroll table code {
-  font-size: 11px;
+  font-size: 12px;
 }

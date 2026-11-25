@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { t } from '../i18n'
 import { setActiveId } from '../appStore'
 import type { SessionEnvelope } from '../types'
 import { getSessionPage } from '../api'
 import { toolCallSummary } from '../toolDisplay'
+import { useIsMobile } from '../hooks/useIsMobile'
 import { AgentAvatar, useAgentAvatar } from './AgentAvatar'
 import './RuntimePanel.css'
 
@@ -81,6 +82,16 @@ function agentPriority(agent: Agent): number {
 /** 轮询节奏：展开时盯紧，折叠时放慢 —— 省请求又不至于看着不动。 */
 const INTERVAL_OPEN = 1500
 
+/** 后台任务收起态最多显示几张卡。
+ *  320px 侧栏里三张短卡(含状态行与操作行)约 300px,常规视口不滚动;
+ *  手机的面板只有 30vh,扣掉标题与页签后只剩一张卡的高度,所以降到一张。 */
+const JOB_PREVIEW_DESKTOP = 3
+const JOB_PREVIEW_MOBILE = 1
+
+function jobIsActive(job: Job): boolean {
+  return job.finishedAt === undefined && job.status !== 'killed' && job.status !== 'failed'
+}
+
 /** 只呈现实际产生的动作与正文，不展示推理或完整工具结果。 */
 export function agentProgress(events: SessionEnvelope[]): { action: string; progress: string } {
   let action = ''
@@ -128,6 +139,41 @@ function RuntimeAvatar({ id, cwd }: { id: string; cwd?: string | null }) {
   return <AgentAvatar avatar={avatar} size={30} />
 }
 
+/**
+ * 后台任务名称默认收三行:一条被误当 label 的完整命令可能有 200 字符,
+ * 摊开会把侧栏整屏吃掉。溢出才出现「展开命令」,收起后用 title 保留
+ * 悬停查看的入口;行数由 CSS 控制,展开/收起只切 data-expanded。
+ */
+function JobCommand({ label }: { label: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  const ref = useRef<HTMLElement | null>(null)
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const measure = () => {
+      if (!expanded) setOverflowing(el.scrollHeight > el.clientHeight + 1)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [expanded, label])
+  return <>
+    <strong
+      ref={ref}
+      className="runtime-job-name"
+      data-expanded={expanded}
+      title={expanded ? undefined : label}
+    >{label}</strong>
+    {overflowing && <button
+      type="button"
+      className="runtime-job-name-toggle"
+      aria-expanded={expanded}
+      onClick={() => setExpanded((value) => !value)}
+    >{expanded ? t('runtimeCollapseCommand') : t('runtimeExpandCommand')}</button>}
+  </>
+}
+
 export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onCollapse, onCountsChange }: { id: string; cwd?: string | null; events: SessionEnvelope[]; pendingCount: number; collapsed: boolean; onCollapse(): void; onCountsChange(counts: { agents: number; jobs: number }): void }) {
   const [tab, setTab] = useState<'agents' | 'jobs'>('agents')
   const [agents, setAgents] = useState<Agent[]>([])
@@ -139,6 +185,8 @@ export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onColla
   const [target, setTarget] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [agentsExpanded, setAgentsExpanded] = useState(false)
+  const [jobsExpanded, setJobsExpanded] = useState(false)
+  const isMobile = useIsMobile()
   // 本轮工具调用及结果中出现的任务 ID 才属于当前轮次。活跃任务跨轮保留；
   // 乐观用户消息到达时立即隐藏上轮结束项，与 Todo 的收起时机一致。
   const currentTurn = useMemo(() => {
@@ -150,7 +198,17 @@ export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onColla
   const orderedAgents = [...visibleAgents].sort((a, b) => agentPriority(a) - agentPriority(b) || a.id.localeCompare(b.id))
   const displayedAgents = agentsExpanded ? orderedAgents : orderedAgents.slice(0, 2)
   const hiddenAgentCount = orderedAgents.length - 2
-  const visibleJobs = jobs.filter((job) => (!job.finishedAt && job.status !== 'killed' && job.status !== 'failed') || (!pendingCount && currentTurn.includes(job.id)))
+  const visibleJobs = jobs.filter((job) => jobIsActive(job) || (!pendingCount && currentTurn.includes(job.id)))
+  // 运行中的任务先露出来(按开始时间正序,长任务不会被后来的任务挤走);
+  // 已结束的按由新到旧排,收起态优先保住刚结束的那几条结果。
+  const orderedJobs = [...visibleJobs].sort((a, b) => {
+    const activeDelta = Number(!jobIsActive(a)) - Number(!jobIsActive(b))
+    if (activeDelta !== 0) return activeDelta
+    return jobIsActive(a) ? a.startedAt - b.startedAt : b.startedAt - a.startedAt
+  })
+  const jobPreviewLimit = isMobile ? JOB_PREVIEW_MOBILE : JOB_PREVIEW_DESKTOP
+  const displayedJobs = jobsExpanded ? orderedJobs : orderedJobs.slice(0, jobPreviewLimit)
+  const hiddenJobCount = Math.max(0, orderedJobs.length - jobPreviewLimit)
   const activeAgents = visibleAgents.length
   const activeJobs = visibleJobs.length
   const base = `/api/sessions/${encodeURIComponent(id)}`
@@ -260,7 +318,7 @@ export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onColla
 
   return <section className={`runtime-panel${collapsed ? ' collapsed' : ' open'}`} aria-label={t('runtimeTitle')} data-testid="runtime-panel">
     <div className="runtime-card-heading"><strong>{t('runtimeTitle')}</strong><span className="runtime-card-count">{activeAgents + activeJobs}</span><button type="button" className="runtime-collapse" aria-label={t('runtimeCollapse')} title={t('runtimeCollapse')} onClick={onCollapse}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></div>
-    {!collapsed && <div className="runtime-content" data-testid="runtime-content">
+    {!collapsed && <div className="runtime-content" data-tab={tab} data-testid="runtime-content">
       <div className="runtime-tabs" role="tablist" aria-label={t('runtimeTitle')}>
         {tabs.map((key, index) => <button
           type="button"
@@ -361,7 +419,7 @@ export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onColla
       </div>}
       {tab === 'jobs' && <div className="runtime-rows runtime-job-list" role="tabpanel" id="runtime-tabpanel-jobs" aria-labelledby="runtime-tab-jobs" data-testid="runtime-jobs-panel">
         {!jobs.length && <p className="runtime-empty">{t('runtimeNoJobs')}</p>}
-        {visibleJobs.map((job) => {
+        {displayedJobs.map((job) => {
           const outputKey = pendingKey('job', job.id, 'output')
           const killKey = pendingKey('job', job.id, 'kill')
           const reading = isPending(outputKey)
@@ -370,7 +428,7 @@ export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onColla
             <div className="runtime-job-heading">
               <span className="runtime-job-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.2"/><path d="m4 6 2 2-2 2m4 0h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg></span>
               <div className="runtime-job-copy">
-                <strong className="runtime-job-name" title={job.label}>{job.label}</strong>
+                <JobCommand label={job.label} />
                 <small className="runtime-row-status">
                 <span className="runtime-status" data-tone={tone(job.status)}>
                   <i className="runtime-status-dot" aria-hidden="true" />
@@ -394,6 +452,19 @@ export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onColla
             </div>}
           </div>
         })}
+        {hiddenJobCount > 0 && <button
+          type="button"
+          className="runtime-show-jobs"
+          aria-expanded={jobsExpanded}
+          aria-controls="runtime-tabpanel-jobs"
+          onClick={() => {
+            if (jobsExpanded && outputTarget && !orderedJobs.slice(0, jobPreviewLimit).some((job) => job.id === outputTarget)) setOutputTarget('')
+            setJobsExpanded((expanded) => !expanded)
+          }}
+        >
+          <span>{jobsExpanded ? t('runtimeShowFewer') : t('runtimeShowMoreJobs', { n: hiddenJobCount })}</span>
+          <svg className={jobsExpanded ? 'expanded' : undefined} width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </button>}
       </div>}
 
     </div>}

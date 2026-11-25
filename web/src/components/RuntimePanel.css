@@ -700,8 +700,9 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
 }
 
 /* 后台任务是独立作业卡：名称、状态与作业操作聚在首行，不借用子代理头像和进度布局。 */
-.runtime-job-list { display: grid; gap: 7px; }
+.runtime-job-list { display: grid; gap: 7px; min-width: 0; }
 .runtime-job-card {
+  min-width: 0;
   padding: 10px;
   border: 1px solid var(--border-l1);
   border-radius: 9px;
@@ -710,20 +711,49 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
 .runtime-job-card[data-tone='running'] { border-color: color-mix(in srgb, var(--success-fg) 35%, var(--border-l1)); }
 .runtime-job-card[data-tone='waiting'] { border-color: color-mix(in srgb, var(--warn-fg) 42%, var(--border-l1)); }
 .runtime-job-card[data-tone='failed'] { border-color: var(--danger-border); background: var(--danger-soft); }
-.runtime-job-heading { display: flex; align-items: flex-start; gap: 8px; }
+.runtime-job-heading { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .runtime-job-icon { display: flex; flex: none; margin-top: 1px; color: var(--label-tertiary); }
 .runtime-job-copy { flex: 1; min-width: 0; }
+/* 命令本身是这张卡的主要内容:允许按词/字符换行,不再用单行省略号
+   —— 侧栏里最需要确认的往往正是被截掉的那半条命令。默认收三行,
+   超长命令通过「展开命令」看全文,避免一张卡吃掉整个面板。 */
 .runtime-job-name {
-  display: block;
+  display: -webkit-box;
+  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
   color: var(--label-primary);
+  font-family: var(--font-mono);
   font-size: 12px;
-  font-weight: 600;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: var(--weight-medium);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
-.runtime-job-card .runtime-row-status { margin-top: 4px; }
+.runtime-job-name[data-expanded='true'] {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+.runtime-job-name-toggle {
+  display: inline-block;
+  padding: 0;
+  margin-top: 3px;
+  border: 0;
+  background: transparent;
+  color: var(--label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  text-align: left;
+}
+.runtime-job-name-toggle:hover { color: var(--label-primary); text-decoration: underline; text-underline-offset: 2px; }
+.runtime-job-name-toggle:focus-visible { outline: 2px solid var(--label-secondary); outline-offset: 2px; border-radius: 2px; }
+.runtime-job-card .runtime-row-status { margin-top: 5px; }
 .runtime-job-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px; margin: 9px 0 0 24px; }
 .runtime-job-card[data-tone='failed'] .runtime-status { color: var(--danger); }
 .runtime-job-output {
@@ -734,9 +764,9 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
   border-radius: 7px;
   background: var(--composer-surface);
 }
-.runtime-job-output-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: var(--label-tertiary); font-size: 10.5px; }
-.runtime-job-output pre { margin: 0; color: var(--label-secondary); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-.runtime-job-output .runtime-preview-state { font-size: 11px; }
+.runtime-job-output-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: var(--label-tertiary); font-size: 11px; }
+.runtime-job-output pre { margin: 0; color: var(--label-secondary); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.runtime-job-output .runtime-preview-state { font-size: 11.5px; }
 
 .runtime-show-agents {
   display: flex;
@@ -759,7 +789,32 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
 .runtime-show-agents:focus-visible { outline: 2px solid var(--label-secondary); outline-offset: -2px; }
 .runtime-show-agents svg { transition: transform 0.15s var(--ease); }
 .runtime-show-agents svg.expanded { transform: rotate(180deg); }
-@media (prefers-reduced-motion: reduce) { .runtime-show-agents svg { transition: none; } }
+
+/* 后台任务列表的"还有 N 个"是卡片流末尾的一枚安静按钮,不画上边框 ——
+   卡片之间本来就有 7px 间距,再加一条线会把列表切成两段。 */
+.runtime-show-jobs {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.runtime-show-jobs:hover { background: var(--hover-fill); color: var(--label-primary); }
+.runtime-show-jobs:focus-visible { outline: 2px solid var(--label-secondary); outline-offset: -2px; }
+.runtime-show-jobs svg { transition: transform 0.15s var(--ease); }
+.runtime-show-jobs svg.expanded { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .runtime-show-agents svg,
+  .runtime-show-jobs svg { transition: none; }
+}
 
 .runtime-header-entry {
   display: inline-flex;
@@ -934,4 +989,30 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
   .runtime-activity-dot {
     opacity: 1;
   }
+}
+
+/* 移动端面板是输入区上方的横向抽屉:宽度交给容器,高度压在 30vh 内,
+   否则任务卡会把输入区顶出屏幕。必须写在组件样式末尾 —— 基础
+   .runtime-panel 的 width/flex/max-height 与这里的权重相同。 */
+@media (max-width: 820px) {
+  .runtime-panel {
+    flex: none;
+    width: auto;
+    max-height: 30vh;
+    align-self: stretch;
+    margin: 8px 12px;
+  }
+  /* 30vh 抽屉里标题 + 页签已占掉近一半高度,命令再收一行,
+     让第一张卡和「还有 N 个」都能落在同一屏内。 */
+  .runtime-job-name { -webkit-line-clamp: 2; }
+  .runtime-job-card { padding: 7px 9px; }
+  .runtime-job-card .runtime-row-status { margin-top: 3px; }
+  .runtime-job-name-toggle { margin-top: 1px; }
+  .runtime-job-actions { margin-top: 5px; }
+  .runtime-content[data-tab='jobs'] { padding: 5px 8px 6px; }
+  .runtime-content[data-tab='jobs'] .runtime-tabs { margin-bottom: 2px; }
+  /* 收起按钮提到列表上方:抽屉高度不足时它不能被挤到滚动区外,
+     否则用户看得到任务却找不到入口。 */
+  .runtime-job-list { display: flex; flex-direction: column; gap: 6px; }
+  .runtime-show-jobs { order: -1; padding: 4px 8px; }
 }

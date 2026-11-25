@@ -6,7 +6,9 @@
   display: flex;
   flex-direction: column;
   position: relative;
-  --chat-content-width: clamp(680px, 64%, var(--content-max));
+  /* 正文 15px 后把行宽收窄到 820px:中文约 54 字/行、西文约 110 字符/行,
+     比原来 920px 的"一堵墙"更接近舒适阅读区间;代码/表格仍在同一列内。 */
+  --chat-content-width: clamp(660px, 58%, 820px);
   --composer-card-max-width: calc(var(--chat-content-width) + 32px);
   --composer-side-clearance: 16px;
   /* 停靠区(队列 / 任务清单 / 目标条 / 输入卡 / 状态栏)共用的内容起始线。
@@ -400,7 +402,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
 
 .transcript-pane > * {
@@ -452,7 +454,8 @@
 
 @media (max-width: 820px) {
   .runtime-view { flex-direction: column-reverse; }
-  .runtime-panel { flex: none; width: auto; max-height: 30vh; align-self: stretch; margin: 8px 12px; }
+  /* 面板自身的移动端尺寸在 RuntimePanel.css 末尾:组件样式后加载,同权重
+     的 max-height/width 会覆盖这里的值。 */
   .runtime-header-entry { max-width: 38vw; }
 }
 
@@ -875,7 +878,7 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
-  max-width: min(calc(var(--chat-content-width) * 0.702), 82%);
+  max-width: min(calc(var(--chat-content-width) * 0.75), 78%);
 }
 
 .user-message-stack.pending {
@@ -885,11 +888,13 @@
 
 .msg-user {
   max-width: 100%;
-  padding: 10px 16px;
+  padding: 11px 17px;
   background: var(--bubble-fill);
-  border-radius: var(--r-pill);
-  font-size: 14px;
-  line-height: 22px;
+  /* 多行消息用 18px 圆角:22px 在 15px/24 的正文下会把第三行挤成胶囊边。 */
+  border-radius: 18px;
+  font-family: var(--font-reading);
+  font-size: var(--text-body);
+  line-height: 24px;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--label-primary);
@@ -1113,7 +1118,7 @@
 .msg-assistant {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
   flex-shrink: 0;
   padding-right: 4px;
@@ -1124,8 +1129,9 @@
 }
 
 .msg-assistant .prose {
-  font-size: 14px;
-  line-height: 24px;
+  font-family: var(--font-reading);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
   word-break: break-word;
   color: var(--label-primary);
 }
@@ -1168,14 +1174,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 24px;
+  min-height: 28px;
   border: none;
   background: none;
   padding: 0;
   cursor: pointer;
   color: var(--label-secondary);
-  font-size: 13px;
-  line-height: 24px;
+  font-size: var(--text-ui);
+  line-height: var(--leading-ui);
   min-width: 0;
   text-align: left;
   width: 100%;
@@ -1198,12 +1204,19 @@
 }
 
 .disc-head .title {
-  font-weight: 400;
+  font-weight: var(--weight-medium);
   flex: none;
-  font-size: 13px;
+  font-size: var(--text-ui);
   letter-spacing: normal;
   text-transform: none;
   color: var(--label-secondary);
+}
+
+/* 整行是按钮,标题必须跟着一起亮;只改 .disc-head 的 color 会被
+   .disc-head .title 的显式颜色挡住。视觉注入头是静态说明,不参与。 */
+.disc-head:not(.visual-inject-head):hover .title,
+.disc-head:not(.visual-inject-head):focus-visible .title {
+  color: var(--label-primary);
 }
 
 .disc-head .sep {
@@ -1216,7 +1229,7 @@
 
 .disc-head .summary {
   color: var(--label-tertiary);
-  font-size: 12px;
+  font-size: var(--text-meta);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1315,11 +1328,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
+  padding: 6px 10px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: var(--text-caption);
+  font-weight: var(--weight-strong);
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--label-caption);
   border-bottom: 1px solid var(--border-l1);
@@ -1327,10 +1340,10 @@
 
 .code-card pre {
   margin: 0;
-  padding: 10px;
+  padding: 11px 12px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.55;
+  font-size: var(--text-code-compact);
+  line-height: 1.6;
   color: var(--label-secondary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1354,8 +1367,8 @@
   padding: 2px 10px 6px 0;
   color: var(--label-tertiary);
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.55;
+  font-size: var(--text-code-compact);
+  line-height: var(--leading-code);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-anchor: none;
@@ -1368,11 +1381,11 @@
 
 /* skill load 的 out:SKILL.md 正文按 markdown 渲染(与 pre 同 padding,可滚动) */
 .code-card .tool-skill-body {
-  padding: 10px;
+  padding: 12px;
   max-height: 420px;
   overflow-y: auto;
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: var(--text-ui);
+  line-height: 1.65;
   color: var(--label-secondary);
 }
 
@@ -1459,16 +1472,25 @@
   border-radius: 6px;
   background: none;
   color: var(--label-tertiary);
-  font-size: 13px;
-  font-weight: 400;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-ui);
   padding: 0 8px;
-  min-height: 24px;
+  min-height: 28px;
   cursor: pointer;
   text-align: left;
 }
 
 .process-head:hover {
   background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.process-head .title {
+  font-weight: var(--weight-medium);
+}
+
+.process-head:hover .title {
   color: var(--label-primary);
 }
 
@@ -1507,6 +1529,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--label-secondary);
+  font-weight: var(--weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1523,7 +1546,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--label-tertiary);
-  font-size: 12px;
+  font-size: var(--text-meta);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1566,9 +1589,9 @@
   gap: 6px;
   min-width: 0;
   max-width: 100%;
-  color: var(--label-caption);
-  font-size: 11.5px;
-  line-height: 18px;
+  color: var(--label-tertiary);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
   font-variant-numeric: tabular-nums;
   padding: 4px 0;
 }
@@ -1587,7 +1610,7 @@
 
 /* 状态徽标:图标 + 文字,一枚有边框的小胶囊。
  *
- * 为什么不再是"7px 圆点 + 纯文字":圆点在 11.5px 字号下只是 7 个像素,
+ * 为什么不再是"7px 圆点 + 纯文字":圆点在 11px 字号下只是 7 个像素,
  * 五个结局(完成/中止/触顶/死循环/出错)全靠文字颜色区分 —— 而这套
  * 界面是黑白体系,`--error`/`--warn` 本身都是灰阶,红黄只在
  * `--error-fg`/`--warn-fg` 上才有。圆点 + 灰字 = 一行读不出严重度。
@@ -1604,8 +1627,8 @@
   padding: 1px 7px 1px 6px;
   border: 1px solid var(--border-l2);
   border-radius: var(--r-pill);
-  font-size: 11px;
-  line-height: 15px;
+  font-size: var(--text-caption);
+  line-height: var(--leading-caption);
   white-space: nowrap;
   color: var(--label-tertiary);
 }
@@ -1662,8 +1685,8 @@
   border: none;
   background: none;
   font: inherit;
-  font-size: 11.5px;
-  line-height: 16px;
+  font-size: var(--text-meta);
+  line-height: 17px;
   text-align: left;
   cursor: pointer;
 }
@@ -1676,7 +1699,7 @@
 .turn-error-code {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--text-caption);
   color: var(--label-caption);
   letter-spacing: 0.02em;
 }
@@ -1696,7 +1719,7 @@
 .turn-error-toggle {
   flex: none;
   color: var(--label-caption);
-  font-size: 11px;
+  font-size: var(--text-meta);
   transition: color var(--ease);
 }
 
@@ -1718,8 +1741,8 @@
   overflow: auto;
   color: var(--label-secondary);
   font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: var(--text-meta);
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -1740,13 +1763,13 @@
 
 .turn-error-facts dt {
   color: var(--label-caption);
-  font-size: 11px;
+  font-size: var(--text-meta);
 }
 
 .turn-error-facts dd {
   margin: 0;
   color: var(--label-secondary);
-  font-size: 11px;
+  font-size: var(--text-meta);
 }
 
 /* 用量:状态行的量级注脚。紧凑计数(6.4m / 168.8k)与底部状态栏同一套
@@ -1911,8 +1934,8 @@
 }
 
 .turn-usage-total {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--text-body);
+  font-weight: var(--weight-strong);
   color: var(--label-primary);
 }
 
@@ -1953,7 +1976,7 @@
  * (行内 diff)。整卡是一块可点区域(去审查面板),文件行是另一块(去读
  * 这个文件)—— 两个意图各占各的点击区,不合成一个。
  *
- * 尺寸语言沿用收尾行原有的 11.5px/18px 节奏:它是轮次的一个注脚,不是
+ * 尺寸语言沿用收尾行的 12px/18px 节奏:它是轮次的一个注脚,不是
  * 一段内容。
  *
  * 宽度:跟随对话列满宽。早期版本按内容自适应(w: fit-content),看着更
@@ -2029,9 +2052,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--label-primary);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 15px;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
+  line-height: 17px;
 }
 
 /* 中断标记:挂在标题末尾,和标题同一行 —— 结局与变更是同一件事的两面,
@@ -2039,7 +2062,7 @@
 .turn-diff-partial {
   margin-left: 6px;
   color: var(--label-caption);
-  font-weight: 400;
+  font-weight: var(--weight-regular);
   cursor: help;
 }
 
@@ -2050,9 +2073,9 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  height: 15px;
-  font-size: 11px;
-  line-height: 15px;
+  height: 17px;
+  font-size: var(--text-meta);
+  line-height: 17px;
 }
 
 .turn-diff-sub-default,
@@ -2096,8 +2119,8 @@
   background: none;
   color: var(--label-secondary);
   font: inherit;
-  font-size: 11px;
-  line-height: 16px;
+  font-size: var(--text-meta);
+  line-height: 18px;
   cursor: pointer;
   transition: color var(--ease), border-color var(--ease), background var(--ease);
 }
@@ -2159,7 +2182,8 @@
   flex: 1;
   overflow: hidden;
   white-space: nowrap;
-  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-size: var(--text-meta);
 }
 
 /* 目录比文件名淡:文件名是"这次改的东西",目录只是定位信息。 */
@@ -2175,6 +2199,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--label-primary);
+  font-weight: var(--weight-medium);
 }
 
 /* 「在文件管理器里定位」:默认隐形,悬停该行才出现 —— 它是备选动作,
@@ -2218,8 +2243,8 @@
   background: none;
   color: var(--label-caption);
   font: inherit;
-  font-size: 11px;
-  line-height: 15px;
+  font-size: var(--text-meta);
+  line-height: 18px;
   text-align: left;
   cursor: pointer;
   transition: color var(--ease);
@@ -2277,7 +2302,7 @@
   flex: none;
   padding: 6px 8px 6px 10px;
   border-bottom: 1px solid var(--border-l1);
-  font-size: 11px;
+  font-size: var(--text-meta);
 }
 
 .turn-diff-preview-path {
@@ -2289,6 +2314,7 @@
   text-align: left;
   color: var(--label-secondary);
   font-family: var(--font-mono);
+  font-size: var(--text-meta);
 }
 
 .turn-diff-preview-body {
@@ -2355,10 +2381,10 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px;
   border: none;
   background: transparent;
-  font-size: 12px;
+  font-size: var(--text-ui);
   color: var(--label-secondary);
   text-align: left;
   cursor: pointer;
@@ -2424,7 +2450,7 @@
 
 .compacting-label {
   flex: none;
-  font-size: 12px;
+  font-size: var(--text-ui);
   color: var(--label-primary);
 }
 
@@ -2435,9 +2461,10 @@
 }
 
 .compaction-body {
-  padding: 8px 10px 10px;
+  padding: 10px 12px 12px;
   border-top: 1px solid var(--border-l1);
-  font-size: 13px;
+  font-size: var(--text-body);
+  line-height: 24px;
   color: var(--label-primary);
 }
 
@@ -2445,8 +2472,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: var(--text-ui);
+  font-weight: var(--weight-medium);
   padding: 4px 0;
 }
 
@@ -2459,7 +2486,7 @@
   color: var(--label-caption);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 /* 回到底部:水平居中的圆形浮钮,垫在输入区上方(输入区是 sticky 的,

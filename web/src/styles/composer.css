@@ -980,16 +980,16 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border-l1);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--label-tertiary);
   min-width: 0;
 }
 
 .diff-head .diff-path {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--label-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -999,7 +999,7 @@
 
 .diff-head .diff-anchor {
   flex: none;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--label-caption);
 }
 
@@ -1010,7 +1010,7 @@
   gap: 6px;
   flex: none;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1020,7 +1020,7 @@
 
 .diff-stat.compact {
   gap: 5px;
-  font-size: 10.5px;
+  font-size: 11px;
   padding-left: 4px;
 }
 
@@ -1038,8 +1038,8 @@
   max-height: min(50vh, 420px);
   overflow-y: auto;
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.55;
+  font-size: var(--text-code-compact);
+  line-height: 1.6;
   /* 长行横向滚动而不是整体换行:diff 的对齐感来自行的完整性。 */
   overflow-x: auto;
 }
@@ -1057,7 +1057,7 @@
   padding: 0 6px;
   text-align: right;
   color: var(--label-caption);
-  font-size: 10.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   user-select: none;
 }
@@ -1142,7 +1142,7 @@
   margin-left: auto;
   padding-left: 12px;
   color: var(--label-tertiary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .diff-line.fold.expanded {
@@ -1166,9 +1166,9 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border-l1);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--label-tertiary);
 }
 
@@ -1178,14 +1178,14 @@
 
 .todo-card-head .todo-card-progress {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--label-tertiary);
 }
 
 .todo-card-head .todo-card-all-done {
   margin-left: auto;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--success-fg);
 }
 
@@ -1201,10 +1201,10 @@
   display: flex;
   align-items: flex-start;
   gap: 7px;
-  padding: 3px 10px;
-  font-size: 12px;
+  padding: 4px 10px;
+  font-size: var(--text-ui);
   color: var(--label-secondary);
-  line-height: 1.5;
+  line-height: 1.55;
   /* 变化项挂载时一次柔和淡入,眼睛能立刻抓住"这一步推进了哪条"。 */
   animation: todo-item-in 220ms var(--ease) both;
 }
@@ -1265,7 +1265,7 @@
   margin-left: auto;
   padding: 0 5px;
   border-radius: var(--r-xs);
-  font-size: 10px;
+  font-size: var(--text-caption);
   line-height: 16px;
   color: var(--label-tertiary);
   background: var(--hover-fill);
@@ -1279,8 +1279,8 @@
   border: none;
   border-top: 1px solid var(--border-l1);
   background: none;
-  padding: 5px 10px;
-  font-size: 11px;
+  padding: 6px 10px;
+  font-size: 12px;
   color: var(--label-caption);
   cursor: pointer;
   text-align: left;
@@ -1334,8 +1334,8 @@
 .bash-line pre {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.55;
+  font-size: var(--text-code-compact);
+  line-height: 1.6;
   color: var(--label-secondary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1365,7 +1365,7 @@
 .bash-cmd .bash-prompt {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--label-caption);
   user-select: none;
 }
@@ -1383,7 +1383,7 @@
 }
 
 .bash-empty {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--label-caption);
 }
 
@@ -1393,7 +1393,7 @@
   flex: none;
   margin-left: 2px;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 16px;
   color: var(--error-fg);
 }
