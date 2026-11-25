@@ -105,6 +105,7 @@ test('a WSL profile keeps its distribution selection', () => {
   const choice = shellFromTerminalSettings(text, { env, find: noFind })
   assert.equal(choice?.dialect, 'wsl')
   assert.deepEqual(choice?.args, ['-d', 'Ubuntu', '-e', 'bash', '-lc'])
+  assert.deepEqual(choice?.interactiveArgs, ['-d', 'Ubuntu'])
 })
 
 test('a conhost default terminal ignores Windows Terminal profiles', () => {

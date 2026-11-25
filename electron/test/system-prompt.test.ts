@@ -73,7 +73,7 @@ test('the persona stays outside the priority frame', () => {
 
 test('tool-owned sections follow the tool surface', () => {
   const full = prompt()
-  assert.ok(full.includes('bash 与 job_start 只跑构建'), 'bash discipline appears with bash')
+  assert.ok(full.includes('bash 只跑专用工具覆盖不到的命令'), 'bash discipline appears with bash')
   assert.ok(full.includes('用 goal_read 确认'), 'goal discipline appears with goal_read')
 
   const withBrowser = prompt({ tools: [...BASE_TOOL_NAMES, 'browser'].map(tool) })
@@ -81,7 +81,7 @@ test('tool-owned sections follow the tool surface', () => {
   assert.ok(withBrowser.includes('shutdownBrowser'), 'the shutdown contract ships with the tool')
 
   const withoutBash = prompt({ tools: BASE_TOOL_NAMES.filter((name) => name !== 'bash').map(tool) })
-  assert.ok(!withoutBash.includes('bash 与 job_start 只跑构建'), 'no bash discipline without bash')
+  assert.ok(!withoutBash.includes('bash 只跑专用工具覆盖不到的命令'), 'no bash discipline without bash')
   assert.ok(withoutBash.includes('## 工具准则'), 'the group heading survives a removed tool')
 
   const withoutGoal = prompt({ tools: BASE_TOOL_NAMES.filter((name) => name !== 'goal_read').map(tool) })
@@ -91,6 +91,28 @@ test('tool-owned sections follow the tool surface', () => {
   for (const absent of ['ask 只在真正卡住时用', 'run_checks', 'web_fetch', 'shutdownBrowser', 'read_tool_output']) {
     assert.ok(!full.includes(absent), `section for an absent tool leaked: ${absent}`)
   }
+})
+
+test('dedicated tools state when to use them instead of bash', () => {
+  const text = prompt()
+  for (const needle of [
+    '工具分工：读取、检索、修改文件用专用工具',
+    '列目录、找文件、搜内容、读文本、改文件分别用 ls/glob/grep/read_file/edit',
+    '不要用 ls/find/grep/rg/cat/head/tail/sed/awk',
+    '想知道目录里有什么',
+    '已知文件名或扩展名',
+    '已知符号、字符串或报错文本',
+    '读文件用 read_file',
+    '新建或整文件重写用 write_file',
+    '对已有文件做局部精确修改用 edit',
+    '后台命令不是探索工具',
+  ]) {
+    assert.ok(text.includes(needle), `missing tool routing rule: ${needle}`)
+  }
+
+  const bashOnly = prompt({ tools: [tool('bash')] })
+  assert.ok(bashOnly.includes('bash 只跑专用工具'), 'bash still carries its own boundary')
+  assert.ok(!bashOnly.includes('想知道目录里有什么'), 'ls rule stays out of a bash-only surface')
 })
 
 test('runtime-owned sections land at their fixed slots', () => {
@@ -129,7 +151,7 @@ test('subagents get role and constraint sections in the parent prompt', () => {
   assert.ok(text.includes('# 子代理约束'))
   assert.ok(text.includes('可用工具仅限：read_file。'))
   assert.ok(text.includes('权限上限：read-only（写文件与命令一律被拒绝）；'))
-  assert.ok(!text.includes('- bash 只跑构建'), 'the child does not see ungranted tool rules')
+  assert.ok(!text.includes('bash 只跑专用工具'), 'the child does not see ungranted tool rules')
   assert.ok(text.includes('不能派遣子代理'))
 })
 

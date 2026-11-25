@@ -26,6 +26,8 @@ export type ShellDialect = 'cmd' | 'powershell' | 'bash' | 'wsl'
 export interface ShellChoice {
   file: string
   args: string[]
+  /** Arguments for an interactive PTY; profile args (e.g. WSL distro) survive. */
+  interactiveArgs?: string[]
   label: string
   /** Syntax the model is told to write; wsl still speaks bash. */
   dialect: ShellDialect
@@ -119,7 +121,15 @@ export function shellFromExecutable(
   switch (base) {
     case 'cmd':
     case 'cmd.exe':
-      return { file, args: [...CMD_ARGS], label: 'cmd', dialect: 'cmd', commandPrefix: '', verbatim: true }
+      return {
+        file,
+        args: [...CMD_ARGS],
+        interactiveArgs: [...fixed],
+        label: 'cmd',
+        dialect: 'cmd',
+        commandPrefix: '',
+        verbatim: true,
+      }
     case 'powershell':
     case 'powershell.exe':
     case 'pwsh':
@@ -127,6 +137,7 @@ export function shellFromExecutable(
       return {
         file,
         args: [...POWERSHELL_ARGS],
+        interactiveArgs: [...fixed],
         label: base.startsWith('pwsh') ? 'PowerShell' : 'Windows PowerShell',
         dialect: 'powershell',
         commandPrefix: POWERSHELL_UTF8,
@@ -139,6 +150,7 @@ export function shellFromExecutable(
       return {
         file,
         args: [...fixed, '-e', 'bash', '-lc'],
+        interactiveArgs: [...fixed],
         label: 'WSL',
         dialect: 'wsl',
         commandPrefix: '',
@@ -152,6 +164,7 @@ export function shellFromExecutable(
       return {
         file,
         args: options.login === false ? ['-c'] : ['-lc'],
+        interactiveArgs: [...fixed],
         label: 'bash',
         dialect: 'bash',
         commandPrefix: '',
@@ -163,6 +176,7 @@ export function shellFromExecutable(
       return {
         file,
         args: ['-c'],
+        interactiveArgs: [...fixed],
         label: base || file,
         dialect: 'bash',
         commandPrefix: '',
@@ -473,7 +487,7 @@ export function killTree(child: ChildProcess): void {
 export const BashTool = {
   schema: schema(
     'bash',
-    'Run one shell command and return its output. The runtime context names the shell and its syntax; cwd is the primary project directory, all project directories are in DENIA_PROJECT_DIRS. Prefer non-interactive commands; split long-running work.',
+    'Run one shell command for builds, tests, git, installs and process control, and return its output. Do not use it for file work: list directories with ls, find files with glob, search contents with grep, read with read_file, and write or edit with write_file/edit. The runtime context names the shell and its syntax; cwd is the primary project directory, all project directories are in DENIA_PROJECT_DIRS. Prefer non-interactive commands; split long-running work.',
     {
       type: 'object',
       properties: {

@@ -17,8 +17,7 @@ import { SessionStore } from '../src/session/store.ts'
 import { ReadStateStore } from '../src/tools/read-state.ts'
 import { ReadFileTool, WriteFileTool } from '../src/tools/files.ts'
 import type { ToolContext } from '../src/tools/types.ts'
-import { toPiMessages } from '../src/llm/pi.ts'
-import type { ProviderConfig } from '../src/config.ts'
+import { toOpenAiMessages } from '../src/llm/openai-completions.ts'
 
 let seq = 0
 function envelope(event: Omit<Envelope, 'seq' | 'time'>): Envelope {
@@ -64,36 +63,13 @@ test('reasoning text stays out of the request unless the route opts in', () => {
     { role: 'tool', content: 'ok', toolCallId: 'c1' },
   ]
 
-  const provider: ProviderConfig = {
-    id: 'mock',
-    name: 'Mock',
-    baseURL: 'http://127.0.0.1:1/v1',
-    protocol: 'openai-completions',
-    models: [{ id: 'mock-1' }],
-  }
-  const assistantOf = (withReplay: boolean): Extract<
-    ReturnType<typeof toPiMessages>[number],
-    { role: 'assistant' }
-  > => {
-    const history = toPiMessages(messages, { ...provider, replayReasoning: withReplay }, 'mock-1')
-    return history.find(
-      (entry): entry is Extract<typeof history[number], { role: 'assistant' }> =>
-        entry.role === 'assistant',
-    )!
-  }
+  const off = toOpenAiMessages(undefined, messages, false) as Record<string, unknown>[]
+  const history = off.find((entry) => entry.role === 'assistant')!
+  assert.equal('reasoning_content' in history, false)
+  assert.equal(history.content, 'working')
 
-  const off = assistantOf(false)
-  assert.equal(off.content.some((block) => block.type === 'thinking'), false)
-  assert.deepEqual(
-    off.content.filter((block) => block.type === 'text'),
-    [{ type: 'text', text: 'working' }],
-  )
-
-  const on = assistantOf(true)
-  assert.deepEqual(
-    on.content.filter((block) => block.type === 'thinking'),
-    [{ type: 'thinking', thinking: 'deep thoughts', thinkingSignature: 'reasoning_content' }],
-  )
+  const on = toOpenAiMessages(undefined, messages, true) as Record<string, unknown>[]
+  assert.equal(on.find((entry) => entry.role === 'assistant')!.reasoning_content, 'deep thoughts')
 })
 
 test('an archived write call and its result leave the model surface', () => {

@@ -1,78 +1,67 @@
-// The session driver: one Denia turn on top of the pi agent kernel.
+// The session driver: turn/step loop over the LLM adapter and tools.
 //
-// pi owns the assistant/tool loop: provider streaming, tool validation,
-// parallel execution, abort semantics and queueing. Denia owns the durable
-// event log, permission gate, approvals, context injection and compaction.
-// Every pi event is translated back into the wire vocabulary the web console
-// already folds, so the session log remains the single source of truth.
+// Events are appended to the session log first; the HTTP layer broadcasts the
+// same envelopes to followers. A turn closes when the assistant message has no
+// tool calls, when the user cancels, or when an execution failure is terminal.
 
-import { Agent } from '@earendil-works/pi-agent-core'
-import type {
-  AgentEvent,
-  AgentTool,
-  AgentToolResult,
-  AgentTurnContext,
-  BeforeToolCallContext,
-  PrepareRequestContext,
-  ThinkingLevel,
-} from '@earendil-works/pi-agent-core'
-import { createInitialSystemMessage } from '@earendil-works/pi-ai'
-import type {
-  Api,
-  AssistantMessage,
-  Message,
-  Model,
-  ToolResultMessage,
-} from '@earendil-works/pi-ai'
+import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 
-import type { AppConfig, ProviderConfig } from '../config.ts'
-import { findProvider, resolveApiKey, resolveDefault } from '../config.ts'
-import { excludedPresetTools } from './presets.ts'
-import type { PermissionState } from '../core/permission.ts'
+import type {
+  AppConfig,
+  ProviderConfig,
+} from '../config.ts'
+import { findProvider, resolveDefault } from '../config.ts'
+import { excludedPresetTools, presetForSession } from './presets.ts'
+import type { ApprovalGrants, PermissionState } from '../core/permission.ts'
 import { ExecPolicy } from '../core/exec-policy.ts'
 import { legacyModeOf, permissionStateFromEvents, presetState } from '../core/permission.ts'
 import type {
+  ChatMessage,
   ContentBlock,
   Envelope,
   ImageData,
-  LlmFailure,
   ModelSelection,
+  RequestHeaderSnapshot,
   SessionEvent,
   SessionHeader,
   StreamChunk,
-  TokenUsage,
   ToolCallRef,
-  ToolOutput,
   ToolSchema,
+  TokenUsage,
+  ToolOutput,
   TurnEndReason,
 } from '../core/wire.ts'
 import { errorMessage, truncateChars } from '../core/util.ts'
-import {
-  assistantBlocksOf,
-  createPiStreamFn,
-  meaningfulUsage,
-  streamFor,
-  thinkingLevelOf,
-  toPiMessages,
-  toPiModel,
-  tokenUsageOf,
-} from '../llm/index.ts'
-import { ChunkBuilder, chunksForAssistantEvent, finishChunk, usageChunk } from '../llm/chunks.ts'
-import { normalizePromptCacheKey } from '../llm/cache-key.ts'
+import { streamFor } from '../llm/index.ts'
 import type { SessionStore } from '../session/store.ts'
 import type { ToolRegistry } from '../tools/index.ts'
-import type { FileHistoryBackend, ToolContext } from '../tools/types.ts'
+import type { ToolContext, FileHistoryBackend } from '../tools/types.ts'
 import { toolError } from '../tools/types.ts'
 import { ReadStateStore } from '../tools/read-state.ts'
-import { Semaphore, TurnToolRuntime, type ToolRecord } from './tool-runtime.ts'
 import { applyMediaBudget } from './media-budget.ts'
-import { SessionOutputStore, budgetFor, renderPreview, withOutputArtifact } from './tool-output.ts'
+import {
+  SessionOutputStore,
+  budgetFor,
+  renderPreview,
+  withOutputArtifact,
+} from './tool-output.ts'
 import type { PromptExtraSection, SubagentPromptContext } from './system-prompt.ts'
-import type { ApprovalAnswer, ApprovalBridge, GateResult } from './gate.ts'
-import { gateCall } from './gate.ts'
-import type { Reviewer, ReviewTranscriptEntry } from './reviewer.ts'
+import type {
+  ApprovalAnswer,
+  ApprovalBridge,
+  ApprovalRequest,
+  GateResult,
+} from './gate.ts'
+import {
+  DECLINED_ANSWER,
+  argumentText,
+  availableChoices,
+  gateCall,
+} from './gate.ts'
+import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.ts'
 import { deriveHistory, deriveSurface, hasOpenTurn, lastTurn } from './history.ts'
-import { dispatchApproval } from './approval-dispatch.ts'
+import type { SurfaceItem } from './history.ts'
 import {
   LOOP_GUARD_CHANNEL,
   LOOP_GUARD_STRONG_REMINDER,
@@ -81,7 +70,7 @@ import {
 } from './loop-guard.ts'
 import { CacheWarmer } from './cache-warm.ts'
 import { compactSession } from './compact.ts'
-import { loadConsoleCacheSettings, type ConsoleCacheSettings } from './console-settings.ts'
+import { loadConsoleCacheSettings } from './console-settings.ts'
 import { CLEARED_PLACEHOLDER, planMicrocompact, type MicrocompactSettings } from './microcompact.ts'
 import {
   buildRequestHeader,
@@ -142,10 +131,7 @@ export interface SessionServices {
     args: Record<string, unknown>,
     ctx: ToolContext,
   ): Promise<ToolOutput | undefined>
-  /**
-   * Settle a call before policy/approval. Returning an output skips execution
-   * and records that result; undefined lets the call run normally.
-   */
+  /** Intercept a call before policy/approval (MCP lazy loading). */
   intercept?(call: ToolCallRef, sessionId: string): ToolOutput | undefined
   /** Turn queued agent-inbox events into model-visible deliveries. */
   drainInbox?(sessionId: string): void
@@ -194,43 +180,35 @@ export interface DriverPermissions {
   policy: ExecPolicy
 }
 
-/** One in-flight Denia turn. pi's Agent is scoped to it. */
-interface TurnRun {
-  sessionId: string
-  header: SessionHeader
-  turn: number
-  step: number
-  agent: Agent
-  unsubscribe: () => void
-  cacheSettings: ConsoleCacheSettings
-  cancelRequested: boolean
-  loopStop: { repeats: number } | null
-  maxStepsHit: boolean
-  failure: LlmFailure | null
-  lastAssistant: AssistantMessage | null
-  turnUsage: TokenUsage | undefined
-  stepOpen: boolean
-  turnOpen: boolean
-  records: Map<string, ToolRecord>
-  preResults: Map<string, ToolOutput>
-  notExecuted: Set<string>
-  callRefs: Map<string, ToolCallRef>
-  permissions: Map<string, PermissionState>
-  selection: ModelSelection
-  provider: ProviderConfig
-  role: SubagentPromptContext | null
-  chunkBuilder: ChunkBuilder | null
-  sawToolDeltas: Set<number>
-  stepChunkSeqs: number[]
-  firstTokenTime: number | undefined
-  requestSeq: number
-  approvalBoundary: boolean
-  loopGuard: LoopGuard
-  loopGuardInboundSeq: number
-  loopGuardPermissionSeq: number
-  compactionAttempted: boolean
-  slots: Semaphore
-  toolRuntime: TurnToolRuntime
+/** Read de-dup stamp the read tool attaches to its result meta. */
+function readStampOf(meta: unknown): { key: string; mtimeMs: number; size: number } | null {
+  if (typeof meta !== 'object' || meta === null) return null
+  const stamp = (meta as { readStamp?: unknown }).readStamp
+  if (typeof stamp !== 'object' || stamp === null) return null
+  const { key, mtimeMs, size } = stamp as { key?: unknown; mtimeMs?: unknown; size?: unknown }
+  if (typeof key !== 'string' || typeof mtimeMs !== 'number' || typeof size !== 'number') return null
+  return { key, mtimeMs, size }
+}
+
+/** Note left where an archived write call used to be (path only). */
+function archivedCallNote(call: ToolCallRef): string {
+  let target = ''
+  try {
+    const parsed = JSON.parse(call.arguments) as unknown
+    if (typeof parsed === 'object' && parsed !== null) {
+      const value = (parsed as { path?: unknown }).path
+      if (typeof value === 'string') target = value
+    }
+  } catch {
+    target = ''
+  }
+  return `[工具调用归档] ${target || '写入'} 已成功写入;调用参数与结果因体积过大已移出上下文,文件内容以磁盘为准,需要时用 read_file 回读。`
+}
+
+interface CallExecution {
+  output: ToolOutput
+  /** True when the driver can prove the tool body was not entered. */
+  notExecuted: boolean
 }
 
 function abortedReason(): TurnEndReason {
@@ -258,7 +236,11 @@ function latestPermissionSeq(events: readonly Envelope[], afterSeq = 0): number 
   return afterSeq
 }
 
-/** Real input or a permission change since the request deserves one more step. */
+/**
+ * New input after the current request (real user message, delivered agent
+ * message, queued inbox entry or permission change) deserves a step before a
+ * reminder is injected or a hard stop is taken.
+ */
 function hasNewInputSince(events: readonly Envelope[], afterSeq: number): boolean {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]!
@@ -276,68 +258,16 @@ function hasNewInputSince(events: readonly Envelope[], afterSeq: number): boolea
   return false
 }
 
-/** Read de-dup stamp the read tool attaches to its result meta. */
-function readStampOf(meta: unknown): { key: string; mtimeMs: number; size: number } | null {
-  if (typeof meta !== 'object' || meta === null) return null
-  const stamp = (meta as { readStamp?: unknown }).readStamp
-  if (typeof stamp !== 'object' || stamp === null) return null
-  const { key, mtimeMs, size } = stamp as { key?: unknown; mtimeMs?: unknown; size?: unknown }
-  if (typeof key !== 'string' || typeof mtimeMs !== 'number' || typeof size !== 'number') return null
-  return { key, mtimeMs, size }
-}
-
-/** Note left where an archived write call used to be (path only). */
-function archivedCallNote(call: ToolCallRef): string {
-  let target = ''
-  try {
-    const parsed = JSON.parse(call.arguments) as unknown
-    if (typeof parsed === 'object' && parsed !== null) {
-      const value = (parsed as { path?: unknown }).path
-      if (typeof value === 'string') target = value
-    }
-  } catch {
-    target = ''
-  }
-  return `[工具调用归档] ${target || '写入'} 已成功写入;调用参数与结果因体积过大已移出上下文,文件内容以磁盘为准,需要时用 read_file 回读。`
-}
-
-function textOfPiMessage(message: { content: readonly { type: string; text?: string }[] }): string {
-  return message.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text ?? '')
-    .join('')
-}
-
-function cancelledOutput(tool: string): ToolOutput {
-  return {
-    content: '[工具错误] 命令被用户中断',
-    isError: true,
-    errorIdentity: { name: tool, code: 'cancelled' },
-  }
-}
-
-function errorOutput(message: string, tool: string): ToolOutput {
-  const text = message.startsWith('[工具错误]') ? message : `[工具错误] ${message}`
-  return { content: text, isError: true, errorIdentity: { name: tool, code: 'tool-error' } }
-}
-
-function isLlmMessage(message: { role: string }): message is Message {
-  return (
-    message.role === 'system' ||
-    message.role === 'user' ||
-    message.role === 'assistant' ||
-    message.role === 'toolResult'
-  )
-}
-
-function addUsage(target: TokenUsage | undefined, usage: TokenUsage | undefined): TokenUsage | undefined {
-  if (!usage) return target
-  return {
-    inputTokens: (target?.inputTokens ?? 0) + usage.inputTokens,
-    outputTokens: (target?.outputTokens ?? 0) + usage.outputTokens,
-    cacheReadTokens: (target?.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0),
-    reasoningTokens: (target?.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0),
-  }
+/**
+ * Mark each wire message with its cache provenance. Only real user turns
+ * (no injection channel) count as conversational turns for the historical
+ * checkpoint decimation; injected reminders and tool results do not.
+ */
+function withCacheProvenance(surface: readonly SurfaceItem[]): ChatMessage[] {
+  return surface.map(({ message, channel }) => ({
+    ...message,
+    cache: { conversationalUser: message.role === 'user' && channel === null },
+  }))
 }
 
 export class SessionDriver {
@@ -345,7 +275,7 @@ export class SessionDriver {
   private readonly registry: ToolRegistry
   private readonly getConfig: () => AppConfig
   private readonly onRunningChange: (sessionId: string, running: boolean) => void
-  private readonly running = new Map<string, TurnRun>()
+  private readonly running = new Map<string, AbortController>()
   private readonly bridge?: ApprovalBridge
   private readonly reviewer?: Reviewer
   private readonly policy: ExecPolicy
@@ -469,6 +399,8 @@ export class SessionDriver {
     if (!role?.legacy) return events
     const projected = this.services?.historyFor?.(sessionId, events) ?? events
     const seen = new Set(projected.map((event) => event.seq))
+    // Only the current turn's reminder may be appended to the frozen
+    // projection; older turns stay exactly as the projection recorded them.
     let turnStartSeq = 0
     for (const event of events) {
       if (event.type === 'turn-start') turnStartSeq = event.seq
@@ -523,6 +455,8 @@ export class SessionDriver {
           ? { extraSections: this.services.promptSections(sessionId, session.header) }
           : {}),
       })
+      // The wire keeps the frozen prefix; prompt changes travel as an injected
+      // update row and are counted with the baseline context.
       const frozen = frozenSystem(framed, session.events, surface)
       return buildContextUsageSnapshot({
         system: frozen.system,
@@ -597,15 +531,19 @@ export class SessionDriver {
 
   /** Idempotent cancel: keeps the token like the Rust backend does. */
   cancel(sessionId: string): boolean {
-    const run = this.running.get(sessionId)
-    if (!run) return false
-    run.cancelRequested = true
-    run.agent.abort()
+    const controller = this.running.get(sessionId)
+    if (!controller) return false
+    controller.abort()
+    // Cache warming belongs to the cancelled turn: keep it from issuing a
+    // fresh provider request after the user pressed stop.
     this.cacheWarmer.cancel(sessionId)
     return true
   }
 
-  /** Start a turn without waiting for it. The returned promise resolves once the turn closes. */
+  /**
+   * Start a turn without waiting for it. The returned promise resolves once
+   * the turn has closed (all events appended); it never rejects.
+   */
   startTurn(sessionId: string, prompt: string, options: StartTurnOptions = {}): Promise<void> {
     return this.runTurn(sessionId, prompt, options)
   }
@@ -652,22 +590,20 @@ export class SessionDriver {
     const session = this.store.read(sessionId)
     if (!session) return
     if (this.running.has(sessionId)) return
+    const controller = new AbortController()
+    this.running.set(sessionId, controller)
+    this.onRunningChange(sessionId, true)
 
     const config = this.getConfig()
     const frozen = options.selection ?? this.services?.selectionFor?.(sessionId)
     let selection: ModelSelection = resolveDefault(config)
     let provider: ProviderConfig | undefined
-    let selectionError: string | null = null
     try {
-      const resolved = this.resolveSelection(
-        config,
-        frozen,
-        session.header.subagent ? resolveDefault(config) : undefined,
-      )
+      const resolved = this.resolveSelection(config, frozen, session.header.subagent ? resolveDefault(config) : undefined)
       provider = resolved.provider
       selection = resolved.selection
-    } catch (error) {
-      selectionError = errorMessage(error)
+    } catch {
+      provider = undefined
     }
 
     let role: SubagentPromptContext | null = null
@@ -686,157 +622,118 @@ export class SessionDriver {
 
     const turn = lastTurn(session.events) + 1
     const cacheSettings = loadConsoleCacheSettings(this.store.home)
+    // A new turn replaces the prefix; a pending replay of the old one is stale.
     this.cacheWarmer.cancel(sessionId)
-    const append = (event: SessionEvent): Envelope | null => this.store.append(sessionId, event)
-
-    const baseline = this.store.read(sessionId)?.events ?? []
-    const baselineSeq = baseline[baseline.length - 1]?.seq ?? 0
-
-    const placeholder: Message = { role: 'user', content: '', timestamp: Date.now() }
-    const model = provider
-      ? toPiModel(provider, selection.model, {
-          ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
-        })
-      : null
-
-    const run: TurnRun = {
-      sessionId,
-      header: session.header,
-      turn,
-      step: 0,
-      agent: undefined as unknown as Agent,
-      unsubscribe: () => {},
-      cacheSettings,
-      cancelRequested: false,
-      loopStop: null,
-      maxStepsHit: false,
-      failure: null,
-      lastAssistant: null,
-      turnUsage: undefined,
-      stepOpen: false,
-      turnOpen: false,
-      records: new Map(),
-      preResults: new Map(),
-      notExecuted: new Set(),
-      callRefs: new Map(),
-      permissions: new Map(),
-      selection,
-      provider: provider as ProviderConfig,
-      role,
-      chunkBuilder: null,
-      sawToolDeltas: new Set(),
-      stepChunkSeqs: [],
-      firstTokenTime: undefined,
-      requestSeq: 0,
-      approvalBoundary: false,
-      loopGuard: new LoopGuard(),
-      loopGuardInboundSeq: baselineSeq,
-      loopGuardPermissionSeq: baselineSeq,
-      compactionAttempted: false,
-      slots: new Semaphore(this.settings.maxParallel),
-      toolRuntime: undefined as unknown as TurnToolRuntime,
+    const append = (event: Parameters<SessionStore['append']>[1]) => this.store.append(sessionId, event)
+    let stepOpen = false
+    let turnOpen = false
+    let closedReason: TurnEndReason | null = null
+    let turnUsage: TokenUsage | undefined
+    const addUsage = (usage: TokenUsage | undefined) => {
+      if (!usage) return
+      turnUsage = {
+        inputTokens: (turnUsage?.inputTokens ?? 0) + usage.inputTokens,
+        outputTokens: (turnUsage?.outputTokens ?? 0) + usage.outputTokens,
+        cacheReadTokens: (turnUsage?.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0),
+        reasoningTokens: (turnUsage?.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0),
+      }
     }
 
-    run.toolRuntime = new TurnToolRuntime({
-      sessionId,
-      header: run.header,
-      registry: this.registry,
-      preResults: run.preResults,
-      records: run.records,
-      notExecuted: run.notExecuted,
-      permissions: run.permissions,
-      slots: run.slots,
-      readState: this.readStateFor(sessionId),
-      outputStore: this.outputStore,
-      selection: () => run.selection,
-      permissionState: () => this.permissionStateOf(run.sessionId),
-      roots: () => this.rootsOf(run.sessionId, run.header),
-      memoryRoot: () => this.services?.memoryRoot?.(run.sessionId, run.header) ?? null,
-      ...(this.services?.jobs ? { jobs: this.services.jobs } : {}),
-      ...(this.services?.executeExtra
-        ? { executeExtra: this.services.executeExtra.bind(this.services) }
-        : {}),
-      ...(this.services?.fileHistory
-        ? { fileHistory: (scope: string | readonly string[]) => this.services!.fileHistory!(run.sessionId, scope) }
-        : {}),
-      commitOutput: (call, output) => this.commitToolOutput(run.sessionId, call, output),
-      append: (event) => this.store.append(run.sessionId, event),
-      markApprovalBoundary: () => {
-        run.approvalBoundary = true
-      },
-      cancelRequested: () => run.cancelRequested,
-      agentSignal: () => run.agent.signal,
-    })
-
-    const closeTurn = (reason: TurnEndReason): void => {
-      if (!run.turnOpen) return
-      this.closeStep(run)
-      append({ type: 'turn-end', turn: run.turn, reason })
-      run.turnOpen = false
+    const closeOpenStep = () => {
+      if (stepOpen) {
+        append({ type: 'step-end', turn, step: currentStep })
+        stepOpen = false
+      }
+    }
+    const closeTurn = (reason: TurnEndReason) => {
+      closeOpenStep()
+      if (turnOpen) {
+        append({ type: 'turn-end', turn, reason })
+        turnOpen = false
+        closedReason = reason
+      }
       this.store.flush(sessionId)
     }
 
-    this.running.set(sessionId, run)
-    this.onRunningChange(sessionId, true)
-
-    try {
-      if (!options.continueOnly) this.services?.onTurnStart?.(sessionId)
-      if (!options.continueOnly) {
-        const explicitSkills = [
-          ...new Set((options.skills ?? []).filter((name) => isValidSkillName(name))),
-        ]
-        const gesture = skillGesture(prompt)
-        const injected: { name: string; source: string; body: string; gesture: boolean }[] = []
-        for (const name of explicitSkills) {
-          const skill = this.services?.userSkill?.(sessionId, name)
-          if (skill) injected.push({ ...skill, gesture: false })
-        }
-        if (gesture !== null && !explicitSkills.includes(gesture)) {
-          const skill = this.services?.userSkill?.(sessionId, gesture)
-          if (skill) injected.push({ ...skill, gesture: true })
-        }
-        for (const skill of injected) {
-          if (skill.gesture) continue
-          append({
-            type: 'user-message',
-            text: `[用户显式调用技能：${skill.name}（来源：${skill.source}）]\n${skill.body}`,
-            injected: true,
-            channel: 'skill-invocation',
-          })
-        }
-        const injectedTurn = options.injected === true
-        const userEnvelope = append({
+    let currentStep = 0
+    if (!options.continueOnly) this.services?.onTurnStart?.(sessionId)
+    if (!options.continueOnly) {
+      const explicitSkills = [
+        ...new Set((options.skills ?? []).filter((name) => isValidSkillName(name))),
+      ]
+      const gesture = skillGesture(prompt)
+      const injected: { name: string; source: string; body: string; gesture: boolean }[] = []
+      for (const name of explicitSkills) {
+        const skill = this.services?.userSkill?.(sessionId, name)
+        if (skill) injected.push({ ...skill, gesture: false })
+      }
+      if (gesture !== null && !explicitSkills.includes(gesture)) {
+        const skill = this.services?.userSkill?.(sessionId, gesture)
+        if (skill) injected.push({ ...skill, gesture: true })
+      }
+      // Explicit selections come before the question; the `/name` gesture sits
+      // right after it (closest to the answer), mirroring the Rust ordering.
+      for (const skill of injected) {
+        if (skill.gesture) continue
+        append({
           type: 'user-message',
-          text: prompt,
-          injected: injectedTurn,
-          ...(injectedTurn && options.channel ? { channel: options.channel } : {}),
-          ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
+          text: `[用户显式调用技能：${skill.name}（来源：${skill.source}）]\n${skill.body}`,
+          injected: true,
+          channel: 'skill-invocation',
         })
-        if (userEnvelope && !injectedTurn) {
-          try {
-            this.services?.fileSnapshot?.(
-              sessionId,
-              this.rootsOf(sessionId, session.header),
-              userEnvelope.seq,
-            )
-          } catch (error) {
-            console.warn('[denia] 文件历史快照失败:', errorMessage(error))
-          }
-        }
-        for (const skill of injected) {
-          if (!skill.gesture) continue
-          append({
-            type: 'user-message',
-            text: `[技能正文 ${skill.name}（来源：${skill.source}）]\n${skill.body}`,
-            injected: true,
-            channel: 'gesture-skill',
-          })
+      }
+      const injectedTurn = options.injected === true
+      const userEnvelope = append({
+        type: 'user-message',
+        text: prompt,
+        injected: injectedTurn,
+        ...(injectedTurn && options.channel ? { channel: options.channel } : {}),
+        ...(options.images && options.images.length > 0 ? { images: options.images } : {}),
+      })
+      // Pin the pre-turn file state to this message so a rewind restores the
+      // exact bytes the turn started from. Snapshot failure is logged but does
+      // not abort the turn (the checkpoint simply has no file history).
+      if (userEnvelope && !injectedTurn) {
+        try {
+          this.services?.fileSnapshot?.(
+            sessionId,
+            this.rootsOf(sessionId, session.header),
+            userEnvelope.seq,
+          )
+        } catch (error) {
+          console.warn('[denia] 文件历史快照失败:', errorMessage(error))
         }
       }
+      for (const skill of injected) {
+        if (!skill.gesture) continue
+        append({
+          type: 'user-message',
+          text: `[技能正文 ${skill.name}（来源：${skill.source}）]\n${skill.body}`,
+          injected: true,
+          channel: 'gesture-skill',
+        })
+      }
+    }
 
-      append({ type: 'turn-start', turn })
-      run.turnOpen = true
+    // The user's message is the rewind point, so it must precede `turn-start`:
+    // truncating at that seq keeps no half-open turn behind, mirroring the
+    // Rust event order.
+    append({ type: 'turn-start', turn })
+    turnOpen = true
 
+    // Fresh per-turn detector: a new turn always starts with a clean count.
+    const loopGuard = new LoopGuard()
+    const guardBaselineEvents = this.store.read(sessionId)?.events ?? []
+    // The new turn starts from a clean detector; only events appended after
+    // the current log tail can be new input for this turn.
+    const guardBaselineSeq = guardBaselineEvents[guardBaselineEvents.length - 1]?.seq ?? 0
+    let loopGuardInboundSeq = guardBaselineSeq
+    let loopGuardPermissionSeq = guardBaselineSeq
+    // One summary attempt per turn: a second pass over the same turn would
+    // re-summarize history the user has not refilled yet.
+    let compactionAttempted = false
+
+    try {
       if (roleError !== null) {
         if (historyError) this.services?.notifyParent?.(sessionId, historyError)
         closeTurn({
@@ -845,45 +742,375 @@ export class SessionDriver {
         })
         return
       }
-      if (!provider || !model || selectionError !== null) {
-        run.step = 1
-        run.stepOpen = true
-        append({ type: 'step-start', turn, step: 1 })
-        closeTurn({
-          kind: 'error',
-          failure: {
-            code: 'llm/not-configured',
-            message: selectionError ?? '没有可用的模型提供商,请先配置提供商与模型。',
-          },
+      for (let step = 1; step <= this.settings.maxSteps; step += 1) {
+        currentStep = step
+        if (controller.signal.aborted) {
+          closeTurn(abortedReason())
+          return
+        }
+        // Deliver queued agent messages at the step boundary, never mid-action.
+        this.services?.drainInbox?.(sessionId)
+        this.applyInjections(sessionId, session.header)
+        append({ type: 'step-start', turn, step })
+        stepOpen = true
+
+        if (!provider) {
+          closeTurn({
+            kind: 'error',
+            failure: { code: 'llm/not-configured', message: '没有可用的模型提供商,请先配置提供商与模型。' },
+          })
+          return
+        }
+
+        if (!role?.legacy) {
+          this.applyMicrocompact(
+            sessionId,
+            turn,
+            step,
+            provider,
+            selection.model,
+            cacheSettings.microcompact,
+            cacheSettings.compactionRatio,
+          )
+        }
+        if (!role?.legacy) {
+          compactionAttempted = await this.applyAutoCompact({
+            sessionId,
+            selection,
+            provider,
+            model: selection.model,
+            ratio: cacheSettings.compactionRatio,
+            header: session.header,
+            signal: controller.signal,
+            attempted: compactionAttempted,
+          })
+        }
+        if (controller.signal.aborted) {
+          closeTurn(abortedReason())
+          return
+        }
+        let events = this.store.read(sessionId)?.events ?? []
+        // A real user/agent message or an explicit permission change is a
+        // business boundary: earlier repetition cannot be used after it. Scan
+        // only the tail that appeared since the last processed boundary.
+        const scannedToSeq = events[events.length - 1]?.seq ?? 0
+        const inboundSeq = latestInboundSeq(events, loopGuardInboundSeq)
+        if (inboundSeq > loopGuardInboundSeq) loopGuard.reset()
+        loopGuardInboundSeq = Math.max(loopGuardInboundSeq, scannedToSeq)
+        const permissionSeq = latestPermissionSeq(events, loopGuardPermissionSeq)
+        if (permissionSeq > loopGuardPermissionSeq) loopGuard.reset()
+        loopGuardPermissionSeq = Math.max(loopGuardPermissionSeq, scannedToSeq)
+        let modelEvents = this.modelEventsFor(sessionId, events, role)
+        let surface = deriveSurface(modelEvents)
+        let messages = withCacheProvenance(surface)
+        const permission = this.permissionStateOf(sessionId)
+        const schemas = this.schemasFor(permission, sessionId, session.header)
+        const framedCurrent = buildSystemPrompt({
+          cwd: session.header.cwd,
+          sandbox: session.header.sandbox,
+          tools: schemas,
+          permission,
+          model: selection.model,
+          provider: selection.provider,
+          ...(this.services?.persona ? { persona: this.services.persona() } : {}),
+          ...(role ? { subagent: role } : {}),
+          ...(this.services?.promptSections
+            ? { extraSections: this.services.promptSections(sessionId, session.header) }
+            : {}),
         })
-        return
+        // The transcript shows the current prompt, not the frozen wire bytes:
+        // unchanged prompts are logged once, and an update that the model
+        // receives is visible as its own injected row.
+        let previousSystemPrompt: string | null = null
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index]!
+          if (event.type === 'system-prompt') {
+            previousSystemPrompt = event.text
+            break
+          }
+        }
+        if (previousSystemPrompt !== framedCurrent) {
+          append({ type: 'system-prompt', turn, step, text: framedCurrent })
+        }
+        // Rewriting the system bytes would break the provider cache from the
+        // first token. Keep the frozen prefix and append the new prompt as an
+        // update at the end of the cached history.
+        const frozen = frozenSystem(framedCurrent, events, surface)
+        const system = frozen.system
+        // The frozen prefix does not change the request header, so an effective
+        // system update must break the repetition run by itself.
+        if (frozen.update !== null) loopGuard.reset()
+        if (frozen.update !== null) {
+          append({
+            type: 'user-message',
+            text: frozen.update,
+            injected: true,
+            channel: SYSTEM_UPDATE_CHANNEL,
+          })
+          events = this.store.read(sessionId)?.events ?? events
+          modelEvents = this.modelEventsFor(sessionId, events, role)
+          surface = deriveSurface(modelEvents)
+          messages = withCacheProvenance(surface)
+        }
+        // The request header is the durable baseline the frozen system is
+        // restored from after a restart; log it only when the prefix shape
+        // actually changes.
+        const header = buildRequestHeader(selection, system, schemas)
+        const previousHeader = lastRequestHeader(events)
+        const headerChanged =
+          previousHeader !== null && !sameRequestHeader(previousHeader.header, header)
+        if (headerChanged) loopGuard.reset()
+        if (!previousHeader || headerChanged) {
+          append({
+            type: 'request-header',
+            turn,
+            step,
+            header,
+            reason: previousHeader ? 'change' : 'initial',
+            ...(previousHeader ? { starts_series: true } : {}),
+          })
+        }
+
+        const requestContext = append({
+          type: 'request-context',
+          turn,
+          step,
+          provider: selection.provider,
+          model: selection.model,
+          ...(provider.defaultContextWindow ? { context_window: provider.defaultContextWindow } : {}),
+        })
+
+        const blocks: ContentBlock[] = []
+        const sourceSeqs: number[] = []
+        let usage: TokenUsage | undefined
+        let finishKind: string | undefined
+        let firstTokenTime: number | undefined
+
+        // A request in flight refreshes the cache itself; drop any timer armed
+        // by the previous step so it cannot race this one.
+        const request = {
+          provider,
+          model: selection.model,
+          // Cap the aggregate image payload before it becomes a request.
+          messages: applyMediaBudget(messages).messages,
+          system,
+          tools: schemas,
+          ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+          cacheKey: sessionId,
+          signal: controller.signal,
+        }
+        this.cacheWarmer.remember(sessionId, provider, request, cacheSettings.cacheWarming.mode)
+        this.cacheWarmer.cancel(sessionId)
+        const stream = streamFor(request)
+
+        for await (const chunk of stream) {
+          const envelope = append({ type: 'assistant-chunk', turn, step, chunk })
+          if (envelope) {
+            sourceSeqs.push(envelope.seq)
+            if (
+              firstTokenTime === undefined &&
+              (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta')
+            ) {
+              firstTokenTime = envelope.time
+            }
+          }
+          if (chunk.type === 'block-end') blocks.push(chunk.block)
+          else if (chunk.type === 'usage') usage = chunk.usage
+          else if (chunk.type === 'finish') finishKind = chunk.reason.kind
+        }
+
+        append({
+          type: 'assistant-message',
+          turn,
+          step,
+          blocks,
+          ...(usage ? { usage } : {}),
+          ...(sourceSeqs.length > 0 ? { source_event_seqs: sourceSeqs } : {}),
+          ...(firstTokenTime !== undefined ? { first_token_time: firstTokenTime } : {}),
+        })
+        addUsage(usage)
+        // The prefix is hot right now; keep it warm while tools run and the
+        // user reads (the phase decides whether the timer is armed at all).
+        this.cacheWarmer.schedule(sessionId, 'streaming', cacheSettings.cacheWarming)
+
+        const calls: ToolCallRef[] = blocks
+          .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
+          .map((block) => ({ id: block.id, name: block.name, arguments: block.arguments }))
+
+        if (calls.length === 0) {
+          append({ type: 'step-end', turn, step })
+          stepOpen = false
+          closeTurn(finishKind === 'max-tokens' ? { kind: 'max-tokens' } : { kind: 'completed' })
+          return
+        }
+
+        for (const call of calls) {
+          append({
+            type: 'tool-call',
+            turn,
+            step,
+            call_id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+          })
+        }
+
+        const roots = this.rootsOf(sessionId, session.header)
+        // Permission/approval events emitted while the batch runs are business
+        // boundaries for loop detection (never counted as repetition). Only a
+        // flag is kept: tool-output chunks may carry large bodies.
+        let approvalBoundary = false
+        const batch = await this.executeCalls(calls, {
+          sessionId,
+          cwd: session.header.cwd,
+          roots,
+          sandbox: session.header.sandbox,
+          cancel: controller.signal,
+          selection,
+          permission,
+          memoryRoot: this.services?.memoryRoot?.(sessionId, session.header) ?? null,
+          readState: this.readStateFor(sessionId),
+          outputStore: this.outputStore,
+          ...(this.services?.jobs ? { jobs: this.services.jobs } : {}),
+          ...(this.services?.fileHistory
+            ? { fileHistory: this.services.fileHistory(sessionId, roots) }
+            : {}),
+          emit: (event) => {
+            if (
+              event.type === 'approval-decided' ||
+              event.type === 'permission-selection' ||
+              event.type === 'permission-mode'
+            ) {
+              approvalBoundary = true
+            }
+            append(event)
+          },
+        }, (next) => {
+          selection = next
+        })
+
+        const outputs = batch.outputs
+        const recordedOutputs: ToolOutput[] = new Array(calls.length)
+        if (batch.aborted) {
+          for (let index = 0; index < calls.length; index += 1) {
+            if (outputs[index]) continue
+            outputs[index] = {
+              content: '[工具错误] 命令被用户中断',
+              isError: true,
+              errorIdentity: { name: calls[index]!.name, code: 'cancelled' },
+            }
+          }
+        }
+        for (let index = 0; index < calls.length; index += 1) {
+          const call = calls[index]!
+          const output = outputs[index] ?? {
+            content: '[工具错误] 工具没有返回结果',
+            isError: true,
+          }
+          recordedOutputs[index] = output
+          const appended = append({
+            type: 'tool-result',
+            turn,
+            step,
+            call_id: call.id,
+            content: output.content,
+            is_error: output.isError,
+            ...(output.errorIdentity ? { error_identity: output.errorIdentity } : {}),
+            ...(output.meta !== undefined ? { meta: output.meta } : {}),
+            ...(output.truncation ? { truncation: output.truncation } : {}),
+          })
+          // Remember what this read saw, so an identical repeat can answer
+          // with a pointer instead of re-sending the content.
+          const stamp = output.isError ? null : readStampOf(output.meta)
+          if (appended && stamp) {
+            this.readStateFor(sessionId).remember(stamp.key, {
+              callId: call.id,
+              seq: appended.seq,
+              stamp: { mtimeMs: stamp.mtimeMs, size: stamp.size },
+            })
+          }
+          // Once the file exists, the write arguments are dead weight: archive
+          // the call and its result so later requests stop paying for them.
+          if (
+            !output.isError &&
+            (call.name === 'write_file' || call.name === 'edit') &&
+            call.arguments.length >= ARGS_STUB_THRESHOLD_CHARS
+          ) {
+            append({
+              type: 'args-cleared',
+              turn,
+              step,
+              call_id: call.id,
+              placeholder: archivedCallNote(call),
+            })
+          }
+        }
+
+        // A user who cancels an approval interrupts the whole turn.
+        if (batch.aborted) {
+          closeTurn(abortedReason())
+          return
+        }
+
+        append({ type: 'step-end', turn, step })
+        stepOpen = false
+
+        // Loop guard: one fingerprint per fully settled batch, observed only
+        // after step-end. A user approval or permission change in this batch is
+        // a business boundary, not stagnation.
+        if (approvalBoundary) {
+          loopGuard.reset()
+        } else {
+          const decision = loopGuard.observe({
+            calls: calls.map((call, index) => {
+              const output = recordedOutputs[index]!
+              return {
+                name: call.name,
+                arguments: call.arguments,
+                content: output.content,
+                isError: output.isError,
+                ...(output.errorIdentity ? { errorIdentity: output.errorIdentity } : {}),
+                notExecuted: batch.notExecuted[index] === true,
+                truncated: output.truncation !== undefined,
+                missing: batch.missing[index] === true,
+              }
+            }),
+          })
+          if (decision.kind === 'strong-reminder' || decision.kind === 'weak-reminder') {
+            // Input that arrived after the request wins over the reminder.
+            const latest = this.store.read(sessionId)?.events ?? []
+            if (hasNewInputSince(latest, requestContext?.seq ?? 0)) {
+              loopGuard.reset()
+            } else {
+              append({
+                type: 'user-message',
+                text:
+                  decision.kind === 'strong-reminder'
+                    ? LOOP_GUARD_STRONG_REMINDER
+                    : LOOP_GUARD_WEAK_REMINDER,
+                injected: true,
+                channel: LOOP_GUARD_CHANNEL,
+              })
+            }
+          } else if (decision.kind === 'stop') {
+            // A real user/agent message or a queued inbox entry that arrived
+            // after the request gets the next step before a hard stop.
+            const latest = this.store.read(sessionId)?.events ?? []
+            if (hasNewInputSince(latest, requestContext?.seq ?? 0)) {
+              loopGuard.reset()
+            } else {
+              closeTurn({ kind: 'loop-detected', repeats: decision.repeats })
+              return
+            }
+          }
+        }
       }
-
-      const agent = new Agent({
-        initialState: {
-          model,
-          thinkingLevel: thinkingLevelOf(selection.reasoningEffort),
-          tools: [],
-          messages: [placeholder],
-        },
-        streamFn: createPiStreamFn(() => run.provider),
-        sessionId:
-          provider.supportsPromptCacheKey === false ? undefined : normalizePromptCacheKey(sessionId),
-        getApiKey: () => resolveApiKey(run.provider),
-        identity: { attribution: null },
-        toolExecution: 'parallel',
-        convertToLlm: (messages) => messages.filter(isLlmMessage),
-        beforeToolCall: (context, signal) => this.beforeToolCall(run, context, signal),
-        prepareRequest: (context, signal) => this.prepareRequest(run, context, signal),
-        finishTurn: (context) => this.finishTurn(run, context),
+      closeTurn({
+        kind: 'error',
+        failure: { code: 'agent/max-steps', message: `本轮步骤超过上限(${this.settings.maxSteps}),已停止。` },
       })
-      run.agent = agent
-      run.unsubscribe = agent.subscribe((event) => this.onAgentEvent(run, event))
-
-      await agent.continue()
-      closeTurn(this.turnReason(run))
     } catch (error) {
-      if (run.cancelRequested || run.agent?.signal?.aborted) {
+      if (controller.signal.aborted) {
         closeTurn(abortedReason())
       } else {
         closeTurn({
@@ -892,632 +1119,16 @@ export class SessionDriver {
         })
       }
     } finally {
-      run.unsubscribe()
-      closeTurn(this.turnReason(run))
       this.running.delete(sessionId)
       this.onRunningChange(sessionId, false)
       this.store.flush(sessionId)
       this.cacheWarmer.schedule(sessionId, 'idle', cacheSettings.cacheWarming)
       try {
-        this.services?.onTurnEnd?.(sessionId, this.turnReason(run), run.turnUsage)
+        this.services?.onTurnEnd?.(sessionId, closedReason ?? { kind: 'aborted' }, turnUsage)
       } catch {
         /* settlement must never mask the turn result */
       }
     }
-  }
-
-  private turnReason(run: TurnRun): TurnEndReason {
-    if (run.maxStepsHit) {
-      return {
-        kind: 'error',
-        failure: {
-          code: 'agent/max-steps',
-          message: `本轮步骤超过上限(${this.settings.maxSteps}),已停止。`,
-        },
-      }
-    }
-    if (run.cancelRequested) return abortedReason()
-    if (run.loopStop) return { kind: 'loop-detected', repeats: run.loopStop.repeats }
-    if (run.failure) return { kind: 'error', failure: run.failure }
-    const message = run.lastAssistant
-    if (!message) return { kind: 'completed' }
-    switch (message.stopReason) {
-      case 'error':
-        return {
-          kind: 'error',
-          failure: { code: 'llm/stream', message: message.errorMessage ?? 'provider error' },
-        }
-      case 'aborted':
-        return abortedReason()
-      case 'length':
-        return { kind: 'max-tokens' }
-      default:
-        return { kind: 'completed' }
-    }
-  }
-
-  private onAgentEvent(run: TurnRun, event: AgentEvent): void {
-    switch (event.type) {
-      case 'turn_start': {
-        if (run.cancelRequested) return
-        run.step += 1
-        run.stepOpen = true
-        run.stepChunkSeqs = []
-        run.firstTokenTime = undefined
-        run.sawToolDeltas.clear()
-        this.store.append(run.sessionId, { type: 'step-start', turn: run.turn, step: run.step })
-        return
-      }
-      case 'turn_end': {
-        if (run.cancelRequested) return
-        this.closeStep(run)
-        return
-      }
-      case 'message_start': {
-        if (event.message.role !== 'assistant' || run.cancelRequested) return
-        run.chunkBuilder = new ChunkBuilder({
-          ...(run.provider.inlineThinkTags ? { inlineThinkTags: true } : {}),
-        })
-        run.sawToolDeltas.clear()
-        run.stepChunkSeqs = []
-        run.firstTokenTime = undefined
-        return
-      }
-      case 'message_update': {
-        if (run.cancelRequested || event.message.role !== 'assistant') return
-        const builder = run.chunkBuilder
-        if (!builder) return
-        const chunks = chunksForAssistantEvent(builder, event.assistantMessageEvent, run.sawToolDeltas)
-        for (const chunk of chunks) {
-          const envelope = this.store.append(run.sessionId, {
-            type: 'assistant-chunk',
-            turn: run.turn,
-            step: run.step,
-            chunk,
-          })
-          if (!envelope) continue
-          run.stepChunkSeqs.push(envelope.seq)
-          if (
-            run.firstTokenTime === undefined &&
-            (chunk.type === 'text-delta' ||
-              chunk.type === 'reasoning-delta' ||
-              chunk.type === 'tool-call-delta')
-          ) {
-            run.firstTokenTime = envelope.time
-          }
-        }
-        return
-      }
-      case 'message_end': {
-        if (event.message.role === 'assistant') {
-          this.onAssistantEnd(run, event.message)
-        } else if (event.message.role === 'toolResult') {
-          this.onToolResult(run, event.message)
-        }
-        return
-      }
-      case 'tool_execution_start': {
-        const call: ToolCallRef = {
-          id: event.toolCallId,
-          name: event.toolName,
-          arguments: JSON.stringify(event.args ?? {}),
-        }
-        run.callRefs.set(event.toolCallId, call)
-        this.store.append(run.sessionId, {
-          type: 'tool-call',
-          turn: run.turn,
-          step: run.step,
-          call_id: call.id,
-          name: call.name,
-          arguments: call.arguments,
-        })
-        return
-      }
-      default:
-        return
-    }
-  }
-
-  private closeStep(run: TurnRun): void {
-    if (!run.stepOpen) return
-    this.store.append(run.sessionId, { type: 'step-end', turn: run.turn, step: run.step })
-    run.stepOpen = false
-  }
-
-  private onAssistantEnd(run: TurnRun, message: AssistantMessage): void {
-    run.lastAssistant = message
-    if (message.stopReason === 'error') {
-      run.failure = { code: 'llm/stream', message: message.errorMessage ?? 'provider error' }
-      return
-    }
-    if (message.stopReason === 'aborted' || run.cancelRequested) return
-    const builder = run.chunkBuilder
-    if (!builder) return
-    const blocks = assistantBlocksOf(message, run.provider)
-    const usage = tokenUsageOf(message.usage)
-    const trailing: StreamChunk[] = [
-      ...builder.flushInlineTail(),
-      ...builder.finish(blocks),
-      ...usageChunk(usage),
-      finishChunk(
-        message.stopReason === 'length'
-          ? { kind: 'max-tokens' }
-          : message.stopReason === 'toolUse'
-            ? { kind: 'tool-calls' }
-            : { kind: 'stop' },
-      ),
-    ]
-    for (const chunk of trailing) {
-      const envelope = this.store.append(run.sessionId, {
-        type: 'assistant-chunk',
-        turn: run.turn,
-        step: run.step,
-        chunk,
-      })
-      if (envelope) run.stepChunkSeqs.push(envelope.seq)
-    }
-    this.store.append(run.sessionId, {
-      type: 'assistant-message',
-      turn: run.turn,
-      step: run.step,
-      blocks,
-      usage,
-      ...(run.stepChunkSeqs.length > 0 ? { source_event_seqs: run.stepChunkSeqs } : {}),
-      ...(run.firstTokenTime !== undefined ? { first_token_time: run.firstTokenTime } : {}),
-    })
-    run.turnUsage = addUsage(run.turnUsage, usage)
-    this.cacheWarmer.schedule(run.sessionId, 'streaming', run.cacheSettings.cacheWarming)
-  }
-
-  private onToolResult(run: TurnRun, message: ToolResultMessage): void {
-    const callId = message.toolCallId
-    const call = run.callRefs.get(callId) ?? {
-      id: callId,
-      name: message.toolName,
-      arguments: '{}',
-    }
-    const record = run.records.get(callId)
-    const pre = run.preResults.get(callId)
-    let output: ToolOutput
-    if (record) {
-      output = record.output
-    } else if (pre) {
-      output = pre
-    } else if (message.isError) {
-      output = run.cancelRequested
-        ? cancelledOutput(call.name)
-        : errorOutput(textOfPiMessage(message), call.name)
-    } else {
-      output = { content: textOfPiMessage(message), isError: false }
-    }
-    const appended = this.store.append(run.sessionId, {
-      type: 'tool-result',
-      turn: run.turn,
-      step: run.step,
-      call_id: callId,
-      content: output.content,
-      is_error: output.isError,
-      ...(output.errorIdentity ? { error_identity: output.errorIdentity } : {}),
-      ...(output.meta !== undefined ? { meta: output.meta } : {}),
-      ...(output.truncation ? { truncation: output.truncation } : {}),
-    })
-    if (appended && !output.isError) {
-      const stamp = readStampOf(output.meta)
-      if (stamp) {
-        this.readStateFor(run.sessionId).remember(stamp.key, {
-          callId,
-          seq: appended.seq,
-          stamp: { mtimeMs: stamp.mtimeMs, size: stamp.size },
-        })
-      }
-      if (
-        (call.name === 'write_file' || call.name === 'edit') &&
-        call.arguments.length >= ARGS_STUB_THRESHOLD_CHARS
-      ) {
-        this.store.append(run.sessionId, {
-          type: 'args-cleared',
-          turn: run.turn,
-          step: run.step,
-          call_id: callId,
-          placeholder: archivedCallNote(call),
-        })
-      }
-    }
-  }
-
-  private async beforeToolCall(
-    run: TurnRun,
-    context: BeforeToolCallContext,
-    signal?: AbortSignal,
-  ): Promise<{ block?: boolean; reason?: string; terminate?: boolean } | undefined> {
-    const toolCall = context.toolCall
-    const args = (context.args ?? {}) as Record<string, unknown>
-    const call: ToolCallRef = {
-      id: toolCall.id,
-      name: toolCall.name,
-      arguments: JSON.stringify(args),
-    }
-    if (signal?.aborted) {
-      const output = cancelledOutput(call.name)
-      run.preResults.set(call.id, output)
-      run.notExecuted.add(call.id)
-      return { block: true, reason: output.content }
-    }
-
-    const intercepted = this.services?.intercept?.(call, run.sessionId)
-    if (intercepted) {
-      run.preResults.set(call.id, intercepted)
-      run.notExecuted.add(call.id)
-      return undefined
-    }
-
-    const state = this.permissionStateOf(run.sessionId)
-    const roots = this.rootsOf(run.sessionId, run.header)
-    const memoryRoot = this.services?.memoryRoot?.(run.sessionId, run.header) ?? null
-    const gate = gateCall(
-      state,
-      run.header.cwd,
-      call,
-      this.policy,
-      this.grantsOf(run.sessionId),
-      memoryRoot,
-      roots,
-    )
-
-    if (gate.decision.kind === 'forbid') {
-      const output = errorOutput(gate.decision.reason, call.name)
-      run.preResults.set(call.id, output)
-      run.notExecuted.add(call.id)
-      return { block: true, reason: output.content }
-    }
-    if (gate.decision.kind === 'allow') {
-      run.permissions.set(call.id, state)
-      return undefined
-    }
-
-    const decision = await dispatchApproval(
-      {
-        sessionId: run.sessionId,
-        cwd: run.header.cwd,
-        ...(this.bridge ? { bridge: this.bridge } : {}),
-        ...(this.reviewer ? { reviewer: this.reviewer } : {}),
-        policy: this.policy,
-        grants: this.grantsOf(run.sessionId),
-        append: (event) => this.store.append(run.sessionId, event),
-        transcript: () => this.transcriptOf(run.sessionId),
-        applyPlan: (answer) => this.applyPlanApproval(run, answer),
-        abort: () => {
-          run.cancelRequested = true
-          run.agent.abort()
-        },
-        markApprovalBoundary: () => {
-          run.approvalBoundary = true
-        },
-      },
-      call,
-      gate,
-      state,
-      signal,
-    )
-    if (decision.abort) {
-      run.cancelRequested = true
-      run.agent.abort()
-      const output = cancelledOutput(call.name)
-      run.preResults.set(call.id, output)
-      run.notExecuted.add(call.id)
-      return { block: true, reason: output.content }
-    }
-    if (decision.output) {
-      run.preResults.set(call.id, decision.output)
-      run.notExecuted.add(call.id)
-      return undefined
-    }
-
-    const current = this.permissionStateOf(run.sessionId)
-    const recheck = gateCall(
-      current,
-      run.header.cwd,
-      call,
-      this.policy,
-      this.grantsOf(run.sessionId),
-      memoryRoot,
-      roots,
-    )
-    if (recheck.decision.kind === 'forbid') {
-      const output = errorOutput(`批准后重新判权被拒绝:${recheck.decision.reason}`, call.name)
-      run.preResults.set(call.id, output)
-      run.notExecuted.add(call.id)
-      return { block: true, reason: output.content }
-    }
-    run.permissions.set(call.id, current)
-    return undefined
-  }
-
-  /** Plan approval: leave plan mode, switch the execute preset, maybe the model. */
-  private applyPlanApproval(run: TurnRun, answer: ApprovalAnswer): ToolOutput {
-    const executeMode = answer.plan?.executeMode === 'full' ? 'full-access' : 'project-write'
-    const next = presetState(executeMode, 'default')
-    this.store.append(run.sessionId, {
-      type: 'permission-selection',
-      sandbox: next.sandbox,
-      approval: next.approval,
-      reviewer: next.reviewer,
-      collaboration: next.collaboration,
-    })
-    this.store.append(run.sessionId, {
-      type: 'permission-mode',
-      mode: legacyModeOf(next),
-    })
-    if (answer.plan?.selection) run.selection = answer.plan.selection
-    const feedback = answer.plan?.feedback?.trim()
-    const suffix = feedback ? `\n用户补充建议:${feedback}` : ''
-    return {
-      content: `计划已批准,会话已切换至 ${executeMode} 模式,请开始执行。${suffix}`,
-      isError: false,
-    }
-  }
-
-  /** Recent conversation, trimmed for the reviewer prompt. */
-  private transcriptOf(sessionId: string): ReviewTranscriptEntry[] {
-    const entries: ReviewTranscriptEntry[] = []
-    for (const event of this.store.read(sessionId)?.events ?? []) {
-      if (event.type === 'user-message' && !event.injected) {
-        entries.push({ role: 'user', text: truncateChars(event.text, 2000, '…')[0] })
-      } else if (event.type === 'assistant-message') {
-        const text = event.blocks
-          .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-          .map((block) => block.text)
-          .join('\n')
-        if (text.trim() !== '') {
-          entries.push({ role: 'assistant', text: truncateChars(text, 2000, '…')[0] })
-        }
-      }
-    }
-    return entries.slice(-12)
-  }
-
-  /**
-   * Rebuild the request context immediately before every provider request.
-   * This is where injections, microcompaction, auto-summary and the frozen
-   * system prefix run — all of them append to the log, then the canonical
-   * surface is converted to pi messages.
-   */
-  private async prepareRequest(
-    run: TurnRun,
-    _context: PrepareRequestContext,
-    signal?: AbortSignal,
-  ): Promise<{
-    context?: { messages: Message[]; tools?: AgentTool[] }
-    model?: Model<Api>
-    thinkingLevel?: ThinkingLevel
-  } | undefined> {
-    this.services?.drainInbox?.(run.sessionId)
-    this.applyInjections(run.sessionId, run.header)
-
-    const config = this.getConfig()
-    const resolved = this.resolveSelection(config, run.selection)
-    run.provider = resolved.provider
-    run.selection = resolved.selection
-    const provider = resolved.provider
-    const selection = resolved.selection
-    const cacheSettings = run.cacheSettings
-
-    if (!run.role?.legacy && !signal?.aborted) {
-      this.applyMicrocompact(
-        run.sessionId,
-        run.turn,
-        run.step,
-        provider,
-        selection.model,
-        cacheSettings.microcompact,
-        cacheSettings.compactionRatio,
-      )
-    }
-    if (!run.role?.legacy && !signal?.aborted) {
-      run.compactionAttempted = await this.applyAutoCompact({
-        sessionId: run.sessionId,
-        selection,
-        provider,
-        model: selection.model,
-        ratio: cacheSettings.compactionRatio,
-        header: run.header,
-        signal: signal ?? new AbortController().signal,
-        attempted: run.compactionAttempted,
-      })
-    }
-    if (signal?.aborted) throw new Error('aborted')
-
-    let events = this.store.read(run.sessionId)?.events ?? []
-    let modelEvents = this.modelEventsFor(run.sessionId, events, run.role)
-    let surface = deriveSurface(modelEvents)
-    let messages = surface.map((item) => item.message)
-    const permission = this.permissionStateOf(run.sessionId)
-    const schemas = this.schemasFor(permission, run.sessionId, run.header)
-
-    const framedCurrent = buildSystemPrompt({
-      cwd: run.header.cwd,
-      sandbox: run.header.sandbox,
-      tools: schemas,
-      permission,
-      model: selection.model,
-      provider: selection.provider,
-      ...(this.services?.persona ? { persona: this.services.persona() } : {}),
-      ...(run.role ? { subagent: run.role } : {}),
-      ...(this.services?.promptSections
-        ? { extraSections: this.services.promptSections(run.sessionId, run.header) }
-        : {}),
-    })
-
-    let previousSystemPrompt: string | null = null
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]!
-      if (event.type === 'system-prompt') {
-        previousSystemPrompt = event.text
-        break
-      }
-    }
-    if (previousSystemPrompt !== framedCurrent) {
-      this.store.append(run.sessionId, {
-        type: 'system-prompt',
-        turn: run.turn,
-        step: run.step,
-        text: framedCurrent,
-      })
-    }
-
-    const frozen = frozenSystem(framedCurrent, events, surface)
-    if (frozen.update !== null) {
-      run.loopGuard.reset()
-      this.store.append(run.sessionId, {
-        type: 'user-message',
-        text: frozen.update,
-        injected: true,
-        channel: SYSTEM_UPDATE_CHANNEL,
-      })
-      events = this.store.read(run.sessionId)?.events ?? events
-      modelEvents = this.modelEventsFor(run.sessionId, events, run.role)
-      surface = deriveSurface(modelEvents)
-      messages = surface.map((item) => item.message)
-    }
-
-    const header = buildRequestHeader(selection, frozen.system, schemas)
-    const previousHeader = lastRequestHeader(events)
-    const headerChanged = previousHeader !== null && !sameRequestHeader(previousHeader.header, header)
-    if (headerChanged) run.loopGuard.reset()
-    if (!previousHeader || headerChanged) {
-      this.store.append(run.sessionId, {
-        type: 'request-header',
-        turn: run.turn,
-        step: run.step,
-        header,
-        reason: previousHeader ? 'change' : 'initial',
-        ...(previousHeader ? { starts_series: true } : {}),
-      })
-    }
-
-    const requestContext = this.store.append(run.sessionId, {
-      type: 'request-context',
-      turn: run.turn,
-      step: run.step,
-      provider: selection.provider,
-      model: selection.model,
-      ...(provider.defaultContextWindow ? { context_window: provider.defaultContextWindow } : {}),
-    })
-    if (requestContext) run.requestSeq = requestContext.seq
-
-    const budget = applyMediaBudget(messages)
-    const piMessages = toPiMessages(budget.messages, provider, selection.model)
-    // Declare only the schemas this permission state may use, but keep every
-    // executable tool in the runtime loadout: pi validates and executes calls
-    // against `context.tools`, so a hidden write tool must still reach the
-    // permission gate and be refused with a readable reason instead of
-    // "Tool not found". Provider requests only see the declared system tools.
-    const visibleTools = run.toolRuntime.toolsFor(schemas)
-    const executableTools = run.toolRuntime.toolsFor(
-      this.executableSchemas(run.sessionId, run.header, permission),
-    )
-    const systemMessage = createInitialSystemMessage(frozen.system, visibleTools)
-    const model = toPiModel(provider, selection.model, {
-      ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
-    })
-
-    this.cacheWarmer.remember(
-      run.sessionId,
-      provider,
-      {
-        provider,
-        model: selection.model,
-        messages: budget.messages,
-        system: frozen.system,
-        tools: schemas,
-        ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
-        ...(provider.supportsPromptCacheKey === false ? {} : { cacheKey: run.sessionId }),
-      },
-      cacheSettings.cacheWarming.mode,
-    )
-    this.cacheWarmer.cancel(run.sessionId)
-
-    return {
-      context: {
-        messages: systemMessage ? [systemMessage, ...piMessages] : piMessages,
-        tools: executableTools,
-      },
-      model,
-      thinkingLevel: thinkingLevelOf(selection.reasoningEffort),
-    }
-  }
-
-  private finishTurn(run: TurnRun, turn: AgentTurnContext): { action: 'end' } | undefined {
-    const message = turn.message
-    if (message.stopReason === 'error' || message.stopReason === 'aborted') return undefined
-    if (turn.toolResults.length > 0) {
-      const latest = this.store.read(run.sessionId)?.events ?? []
-      const scannedToSeq = latest[latest.length - 1]?.seq ?? 0
-      const inboundSeq = latestInboundSeq(latest, run.loopGuardInboundSeq)
-      if (inboundSeq > run.loopGuardInboundSeq) run.loopGuard.reset()
-      run.loopGuardInboundSeq = Math.max(run.loopGuardInboundSeq, scannedToSeq)
-      const permissionSeq = latestPermissionSeq(latest, run.loopGuardPermissionSeq)
-      if (permissionSeq > run.loopGuardPermissionSeq) run.loopGuard.reset()
-      run.loopGuardPermissionSeq = Math.max(run.loopGuardPermissionSeq, scannedToSeq)
-
-      let decision: ReturnType<LoopGuard['observe']> | null = null
-      if (run.approvalBoundary) {
-        run.approvalBoundary = false
-        run.loopGuard.reset()
-      } else {
-        decision = run.loopGuard.observe({
-          calls: turn.toolResults.map((result) => {
-            const call = run.callRefs.get(result.toolCallId) ?? {
-              id: result.toolCallId,
-              name: result.toolName,
-              arguments: '{}',
-            }
-            const record = run.records.get(result.toolCallId)
-            const pre = run.preResults.get(result.toolCallId)
-            const output = record?.output ?? pre
-            return {
-              name: call.name,
-              arguments: call.arguments,
-              content: output?.content ?? textOfPiMessage(result),
-              isError: result.isError,
-              ...(output?.errorIdentity ? { errorIdentity: output.errorIdentity } : {}),
-              notExecuted: run.notExecuted.has(result.toolCallId) || (!record && !pre),
-              truncated: output?.truncation !== undefined,
-              missing: false,
-            }
-          }),
-        })
-      }
-
-      if (decision?.kind === 'strong-reminder' || decision?.kind === 'weak-reminder') {
-        if (hasNewInputSince(latest, run.requestSeq)) {
-          run.loopGuard.reset()
-        } else {
-          this.store.append(run.sessionId, {
-            type: 'user-message',
-            text:
-              decision.kind === 'strong-reminder'
-                ? LOOP_GUARD_STRONG_REMINDER
-                : LOOP_GUARD_WEAK_REMINDER,
-            injected: true,
-            channel: LOOP_GUARD_CHANNEL,
-          })
-        }
-      } else if (decision?.kind === 'stop') {
-        if (hasNewInputSince(latest, run.requestSeq)) {
-          run.loopGuard.reset()
-        } else {
-          run.loopStop = { repeats: decision.repeats }
-          return { action: 'end' }
-        }
-      }
-    }
-
-    if (run.step >= this.settings.maxSteps) {
-      run.maxStepsHit = true
-      return { action: 'end' }
-    }
-    return undefined
   }
 
   /** Append an injected user message only when its channel content changed. */
@@ -1548,6 +1159,10 @@ export class SessionDriver {
    * Cheap cleanup before an expensive summary: old tool-result contents are
    * replaced in place via `replaces` events. The log stays append-only and the
    * UI keeps the full history; only the model surface shrinks.
+   *
+   * The plan guards protect the provider prefix: it clears only results whose
+   * rewrite suffix is still inside the warm budget, never touching ancient
+   * results outside the prompt-cache lookback window.
    */
   private applyMicrocompact(
     sessionId: string,
@@ -1580,6 +1195,7 @@ export class SessionDriver {
       pressure?.thresholdTokens ?? undefined,
     )
     if (decision.kind !== 'applied') return
+    // A cleared result is gone from the model surface, so no stub may point at it.
     this.readStateFor(sessionId).forgetCalls(decision.clearedToolCallIds)
     const originals = new Map(
       events
@@ -1609,7 +1225,14 @@ export class SessionDriver {
 
   /**
    * Summarize older history once the projected prompt reaches the configured
-   * fraction of the window. This runs before each request, but it is a gate.
+   * fraction of the window. This runs before each request, but it is a gate:
+   * below the threshold it returns without calling the model.
+   *
+   * The pressure number is a `usage` anchor from the provider plus whatever
+   * the log appended since, so it only ever trusts a real measurement. A
+   * summary appended after that anchor makes it stale — the next request will
+   * report a fresh size — and one attempt per turn keeps a long turn from
+   * re-summarizing the same window.
    */
   private async applyAutoCompact(options: {
     sessionId: string
@@ -1638,6 +1261,8 @@ export class SessionDriver {
     const pressure = estimatePressure(events, surface, window, options.ratio)
     if (!pressure || pressure.projectedTokens < threshold) return false
 
+    // A summary newer than the newest usage sample means the sample predates
+    // the rewrite: compacting again would act on a stale size.
     let anchorSeq = -1
     let compactionSeq = -1
     for (const event of events) {
@@ -1668,6 +1293,8 @@ export class SessionDriver {
       return true
     }
     this.compactionFailures.delete(options.sessionId)
+    // The summary moved a range out of the model surface; stamps that pointed
+    // into it would send the model to content it can no longer see.
     let compactedFrom = -1
     let compactedTo = -1
     for (const event of this.store.read(options.sessionId)?.events ?? []) {
@@ -1678,6 +1305,7 @@ export class SessionDriver {
     if (compactedFrom >= 0) {
       this.readStateFor(options.sessionId).forgetSeqRange(compactedFrom, compactedTo)
     }
+    // The summary rewrote the model surface; a cached replay is stale.
     this.cacheWarmer.cancel(options.sessionId)
     return true
   }
@@ -1717,26 +1345,417 @@ export class SessionDriver {
     return filtered
   }
 
-  /**
-   * Every tool pi may execute for this session, regardless of whether its
-   * schema is visible. Hidden tools stay executable so the permission gate can
-   * return Denia's actionable refusal instead of pi's "Tool not found".
-   */
-  private executableSchemas(
-    sessionId: string,
-    header: SessionHeader,
+  private async executeCalls(
+    calls: ToolCallRef[],
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+    onSelectionChange: (next: ModelSelection) => void,
+  ): Promise<{
+    outputs: ToolOutput[]
+    aborted: boolean
+    notExecuted: boolean[]
+    missing: boolean[]
+  }> {
+    const outputs: ToolOutput[] = new Array(calls.length)
+    const notExecuted: boolean[] = new Array(calls.length).fill(false)
+    const missing: boolean[] = new Array(calls.length).fill(true)
+    const inFlight = new Map<number, Promise<void>>()
+    let next = 0
+    let aborted = false
+    // Resolves the moment the user stops the turn. Every pool wait races it:
+    // a tool that cannot be interrupted must never keep the turn (and the UI's
+    // running state) alive after stop.
+    let onAbort = (): void => {}
+    const stopSignal = new Promise<void>((resolve) => {
+      if (ctx.cancel.aborted) {
+        resolve()
+        return
+      }
+      onAbort = () => resolve()
+      ctx.cancel.addEventListener('abort', onAbort, { once: true })
+    })
+
+    const confinedFor = (state: PermissionState, call: ToolCallRef): boolean =>
+      state.sandbox === 'read-only' && ctx.sandbox && !memoryAnchored(call, ctx.memoryRoot, ctx.cwd)
+
+    const launch = (index: number, state: PermissionState): void => {
+      const call = calls[index]!
+      const task = this.runOne(call, {
+        ...ctx,
+        permission: state,
+        confined: confinedFor(state, call),
+        callId: call.id,
+      }).then((outcome) => {
+        outputs[index] = outcome.output
+        notExecuted[index] = outcome.notExecuted
+        missing[index] = false
+      })
+      inFlight.set(index, task)
+      void task.finally(() => inFlight.delete(index))
+    }
+
+    try {
+      while (next < calls.length || inFlight.size > 0) {
+        if (ctx.cancel.aborted) {
+          aborted = true
+          break
+        }
+        let started = false
+        while (next < calls.length && inFlight.size < this.settings.maxParallel) {
+          const state = this.permissionStateOf(ctx.sessionId)
+          if (ctx.cancel.aborted) {
+            aborted = true
+            break
+          }
+          const call = calls[next]!
+          const intercepted = this.services?.intercept?.(call, ctx.sessionId)
+          if (intercepted) {
+            outputs[next] = intercepted
+            missing[next] = false
+            next += 1
+            started = true
+            continue
+          }
+          const gate = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
+          if (gate.decision.kind === 'forbid') {
+            outputs[next] = toolError(gate.decision.reason)
+            notExecuted[next] = true
+            missing[next] = false
+            next += 1
+            started = true
+            continue
+          }
+          if (gate.decision.kind === 'prompt' || gate.decision.kind === 'prompt-user') {
+            // Interactive reviews are serial: drain the pool first.
+            if (inFlight.size > 0) break
+            const outcome = await Promise.race([
+              this.dispatchReviewed(call, gate, state, ctx, onSelectionChange),
+              stopSignal.then(() => null),
+            ])
+            if (outcome === null) {
+              aborted = true
+              next += 1
+              break
+            }
+            outputs[next] = outcome.output
+            notExecuted[next] = outcome.notExecuted
+            missing[next] = false
+            if (outcome.abort) aborted = true
+            next += 1
+            started = true
+            continue
+          }
+          // Allow: an uncertified shell command must not overlap with the pool.
+          if (call.name === 'bash' && inFlight.size > 0) break
+          launch(next, state)
+          next += 1
+          started = true
+        }
+        if (inFlight.size > 0) {
+          await Promise.race([...inFlight.values(), stopSignal])
+          if (ctx.cancel.aborted) {
+            aborted = true
+            break
+          }
+          continue
+        }
+        if (next >= calls.length) break
+        if (!started) break
+      }
+    } finally {
+      // One listener per batch, not per step: release it as soon as this
+      // batch settles so long legal turns do not accumulate AbortSignal
+      // listeners on the turn controller.
+      ctx.cancel.removeEventListener('abort', onAbort)
+    }
+    return { outputs, aborted: aborted || ctx.cancel.aborted, notExecuted, missing }
+  }
+
+  /** Record the approval, resolve it (user or automatic reviewer), then act. */
+  private async dispatchReviewed(
+    call: ToolCallRef,
+    gate: GateResult,
     state: PermissionState,
-  ): ToolSchema[] {
-    const all = [...this.registry.schemas()]
-    if (this.services?.extraSchemas) {
-      const seen = new Set(all.map((schema) => schema.name))
-      for (const schema of this.services.extraSchemas(sessionId, header, state)) {
-        if (seen.has(schema.name)) continue
-        seen.add(schema.name)
-        all.push(schema)
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+    onSelectionChange: (next: ModelSelection) => void,
+  ): Promise<{ output: ToolOutput; abort: boolean; notExecuted: boolean }> {
+    const append = ctx.emit
+    const requestId = randomUUID()
+    const reason = 'reason' in gate.decision ? gate.decision.reason : undefined
+    const isPlan = call.name === 'exit_plan'
+    const request: ApprovalRequest = {
+      sessionId: ctx.sessionId,
+      requestId,
+      callId: call.id,
+      tool: call.name,
+      argsPreview: call.arguments,
+      ...(reason ? { reason } : {}),
+      availableDecisions: availableChoices(gate.decision, gate.proposedRule),
+      ...(gate.proposedRule ? { proposedRule: gate.proposedRule } : {}),
+    }
+    // Automatic review is not a user prompt: it must not open the approval card.
+    const isAutoReview =
+      gate.decision.kind === 'prompt' && state.reviewer === 'auto-review' && this.reviewer !== undefined
+    if (!isAutoReview) {
+      append({
+        type: 'approval-asked',
+        request_id: requestId,
+        call_id: call.id,
+        tool: call.name,
+        args_preview: call.arguments,
+        ...(reason ? { reason } : {}),
+      })
+    }
+
+    let answer: ApprovalAnswer
+    if (gate.decision.kind === 'prompt-user') {
+      // A mandatory human checkpoint is never satisfied by the auto reviewer.
+      answer = this.bridge ? await this.bridge.request(request, ctx.cancel) : DECLINED_ANSWER
+    } else if (isAutoReview) {
+      const reviewed = await this.reviewAutomatically(call, gate, ctx)
+      append({
+        type: 'auto-review',
+        request_id: requestId,
+        call_id: call.id,
+        tool: call.name,
+        outcome: reviewed.verdict.outcome,
+        risk_level: reviewed.verdict.riskLevel,
+        user_authorization: reviewed.verdict.userAuthorization,
+        rationale: reviewed.verdict.rationale,
+      })
+      answer = reviewed.answer
+    } else {
+      answer = this.bridge ? await this.bridge.request(request, ctx.cancel) : DECLINED_ANSWER
+    }
+
+    const outcome =
+      answer.choice === 'accept'
+        ? 'allowed-once'
+        : answer.choice === 'accept-for-session' || answer.choice === 'accept-with-rule'
+          ? 'allowed-session'
+          : answer.choice === 'cancel'
+            ? 'cancelled'
+            : 'rejected'
+    if (!isAutoReview) append({ type: 'approval-decided', request_id: requestId, outcome })
+
+    if (ctx.cancel.aborted) {
+      return { output: toolError('审批已被取消(轮次被中断)。'), abort: true, notExecuted: true }
+    }
+    switch (answer.choice) {
+      case 'accept':
+        return { ...(await this.runAllowed(call, gate, ctx, answer, onSelectionChange)), abort: false }
+      case 'accept-for-session':
+        if (gate.cacheKey) this.grantsOf(ctx.sessionId).add(gate.cacheKey)
+        return { ...(await this.runAllowed(call, gate, ctx, answer, onSelectionChange)), abort: false }
+      case 'accept-with-rule':
+        if (gate.proposedRule) await this.policy.appendAllow(gate.proposedRule)
+        if (gate.cacheKey) this.grantsOf(ctx.sessionId).add(gate.cacheKey)
+        return { ...(await this.runAllowed(call, gate, ctx, answer, onSelectionChange)), abort: false }
+      case 'decline':
+        if (isPlan) {
+          const feedback = answer.plan?.feedback?.trim()
+          const text = feedback
+            ? `用户拒绝了该计划。请按以下补充建议修订计划后重新提交:\n${feedback}`
+            : '用户拒绝了该计划。请修订计划后重新提交;不确定用户的顾虑时,先用 ask 工具询问。'
+          return { output: { content: text, isError: false }, abort: false, notExecuted: true }
+        }
+        return {
+          output: toolError('用户拒绝了该操作;请改用项目目录内的方案,或先询问用户。'),
+          abort: false,
+          notExecuted: true,
+        }
+      case 'cancel':
+        return { output: toolError('审批已被取消(用户中断了本轮)。'), abort: true, notExecuted: true }
+    }
+  }
+
+  /**
+   * Run an approved call. Permissions are re-checked first: a mode tightened
+   * while the approval was pending must not be bypassed by the old approval.
+   */
+  private async runAllowed(
+    call: ToolCallRef,
+    gate: GateResult,
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+    answer: ApprovalAnswer,
+    onSelectionChange: (next: ModelSelection) => void,
+  ): Promise<CallExecution> {
+    const state = this.permissionStateOf(ctx.sessionId)
+    if (call.name === 'exit_plan') {
+      return {
+        output: this.applyPlanApproval(ctx.sessionId, answer, ctx.emit, onSelectionChange),
+        notExecuted: true,
       }
     }
-    return all
+    const recheck = gateCall(state, ctx.cwd, call, this.policy, this.grantsOf(ctx.sessionId), ctx.memoryRoot, ctx.roots)
+    if (recheck.decision.kind === 'forbid') {
+      return { output: toolError(`批准后重新判权被拒绝:${recheck.decision.reason}`), notExecuted: true }
+    }
+    return this.runOne(call, {
+      ...ctx,
+      permission: state,
+      confined: state.sandbox === 'read-only' && ctx.sandbox && !memoryAnchored(call, ctx.memoryRoot, ctx.cwd),
+      callId: call.id,
+    })
+  }
+
+  /** Plan approval: leave plan mode, switch the execute preset, maybe the model. */
+  private applyPlanApproval(
+    sessionId: string,
+    answer: ApprovalAnswer,
+    append: (event: SessionEvent) => void,
+    onSelectionChange: (next: ModelSelection) => void,
+  ): ToolOutput {
+    const executeMode = answer.plan?.executeMode === 'full' ? 'full-access' : 'project-write'
+    const next = presetState(executeMode, 'default')
+    append({
+      type: 'permission-selection',
+      sandbox: next.sandbox,
+      approval: next.approval,
+      reviewer: next.reviewer,
+      collaboration: next.collaboration,
+    })
+    append({ type: 'permission-mode', mode: legacyModeOf(next) })
+    if (answer.plan?.selection) onSelectionChange(answer.plan.selection)
+    const feedback = answer.plan?.feedback?.trim()
+    const suffix = feedback ? `\n用户补充建议:${feedback}` : ''
+    return {
+      content: `计划已批准,会话已切换至 ${executeMode} 模式,请开始执行。${suffix}`,
+      isError: false,
+    }
+  }
+
+  /** Route an ordinary prompt through the automatic reviewer. */
+  private async reviewAutomatically(
+    call: ToolCallRef,
+    gate: GateResult,
+    ctx: Omit<ToolContext, 'callId' | 'confined'> & { sandbox: boolean },
+  ): Promise<{ answer: ApprovalAnswer; verdict: ReviewVerdict }> {
+    if (!this.reviewer) {
+      return {
+        answer: DECLINED_ANSWER,
+        verdict: {
+          outcome: 'deny',
+          riskLevel: 'high',
+          userAuthorization: 'unknown',
+          rationale: 'automatic approval review is unavailable',
+        },
+      }
+    }
+    const summary = gate.facts.shell
+      ? gate.facts.shell.command
+      : argumentText(call.arguments, 'path') || call.arguments.slice(0, 2000)
+    const verdict = await this.reviewer.review(
+      {
+        tool: call.name,
+        action: gate.facts.action,
+        summary,
+        cwd: ctx.cwd,
+        ...(gate.decision.kind === 'prompt' && gate.decision.reason ? { reason: gate.decision.reason } : {}),
+        transcript: this.transcriptOf(ctx.sessionId),
+      },
+      ctx.cancel,
+    )
+    return {
+      answer: verdict.outcome === 'allow' ? { choice: 'accept' } : DECLINED_ANSWER,
+      verdict,
+    }
+  }
+
+  /** Recent conversation, trimmed for the reviewer prompt. */
+  private transcriptOf(sessionId: string): ReviewTranscriptEntry[] {
+    const entries: ReviewTranscriptEntry[] = []
+    for (const event of this.store.read(sessionId)?.events ?? []) {
+      if (event.type === 'user-message' && !event.injected) {
+        entries.push({ role: 'user', text: truncateChars(event.text, 2000, '…')[0] })
+      } else if (event.type === 'assistant-message') {
+        const text = event.blocks
+          .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n')
+        if (text.trim() !== '') {
+          entries.push({ role: 'assistant', text: truncateChars(text, 2000, '…')[0] })
+        }
+      }
+    }
+    return entries.slice(-12)
+  }
+
+  private async runOne(call: ToolCallRef, ctx: ToolContext): Promise<CallExecution> {
+    if (ctx.cancel.aborted) {
+      return {
+        output: {
+          content: '[工具错误] 命令被用户中断',
+          isError: true,
+          errorIdentity: { name: call.name, code: 'cancelled' },
+        },
+        notExecuted: true,
+      }
+    }
+    const tool = this.registry.get(call.name)
+    if (!tool && !this.services?.executeExtra) {
+      const available = this.registry.names().join(', ')
+      return {
+        output: {
+          content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'unknown-tool' },
+        },
+        notExecuted: true,
+      }
+    }
+    let args: Record<string, unknown>
+    try {
+      const parsed = call.arguments.trim() === '' ? {} : (JSON.parse(call.arguments) as unknown)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('参数必须是 JSON 对象')
+      }
+      args = parsed as Record<string, unknown>
+    } catch (error) {
+      return {
+        output: {
+          content: `[工具错误] 参数解析失败:${errorMessage(error)}\n原始参数:${call.arguments.slice(0, 2000)}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'bad-arguments' },
+        },
+        notExecuted: true,
+      }
+    }
+    try {
+      const output = tool
+        ? await tool.execute(args, ctx)
+        : await this.services!.executeExtra!(call.name, args, ctx)
+      if (!output) {
+        const available = this.registry.names().join(', ')
+        return {
+          output: {
+            content: `[工具错误] 未知工具:${call.name}\n可用工具:${available}`,
+            isError: true,
+            errorIdentity: { name: call.name, code: 'unknown-tool' },
+          },
+          notExecuted: true,
+        }
+      }
+      return { output: this.commitToolOutput(ctx.sessionId, call, output), notExecuted: false }
+    } catch (error) {
+      if (ctx.cancel.aborted) {
+        return {
+          output: {
+            content: '[工具错误] 命令被用户中断',
+            isError: true,
+            errorIdentity: { name: call.name, code: 'cancelled' },
+          },
+          notExecuted: true,
+        }
+      }
+      return {
+        output: {
+          content: `[工具错误] ${errorMessage(error)}`,
+          isError: true,
+          errorIdentity: { name: call.name, code: 'tool-panic' },
+        },
+        notExecuted: false,
+      }
+    }
   }
 }
 
@@ -1751,3 +1770,19 @@ function skillGesture(prompt: string): string | null {
   const name = first.slice(1)
   return isValidSkillName(name) ? name : null
 }
+
+/** A write_file/edit call whose target sits inside the project memory dir. */
+function memoryAnchored(
+  call: ToolCallRef,
+  memoryRoot: string | null | undefined,
+  cwd: string,
+): boolean {
+  if (!memoryRoot || (call.name !== 'write_file' && call.name !== 'edit')) return false
+  const raw = argumentText(call.arguments, 'path').trim()
+  if (raw === '') return false
+  const target = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(cwd, raw)
+  const relative = path.relative(memoryRoot, target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+export type { ToolContext }

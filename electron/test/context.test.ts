@@ -19,6 +19,7 @@ import {
   loadSkill,
   readSkillResource,
   renderSkillCatalog,
+  resolveBuiltinSkillsDir,
   saveSkill,
   setSkillEnabled,
 } from '../src/skills/skills.ts'
@@ -101,6 +102,7 @@ test('skills: layering, enable/disable, resources and management', () => {
   assert.equal(review?.source, 'project-denia')
   assert.equal(review?.modelInvocable, false)
   assert.ok(discovered.skills.some((skill) => skill.source === 'bundled' && skill.name === 'denia-guide'))
+  assert.ok(discovered.skills.some((skill) => skill.name === 'browser-guide'))
   assert.ok(discovered.skills.some((skill) => skill.name === 'skill-creator'))
   assert.throws(() => loadSkill(discovered.skills, 'review', false), /不允许此调用方式/)
   assert.match(loadSkill(discovered.skills, 'review', true).body, /项目正文/)
@@ -142,6 +144,23 @@ test('skills: layering, enable/disable, resources and management', () => {
 
   deleteSkill(home, project, 'created-skill')
   assert.ok(!fs.existsSync(path.join(project, '.denia', 'skills', 'created-skill', 'SKILL.md')))
+})
+
+test('bundled skills resolve from both source and dist layouts', () => {
+  const root = tempDir('denia-builtin-skills-')
+  fs.mkdirSync(path.join(root, 'builtin-skills', 'demo'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'builtin-skills', 'demo', 'SKILL.md'), skillText('demo', '演示', '正文'))
+
+  // Bundled entry (electron/dist/main.js) and packaged app (app.asar/dist/main.js).
+  assert.equal(
+    resolveBuiltinSkillsDir(path.join(root, 'dist')),
+    path.join(root, 'builtin-skills'),
+  )
+  // Source import (electron/src/skills/skills.ts) used by this test suite.
+  assert.equal(
+    resolveBuiltinSkillsDir(path.join(root, 'src', 'skills')),
+    path.join(root, 'builtin-skills'),
+  )
 })
 
 test('project memory: deterministic root, index projection, search and rebuild', () => {

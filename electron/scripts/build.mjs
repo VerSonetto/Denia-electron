@@ -10,7 +10,7 @@ await build({
   format: 'esm',
   target: 'node22',
   outfile: 'dist/main.js',
-  external: ['electron', '@zhizhuodemao/patchright'],
+  external: ['electron', '@zhizhuodemao/patchright', '@lydell/node-pty', 'ws'],
   sourcemap: true,
   logLevel: 'info',
   // `import.meta.dirname` is provided by Node 20.11+ / Electron's Node.

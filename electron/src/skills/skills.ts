@@ -37,7 +37,22 @@ export interface SkillDiscovery {
 
 const MAX_SKILL_BYTES = 1024 * 1024
 const MAX_RESOURCE_BYTES = 1024 * 1024
-const BUILTIN_DIR = path.resolve(import.meta.dirname, '..', '..', 'builtin-skills')
+
+/**
+ * Bundled skills sit next to `dist/` in a packaged app and in a dev bundle,
+ * but next to `src/skills/` when tests import the source tree. Resolve from
+ * both layouts instead of hard-coding one depth: the first existing directory
+ * wins, and the source layout remains the fallback when neither exists yet.
+ */
+export function resolveBuiltinSkillsDir(baseDir: string): string {
+  const candidates = [
+    path.resolve(baseDir, '..', 'builtin-skills'), // dist/main.js, app.asar/dist/main.js
+    path.resolve(baseDir, '..', '..', 'builtin-skills'), // src/skills/skills.ts
+  ]
+  return candidates.find((dir) => fs.existsSync(dir)) ?? candidates[0]!
+}
+
+const BUILTIN_DIR = resolveBuiltinSkillsDir(import.meta.dirname)
 
 interface Metadata {
   name?: string

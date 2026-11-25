@@ -55,13 +55,13 @@ function backupBeforeWrite(file: string, ctx: ToolContext): ToolOutput | null {
 export const ReadFileTool = {
   schema: schema(
     'read_file',
-    '读取一个 UTF-8 文本文件;相对路径锚定项目主目录,大文件用 offset/limit 分页。',
+    '读取一个 UTF-8 文本文件;相对路径锚定项目主目录,大文件用 offset/limit 分页。读文件用它,不要用 bash cat/head/tail/sed。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string' },
-        offset: { type: 'integer', minimum: 1, default: 1 },
-        limit: { type: 'integer', minimum: 1, default: DEFAULT_READ_LIMIT },
+        path: { type: 'string', description: '文件路径;相对路径锚定项目主目录。' },
+        offset: { type: 'integer', minimum: 1, default: 1, description: '1-based 起始行号,默认 1。' },
+        limit: { type: 'integer', minimum: 1, default: DEFAULT_READ_LIMIT, description: '本次最多读取的行数,默认 400。' },
       },
       required: ['path'],
     },
@@ -122,12 +122,12 @@ export const ReadFileTool = {
 export const WriteFileTool = {
   schema: schema(
     'write_file',
-    '写入 UTF-8 文本文件:自动创建父目录,已存在则整体覆盖。新建或全量重写用它;局部修改用 edit。',
+    '写入 UTF-8 文本文件:自动创建父目录,已存在则整体覆盖。新建或全量重写用它;局部修改用 edit。不要用 bash 重定向或 heredoc 写文件。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string' },
-        content: { type: 'string' },
+        path: { type: 'string', description: '目标文件路径;相对路径锚定项目主目录。' },
+        content: { type: 'string', description: '完整文件内容(整体覆盖写入)。' },
       },
       required: ['path', 'content'],
     },
@@ -211,15 +211,15 @@ function lineOfIndex(text: string, index: number): number {
 export const EditTool = {
   schema: schema(
     'edit',
-    '对项目内一个 UTF-8 文件做精确字符串替换。改一处用 old_string+new_string(可选 replace_all);多处只给 edits 数组。old_string 须逐字符一致,默认唯一。原子应用,任一失败则整次不写入。',
+    '对项目内一个 UTF-8 文件做精确字符串替换。改一处用 old_string+new_string(可选 replace_all);多处只给 edits 数组。old_string 须逐字符一致,默认唯一。原子应用,任一失败则整次不写入。不要用 bash sed/awk 改文件。',
     {
       type: 'object',
       required: ['path'],
       additionalProperties: false,
       properties: {
         path: { type: 'string', description: '相对路径锚定项目主目录。' },
-        old_string: { type: 'string', minLength: 1 },
-        new_string: { type: 'string' },
+        old_string: { type: 'string', minLength: 1, description: '要被替换的原文,必须与文件内容逐字符一致。' },
+        new_string: { type: 'string', description: '替换后的文本;删除内容时给空串。' },
         replace_all: { type: 'boolean', description: '替换全部出现,默认要求唯一。' },
         edits: {
           type: 'array',
@@ -228,8 +228,8 @@ export const EditTool = {
           items: {
             type: 'object',
             properties: {
-              old_string: { type: 'string', minLength: 1 },
-              new_string: { type: 'string' },
+              old_string: { type: 'string', minLength: 1, description: '要被替换的原文,必须与文件内容逐字符一致。' },
+              new_string: { type: 'string', description: '替换后的文本;删除内容时给空串。' },
               replace_all: { type: 'boolean' },
             },
             required: ['old_string', 'new_string'],

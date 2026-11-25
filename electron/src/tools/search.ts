@@ -75,14 +75,14 @@ function* walk(root: string, relative = '', depth = 0): Generator<WalkEntry> {
 export const LsTool = {
   schema: schema(
     'ls',
-    '列出目录条目(目录名尾部带 "/"),目录在前。默认一层,要看更深给 depth(≤5)。',
+    '列出目录条目(目录名尾部带 "/"),目录在前、文件在后。默认一层,要递归给 depth(≤5)。看目录结构用它,不要用 bash ls/dir。',
     {
       type: 'object',
       properties: {
-        path: { type: 'string' },
-        depth: { type: 'integer', minimum: 1, maximum: 5 },
-        max_results: { type: 'integer', minimum: 1 },
-        offset: { type: 'integer', minimum: 0 },
+        path: { type: 'string', description: '要列出的目录,默认项目目录。' },
+        depth: { type: 'integer', minimum: 1, maximum: 5, description: '递归深度,默认 1。' },
+        max_results: { type: 'integer', minimum: 1, description: '最多返回的条目数,默认 200。' },
+        offset: { type: 'integer', minimum: 0, description: '跳过排序后的前 N 条。' },
       },
     },
   ),
@@ -209,14 +209,14 @@ function globToRegExp(pattern: string): RegExp {
 export const GlobTool = {
   schema: schema(
     'glob',
-    '按 glob 模式查找文件(不含目录),按修改时间从新到旧。模式无 "/" 时匹配任意深度的 basename。',
+    '按 glob 模式查找文件(不含目录),按修改时间从新到旧。模式无 "/" 时匹配任意深度的 basename,如 "*.ts" 搜整棵树。找文件用它,不要用 bash find/ls。',
     {
       type: 'object',
       properties: {
-        pattern: { type: 'string' },
-        path: { type: 'string' },
-        max_results: { type: 'integer', minimum: 1 },
-        offset: { type: 'integer', minimum: 0 },
+        pattern: { type: 'string', description: 'glob 模式,如 "**/*.ts"、"src/**/*.test.js"、"*.{rs,toml}"。' },
+        path: { type: 'string', description: '搜索目录,默认项目目录。' },
+        max_results: { type: 'integer', minimum: 1, description: '最多返回的路径数,默认 100。' },
+        offset: { type: 'integer', minimum: 0, description: '跳过排序后的前 N 条。' },
       },
       required: ['pattern'],
     },
@@ -282,16 +282,16 @@ function matchesInclude(relative: string, include: string | undefined): boolean 
 export const GrepTool = {
   schema: schema(
     'grep',
-    '正则搜索文件内容,按 path:line:content 返回。默认跳过 .git、node_modules 等;命中多用 max_matches/offset 分页。',
+    '用正则搜索文件内容,按 path:line:content 返回。默认跳过 .git、node_modules 等;命中多用 max_matches/offset 分页。搜内容用它,不要用 bash grep/rg。',
     {
       type: 'object',
       properties: {
-        pattern: { type: 'string' },
-        path: { type: 'string' },
+        pattern: { type: 'string', description: '要搜索的正则表达式(JS 正则语法)。' },
+        path: { type: 'string', description: '搜索的文件或目录,默认项目目录。' },
         include: { type: 'string', description: 'glob 过滤,如 "*.ts"。' },
-        ignore_case: { type: 'boolean' },
-        max_matches: { type: 'integer', minimum: 1 },
-        offset: { type: 'integer', minimum: 0 },
+        ignore_case: { type: 'boolean', description: '大小写不敏感匹配,默认 false。' },
+        max_matches: { type: 'integer', minimum: 1, description: '最多返回的匹配行数,默认 200。' },
+        offset: { type: 'integer', minimum: 0, description: '跳过排序后的前 N 条。' },
       },
       required: ['pattern'],
     },

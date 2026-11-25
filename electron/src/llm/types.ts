@@ -1,8 +1,7 @@
-// Shared request vocabulary for one-shot completions.
+// Shared LLM request vocabulary and errors.
 //
-// pi-ai owns the provider protocols; this shape is only used by side calls
-// that do not run an agent turn (title, compaction, review, prompt optimizer,
-// cache warming, goal verification).
+// Adapters own their wire protocol; everything above them (agent loop, tests,
+// future retry policy) only sees this shape.
 
 import type { ChatMessage, ToolSchema } from '../core/wire.ts'
 import type { ProviderConfig } from '../config.ts'

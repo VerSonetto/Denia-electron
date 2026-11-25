@@ -13,6 +13,9 @@ import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import type { Duplex } from 'node:stream'
+
+import { WebSocketServer } from 'ws'
 
 import { BrowserManager } from '../browser/manager.ts'
 import { createBrowserTool } from '../tools/browser.ts'
@@ -52,6 +55,7 @@ import type { ProjectRecord } from '../project/store.ts'
 import { ProfileStore } from '../subagents/profiles.ts'
 import { SubagentRuntime, subagentCapabilityNames } from '../subagents/runtime.ts'
 import { GlobalEventHub } from './events.ts'
+import { TerminalManager } from '../terminal/manager.ts'
 import { subagentPolicyConcurrency } from './helpers.ts'
 import {
   apiError,
@@ -68,6 +72,11 @@ import { handleSessionsApi } from './routes/sessions.ts'
 import { handleSettingsApi } from './routes/settings.ts'
 import { handleSkillsApi } from './routes/skills.ts'
 import { handleSubagentsApi } from './routes/subagents.ts'
+import {
+  attachTerminalWebSocket,
+  handleTerminalsApi,
+  terminalIdFromSocketPath,
+} from './routes/terminals.ts'
 import { handleWorkspaceApi } from './routes/workspace.ts'
 import { serveStatic } from './static.ts'
 
@@ -96,6 +105,8 @@ export interface HostOptions {
   policy?: ExecPolicy
   /** Test seam: substitute the browser hub (null = no browser tool). */
   browser?: BrowserManager | null
+  /** Test seam: substitute the PTY terminal manager. */
+  terminals?: TerminalManager
   /** Root for projects created without an explicit directory. */
   projectsRoot?: string
 }
@@ -113,6 +124,8 @@ export interface Host {
   remote: RemoteRuntime
   /** Project registry; tests and the settings pages read it. */
   projects: ProjectStore
+  /** PTY terminal registry behind the side-pane terminal tabs. */
+  terminals: TerminalManager
   close(): Promise<void>
 }
 
@@ -143,6 +156,51 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   registry.register(new SkillTool(home))
   const browser = options.browser === undefined ? new BrowserManager({ home }) : options.browser
   if (browser) registry.register(createBrowserTool(browser))
+  const terminals = options.terminals ?? new TerminalManager({ home })
+  const terminalSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+
+  const rejectUpgrade = (socket: Duplex, status: number, message: string): void => {
+    const body = JSON.stringify({ error: { code: 'terminal/upgrade', message } })
+    const reason = status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : 'Not Found'
+    if (!socket.writable) {
+      socket.destroy()
+      return
+    }
+    socket.end(
+      `HTTP/1.1 ${status} ${reason}\r\n` +
+      'content-type: application/json; charset=utf-8\r\n' +
+      `content-length: ${Buffer.byteLength(body)}\r\n` +
+      'connection: close\r\n\r\n' +
+      body,
+    )
+  }
+
+  const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    const pathname = safeDecode(url.pathname)
+    const id = terminalIdFromSocketPath(pathname)
+    if (!id) {
+      rejectUpgrade(socket, 404, '未知的 WebSocket 端点')
+      return
+    }
+    const access = decideAccess(remote, req, { requireToken: true })
+    if (access.kind === 'unauthorized') {
+      rejectUpgrade(socket, 401, '需要先与宿主配对')
+      return
+    }
+    if (access.kind !== 'local' && isBlockedForRemote(pathname)) {
+      rejectUpgrade(socket, 403, '该能力只能在宿主机器上使用')
+      return
+    }
+    try {
+      terminalSockets.handleUpgrade(req, socket, head, (ws) => {
+        attachTerminalWebSocket(ws, terminals, id, url.searchParams.get('replay') === '1')
+      })
+    } catch {
+      socket.destroy()
+    }
+  }
+
   const projects = new ProjectStore(home, { ...(options.projectsRoot ? { managedRoot: options.projectsRoot } : {}) })
   const projectOfHeader = (header: SessionHeader): ProjectRecord =>
     projects.get(header.project_id) ??
@@ -412,6 +470,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     const next = http.createServer((req, res) => {
       void handler(req, res)
     })
+    next.on('upgrade', handleUpgrade)
     next.requestTimeout = 0
     try {
       await new Promise<void>((resolve, reject) => {
@@ -614,12 +673,15 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       broadcast,
     }, req, res, pathname, url, method)) return
 
+    if (await handleTerminalsApi({ terminals }, req, res, pathname, method)) return
+
     notImplemented(res, pathname)
   }
 
   const server = http.createServer((req, res) => {
     void handler(req, res)
   })
+  server.on('upgrade', handleUpgrade)
   server.requestTimeout = 0
 
   const host = options.host ?? '127.0.0.1'
@@ -656,9 +718,13 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     usage,
     remote,
     projects,
+    terminals,
     async close() {
       await stopRemoteListener()
       hub.close()
+      terminals.closeAll()
+      for (const client of terminalSockets.clients) client.terminate()
+      terminalSockets.close()
       await browser?.dispose()
       subagents.close()
       completions.close()
