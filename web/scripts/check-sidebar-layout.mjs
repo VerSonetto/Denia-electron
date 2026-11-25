@@ -4,7 +4,8 @@
  * 这里守的是几个"改一个数字就会错位,但单测看不出来"的约束:
  * - `.sidebar-primary` 的水平内边距 4px + 左对齐导航按钮的内边距 8px
  *   必须等于 `.sidebar-region-head` 的 12px 文字基线;
- * - 820px 断点下导航行高切到 44px,底部留白与区域间距保持 12px/6px 节奏;
+ * - 820px 断点下导航行高切到 44px;导航组内间距、按钮到项目区、
+ *   区域内部间距必须是同一个 6px;
  * - 收起态 56px rail 由 10px + 36px + 10px 撑满,不被展开态规则影响;
  * - 置顶标记是 flex 项且不参与压缩,标题自己省略而不是被图标遮挡。
  *
@@ -106,7 +107,18 @@ const regionHeadPadding = sides(value(regionHeadDecls, 'padding', '.sidebar-regi
 
 assert.equal(value(primaryDecls, 'gap', '.sidebar-primary'), '6px')
 assert.equal(value(newButtonDecls, 'gap', '.sidebar-new-btn'), '10px')
-assert.equal(primaryPadding.bottom, 12, '.sidebar-primary 底部留白为 12px')
+/* 垂直节奏:导航组内间距、按钮到项目区、区域内部间距取同一值,
+ * 否则「拓展管理」离项目区比离「新建会话」更远,侧栏被切成两段。 */
+assert.equal(
+  `${primaryPadding.bottom}px`,
+  value(primaryDecls, 'gap', '.sidebar-primary'),
+  '导航组底部留白必须与导航组内间距一致',
+)
+assert.equal(
+  `${primaryPadding.bottom}px`,
+  value(regionDecls, 'gap', '.sidebar-region'),
+  '导航组底部留白必须与项目区内部间距一致',
+)
 assert.equal(value(regionDecls, 'gap', '.sidebar-region'), '6px', '区域间距同为 6px')
 
 assert.equal(sidebarPadding.left, 0, '.sidebar 不再吃内容边距')
