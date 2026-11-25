@@ -47,7 +47,7 @@ import { ServerApprovalBridge } from './approval-bridge.ts'
 import { HostServices } from './services.ts'
 import { SkillTool } from '../tools/skill.ts'
 import { JOB_TOOL_NAMES } from '../tools/jobs.ts'
-import { JOB_OUTPUT_CAP, JobManager } from '../jobs/manager.ts'
+import { JobManager } from '../jobs/manager.ts'
 import { McpManager } from '../mcp/manager.ts'
 import { loadMcpSettings } from '../mcp/settings.ts'
 import { ProjectStore } from '../project/store.ts'
@@ -339,10 +339,27 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   })
   const jobs = new JobManager({
     onDone: (job) => {
-      let text = `[后台任务完成]\n${JSON.stringify(jobs.peek(job.id, job.owner))}`
-      if (text.length > JOB_OUTPUT_CAP) {
-        text = `${Array.from(text).slice(0, JOB_OUTPUT_CAP).join('')}\n（后台任务结果已截断，完整输出请用 job_output 读取。）`
-      }
+      const snapshot = jobs.peek(job.id, job.owner)
+      const original = snapshot.output
+      // The notice is a wake-up, not the result payload: carry the tail (where
+      // failures and summaries live) and point at job_output for the rest.
+      // This also keeps an auto-backgrounded build from dumping 64k at once.
+      const noticeLimit = 6_000
+      const truncated = original.length > noticeLimit
+      const preview = truncated
+        ? `${original.slice(0, 1_000)}\n…[中间部分省略]…\n${original.slice(-(noticeLimit - 1_000))}`
+        : original
+      const text = `[后台任务完成]\n${JSON.stringify({
+        ...snapshot,
+        output: preview,
+        ...(truncated
+          ? {
+              output_truncated: true,
+              output_chars: original.length,
+              next: '完整输出请用 job_output 读取。',
+            }
+          : {}),
+      })}`
       try {
         completions.push({
           id: `job:${job.id}`,

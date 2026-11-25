@@ -15,8 +15,17 @@ import {
   textOutput,
   toolError,
 } from './types.ts'
+import { planGrep } from './grep-pattern.ts'
+import { getGrepPool } from './grep-pool.ts'
+import { scanGrepFilesAsync } from './grep-scan.ts'
+import type { GrepFileResult } from './grep-scan.ts'
 
 const SKIP_DIRS = new Set(['.git', '.hg', '.svn', 'node_modules', '.denia'])
+
+/** Files per grep batch; small enough that many-hit queries stop early. */
+const GREP_BATCH = 64
+/** Main-thread read concurrency before/without workers. */
+const GREP_MAIN_CONCURRENCY = 16
 
 /** Yield to the event loop so a stop request can flip the abort signal mid-walk. */
 function breathe(): Promise<void> {
@@ -273,10 +282,98 @@ export const GlobTool = {
   },
 }
 
-function matchesInclude(relative: string, include: string | undefined): boolean {
-  if (!include) return true
-  const matcher = globToRegExp(include)
+function matchesInclude(relative: string, matcher: RegExp | null): boolean {
+  if (matcher === null) return true
   return matcher.test(path.posix.basename(relative)) || matcher.test(relative)
+}
+
+interface GrepFileEntry {
+  absolute: string
+  relative: string
+}
+
+/**
+ * Depth-first, lexicographic walk; only files that pass `include` surface.
+ * The scheduler awaits file I/O between batches, which is what gives the
+ * event loop (and the abort signal) a turn on large trees.
+ */
+function* walkGrepDir(
+  absolute: string,
+  relative: string,
+  include: RegExp | null,
+  signal: AbortSignal,
+): Generator<GrepFileEntry> {
+  if (signal.aborted) return
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(absolute, { withFileTypes: true })
+  } catch {
+    return
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name))
+  for (const entry of entries) {
+    if (signal.aborted) return
+    const child = path.join(absolute, entry.name)
+    const rel = relative ? `${relative}/${entry.name}` : entry.name
+    let isDirectory = entry.isDirectory()
+    let isFile = entry.isFile()
+    if (entry.isSymbolicLink()) {
+      // Dirent does not follow links; the old stat-based walk did.
+      try {
+        const stat = fs.statSync(child)
+        isDirectory = stat.isDirectory()
+        isFile = stat.isFile()
+      } catch {
+        continue
+      }
+    }
+    if (isDirectory) {
+      if (!SKIP_DIRS.has(entry.name)) yield* walkGrepDir(child, rel, include, signal)
+    } else if (isFile && matchesInclude(rel, include)) {
+      yield { absolute: child, relative: rel }
+    }
+  }
+}
+
+/** Roots may be directories or a single file (when `path` names a file). */
+function* walkGrepScopes(
+  scopes: readonly string[],
+  labels: readonly string[],
+  include: RegExp | null,
+  signal: AbortSignal,
+): Generator<GrepFileEntry> {
+  for (let index = 0; index < scopes.length; index += 1) {
+    if (signal.aborted) return
+    const scope = scopes[index]!
+    let stat: fs.Stats
+    try {
+      stat = fs.statSync(scope)
+    } catch {
+      continue
+    }
+    const prefix = scopes.length > 1 ? (labels[index] ?? scope) : ''
+    if (stat.isDirectory()) {
+      yield* walkGrepDir(scope, prefix, include, signal)
+    } else if (stat.isFile() && matchesInclude(prefix, include)) {
+      yield { absolute: scope, relative: prefix }
+    }
+  }
+}
+
+/** Pull the walk lazily so the scheduler can stop after enough hits. */
+function* grepBatches(
+  files: Generator<GrepFileEntry>,
+  size: number,
+): Generator<GrepFileEntry[]> {
+  let batch: GrepFileEntry[] = []
+  for (const file of files) {
+    batch.push(file)
+    if (batch.length >= size) {
+      yield batch
+      batch = []
+    }
+  }
+  if (batch.length > 0) yield batch
 }
 
 export const GrepTool = {
@@ -303,12 +400,13 @@ export const GrepTool = {
     const ignoreCase = optionalBoolean(args, 'ignore_case') === true
     const maxMatches = Math.max(1, Math.round(optionalNumber(args, 'max_matches') ?? 200))
     const skip = Math.max(0, Math.round(optionalNumber(args, 'offset') ?? 0))
-    let regex: RegExp
     try {
-      regex = new RegExp(pattern, ignoreCase ? 'i' : '')
+      new RegExp(pattern, ignoreCase ? 'i' : '')
     } catch (error) {
       return toolError(`正则表达式无效:${error instanceof Error ? error.message : String(error)}`)
     }
+    const plan = planGrep(pattern, ignoreCase)
+    const includeMatcher = include ? globToRegExp(include) : null
     const roots = rawArg === undefined && ctx.roots.length > 1
       ? ctx.roots
       : [ctx.cwd]
@@ -322,57 +420,92 @@ export const GrepTool = {
       if (rawArg !== undefined) break
     }
     const labels = rootLabels(scopes)
+    const target = skip + maxMatches
     const hits: string[] = []
-    let visited = 0
     let scanned = 0
-    const visit = async (absolute: string, relative: string): Promise<void> => {
-      if (ctx.cancel.aborted) return
-      if (++visited % 32 === 0) await breathe()
-      if (hits.length >= skip + maxMatches) return
-      let stat: fs.Stats
-      try {
-        stat = fs.statSync(absolute)
-      } catch {
-        return
-      }
-      if (stat.isDirectory()) {
-        if (SKIP_DIRS.has(path.basename(absolute))) return
-        let entries: fs.Dirent[]
-        try {
-          entries = fs.readdirSync(absolute, { withFileTypes: true })
-        } catch {
-          return
+    let finished = false
+
+    const append = (files: readonly GrepFileEntry[], results: readonly GrepFileResult[]): boolean => {
+      for (let index = 0; index < files.length; index += 1) {
+        const result = results[index]
+        if (result === undefined) continue
+        if (result.scanned) scanned += 1
+        for (const hit of result.hits) {
+          hits.push(`${files[index]!.relative}:${hit.line}:${hit.text}`)
+          if (hits.length >= target) return true
         }
-        entries.sort((a, b) => a.name.localeCompare(b.name))
-        for (const entry of entries) {
-          await visit(path.join(absolute, entry.name), relative ? `${relative}/${entry.name}` : entry.name)
-          if (hits.length >= skip + maxMatches) return
-        }
-        return
       }
-      if (stat.size > 2 * 1024 * 1024) return
-      if (!matchesInclude(relative, include)) return
-      let text: string
-      try {
-        text = await fs.promises.readFile(absolute, 'utf8')
-      } catch {
-        return
+      return false
+    }
+    const scanMain = (files: readonly GrepFileEntry[]): Promise<GrepFileResult[]> =>
+      scanGrepFilesAsync(files.map((file) => file.absolute), plan, target, GREP_MAIN_CONCURRENCY)
+
+    const batches = grepBatches(
+      walkGrepScopes(scopes, labels, includeMatcher, ctx.cancel),
+      GREP_BATCH,
+    )
+    let exhausted = false
+    const pull = (): GrepFileEntry[] | null => {
+      if (exhausted) return null
+      const next = batches.next()
+      if (next.done) {
+        exhausted = true
+        return null
       }
-      if (text.includes('\u0000')) return
-      scanned += 1
-      const lines = text.split('\n')
-      for (let index = 0; index < lines.length; index += 1) {
-        if (regex.test(lines[index]!)) {
-          hits.push(`${relative}:${index + 1}:${lines[index]!.slice(0, 400)}`)
-          if (hits.length >= skip + maxMatches) return
+      return next.value
+    }
+
+    // The first batch runs on the main thread: small repositories and
+    // many-hit searches finish without paying worker startup.
+    const first = pull()
+    if (first !== null) {
+      if (ctx.cancel.aborted) return cancelled('grep')
+      finished = append(first, await scanMain(first))
+    }
+
+    if (!finished && !ctx.cancel.aborted) {
+      const pool = getGrepPool()
+      const pending: { files: GrepFileEntry[]; promise: Promise<GrepFileResult[] | null> }[] = []
+      const dispatch = (files?: GrepFileEntry[]): void => {
+        const batch = files ?? pull()
+        if (batch === null) return
+        pending.push({
+          files: batch,
+          promise: pool.scan(batch.map((file) => file.absolute), plan, target),
+        })
+      }
+
+      const firstPoolBatch = pull()
+      if (firstPoolBatch !== null) {
+        dispatch(firstPoolBatch)
+        for (let index = 1; index < pool.size && !exhausted; index += 1) dispatch()
+        while (pending.length > 0 && !finished) {
+          if (ctx.cancel.aborted) break
+          const item = pending.shift()!
+          const results = await item.promise
+          if (results !== null) {
+            finished = append(item.files, results)
+            if (!finished) dispatch()
+            continue
+          }
+          // Worker pool failed. Scan this batch, the already-dispatched ones
+          // and the rest of the walk on the main thread, in walk order.
+          finished = append(item.files, await scanMain(item.files))
+          const queued = pending.splice(0).map((entry) => entry.files)
+          for (const batch of queued) {
+            if (finished || ctx.cancel.aborted) break
+            finished = append(batch, await scanMain(batch))
+          }
+          let next = pull()
+          while (!finished && next !== null && !ctx.cancel.aborted) {
+            finished = append(next, await scanMain(next))
+            next = pull()
+          }
+          break
         }
       }
     }
-    for (let index = 0; index < scopes.length; index += 1) {
-      const root = scopes[index]!
-      await visit(root, scopes.length > 1 ? (labels[index] ?? root) : '')
-      if (hits.length >= skip + maxMatches) break
-    }
+
     if (ctx.cancel.aborted) return cancelled('grep')
     const window = hits.slice(skip, skip + maxMatches)
     if (window.length === 0) return textOutput(`没有匹配 ${pattern} 的行(扫描 ${scanned} 个文件)。`)

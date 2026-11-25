@@ -60,7 +60,7 @@ import {
   gateCall,
 } from './gate.ts'
 import type { Reviewer, ReviewTranscriptEntry, ReviewVerdict } from './reviewer.ts'
-import { deriveHistory, deriveSurface, hasOpenTurn, lastTurn } from './history.ts'
+import { deriveHistory, deriveSurface, hasOpenTurn, lastTurn, visibleInjections } from './history.ts'
 import type { SurfaceItem } from './history.ts'
 import {
   LOOP_GUARD_CHANNEL,
@@ -774,7 +774,7 @@ export class SessionDriver {
           )
         }
         if (!role?.legacy) {
-          compactionAttempted = await this.applyAutoCompact({
+          const compaction = await this.applyAutoCompact({
             sessionId,
             selection,
             provider,
@@ -784,6 +784,13 @@ export class SessionDriver {
             signal: controller.signal,
             attempted: compactionAttempted,
           })
+          compactionAttempted = compaction.stop
+          // A summary hides a seq range from the model surface. Baseline
+          // channels are only re-appended when their text changes, so one
+          // whose last injection fell inside that range would stay hidden
+          // until its source changes. Re-run the injection pass against the
+          // post-compaction surface before this step's request.
+          if (compaction.compacted) this.applyInjections(sessionId, session.header)
         }
         if (controller.signal.aborted) {
           closeTurn(abortedReason())
@@ -1131,21 +1138,23 @@ export class SessionDriver {
     }
   }
 
-  /** Append an injected user message only when its channel content changed. */
+  /**
+   * Append an injected user message when its channel content changed.
+   *
+   * The comparison uses the model-visible surface, not the raw log: a
+   * compaction hides a seq range without deleting it, so the newest logged
+   * injection can be invisible while its text is unchanged. A raw-log scan
+   * would skip the re-append and the model would silently lose the channel
+   * (project instructions, skill catalog, memory index, ...) for the rest of
+   * the session.
+   */
   private applyInjections(sessionId: string, header: SessionHeader): void {
     const injections = this.services?.injections?.(sessionId, header)
     if (!injections || injections.length === 0) return
     const events = this.store.read(sessionId)?.events ?? []
+    const visible = visibleInjections(events)
     for (const injection of injections) {
-      let previous: string | null = null
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const event = events[index]!
-        if (event.type === 'user-message' && event.channel === injection.channel) {
-          previous = event.text
-          break
-        }
-      }
-      if (previous === injection.text) continue
+      if (visible.get(injection.channel) === injection.text) continue
       this.store.append(sessionId, {
         type: 'user-message',
         text: injection.text,
@@ -1243,23 +1252,25 @@ export class SessionDriver {
     header: SessionHeader
     signal: AbortSignal
     attempted: boolean
-  }): Promise<boolean> {
-    if (options.attempted || options.signal.aborted) return true
+  }): Promise<{ stop: boolean; compacted: boolean }> {
+    if (options.attempted || options.signal.aborted) return { stop: true, compacted: false }
     if ((this.compactionFailures.get(options.sessionId) ?? 0) >= MAX_COMPACTION_FAILURES) {
-      return false
+      return { stop: false, compacted: false }
     }
     const preset = this.services?.presetFor?.(options.sessionId, options.header)
-    if (preset && !preset.features.compaction) return false
+    if (preset && !preset.features.compaction) return { stop: false, compacted: false }
 
     const events = this.store.read(options.sessionId)?.events ?? []
-    if (events.length === 0) return false
+    if (events.length === 0) return { stop: false, compacted: false }
     const surface = deriveSurface(events)
-    if (surface.length === 0) return false
+    if (surface.length === 0) return { stop: false, compacted: false }
     const window = contextWindowOf(options.provider, options.model)
     const threshold = compactionThresholdTokens(window, options.ratio)
-    if (threshold === null || threshold <= 0) return false
+    if (threshold === null || threshold <= 0) return { stop: false, compacted: false }
     const pressure = estimatePressure(events, surface, window, options.ratio)
-    if (!pressure || pressure.projectedTokens < threshold) return false
+    if (!pressure || pressure.projectedTokens < threshold) {
+      return { stop: false, compacted: false }
+    }
 
     // A summary newer than the newest usage sample means the sample predates
     // the rewrite: compacting again would act on a stale size.
@@ -1269,7 +1280,7 @@ export class SessionDriver {
       if (event.type === 'assistant-message' && event.usage) anchorSeq = event.seq
       else if (event.type === 'compaction-summary') compactionSeq = event.seq
     }
-    if (compactionSeq > anchorSeq) return false
+    if (compactionSeq > anchorSeq) return { stop: false, compacted: false }
 
     let failure: string | null = null
     const outcome = await compactSession({
@@ -1282,15 +1293,15 @@ export class SessionDriver {
         failure = message
       },
     })
-    if (options.signal.aborted) return true
-    if (outcome === 'nothing-to-compact') return true
+    if (options.signal.aborted) return { stop: true, compacted: false }
+    if (outcome === 'nothing-to-compact') return { stop: true, compacted: false }
     if (outcome === 'failed') {
       this.compactionFailures.set(
         options.sessionId,
         (this.compactionFailures.get(options.sessionId) ?? 0) + 1,
       )
       console.warn('[denia] 自动压缩失败:', failure)
-      return true
+      return { stop: true, compacted: false }
     }
     this.compactionFailures.delete(options.sessionId)
     // The summary moved a range out of the model surface; stamps that pointed
@@ -1307,7 +1318,7 @@ export class SessionDriver {
     }
     // The summary rewrote the model surface; a cached replay is stale.
     this.cacheWarmer.cancel(options.sessionId)
-    return true
+    return { stop: true, compacted: true }
   }
 
   /** Tool schemas visible under the current permission state. */

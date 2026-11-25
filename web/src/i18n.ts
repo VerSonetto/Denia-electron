@@ -445,6 +445,8 @@ const zh = {
   bashEndTimeout: '超时',
   bashEndCancelled: '已中断',
   bashEndSpawnFailed: '未启动',
+  bashEndBackgrounded: '已转后台',
+  bashEndBackgroundedHint: '前台等待已结束,命令继续在后台运行;后续输出用 job_output 读取。',
   bashEndHint: '命令没有正常结束,因此没有退出码(原因见错误行)',
   bashNoOutput: '无输出',
   systemPromptTitle: '系统提示词',
@@ -1991,6 +1993,9 @@ const en: typeof zh = {
   bashEndTimeout: 'timeout',
   bashEndCancelled: 'interrupted',
   bashEndSpawnFailed: 'not started',
+  bashEndBackgrounded: 'backgrounded',
+  bashEndBackgroundedHint:
+    'the foreground wait ended; the command keeps running in the background — read the rest with job_output.',
   bashEndHint: 'the command did not finish normally, so there is no exit code (the error line says why)',
   bashNoOutput: 'no output',
   systemPromptTitle: 'System prompt',

@@ -19,6 +19,17 @@ await build({
   },
 })
 
+// Grep's worker is a separate entry: the main bundle must not inline it.
+await build({
+  entryPoints: ['src/tools/grep-worker.ts'],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  outfile: 'dist/grep-worker.js',
+  logLevel: 'info',
+})
+
 // The frameless window's preload must be CommonJS: sandboxed preloads do not
 // support ESM, and package.json sets "type": "module", hence the .cjs suffix.
 await build({

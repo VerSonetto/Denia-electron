@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import type { McpManager } from '../mcp/manager.ts'
+import { visibleInjections } from '../agent/history.ts'
 import { buildRuntimeContext, DEFAULT_PERSONA } from '../agent/system-prompt.ts'
 import { presetForSession } from '../agent/presets.ts'
 import type { PromptExtraSection, SubagentPromptContext } from '../agent/system-prompt.ts'
@@ -303,16 +304,12 @@ export class HostServices implements SessionServices {
   injections(sessionId: string, header: SessionHeader): { channel: string; text: string }[] {
     const out: { channel: string; text: string }[] = []
     const events = this.store.read(sessionId)?.events ?? []
-    const previous = (channel: string, legacy?: string): string | null => {
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const event = events[index]!
-        if (event.type !== 'user-message') continue
-        if (event.channel === channel || (legacy !== undefined && event.channel === legacy)) {
-          return event.text
-        }
-      }
-      return null
-    }
+    // Compare against what the model can actually see: compaction hides a seq
+    // range without deleting it, and a hidden baseline must be rendered again
+    // instead of being treated as already injected.
+    const visible = visibleInjections(events)
+    const previous = (channel: string, legacy?: string): string | null =>
+      visible.get(channel) ?? (legacy !== undefined ? (visible.get(legacy) ?? null) : null)
     const roots = this.rootsOf(header)
     const files = discoverProjectInstructions(
       this.home,

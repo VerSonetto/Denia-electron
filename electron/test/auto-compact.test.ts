@@ -159,6 +159,34 @@ test('the configured ratio moves the trigger point', async () => {
   }
 })
 
+test('baseline injections are re-materialized after compaction', async () => {
+  const home = tempDir('denia-auto-compact-inject-home-')
+  const cwd = tempDir('denia-auto-compact-inject-cwd-')
+  fs.writeFileSync(path.join(cwd, 'notes.txt'), 'hello')
+  fs.writeFileSync(path.join(cwd, 'AGENTS.md'), 'always keep this project rule\n')
+  const webDir = tempDir('denia-auto-compact-inject-web-')
+  const run = await runThreeTurns(home, cwd, webDir, 120_000)
+  try {
+    assert.equal(run.summaries(), 1, 'precondition: the first turn was summarized')
+    const after = [...run.mock.requests].reverse().find((request) => !isSummaryRequest(request))
+    assert.ok(after, 'the post-compaction request reaches the provider')
+    const contents = after.messages.flatMap((message) =>
+      typeof message.content === 'string' ? [message.content] : [],
+    )
+    assert.ok(
+      contents.some((content) => content.includes('always keep this project rule')),
+      'AGENTS.md stays on the model surface after its old injection was compacted away',
+    )
+    assert.ok(
+      contents.some((content) => content.includes('<available_skills>')),
+      'the skill catalog is re-materialized as well',
+    )
+  } finally {
+    await run.host.close()
+    await run.mock.close()
+  }
+})
+
 test('below the threshold nothing is summarized', async () => {
   const home = tempDir('denia-auto-compact-idle-home-')
   const cwd = tempDir('denia-auto-compact-idle-cwd-')

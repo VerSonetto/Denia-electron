@@ -18,6 +18,10 @@ HTTP/SSE 与宿主通信，因此宿主在进程内起一个本地 HTTP 服务�
   `.credentials.yaml` / 环境变量解析 `apiKeyEnv`；项目读写 `projects.json` 的 map+order 结构（一个项目可包含多个目录）；随附 preset（standard / creator / minimal）与旧版对齐
 - **工具**：`bash`、`read_file`、`write_file`、`edit`、`ls`、`glob`、`grep`、
   `todo_write`、`exit_plan`、`skill`
+- **bash 运行体验**：stdin 关闭、非交互默认环境（`GIT_PAGER`/`PAGER`/
+  `GIT_TERMINAL_PROMPT`/`NO_COLOR`）；默认前台等待到期后仍在运行的命令自动
+  转入后台任务（显式 `timeout_ms` 仍按超时终止），后台任务 `timeout_ms: 0`
+  表示不超时；`job_output` 支持有界等待，大输出走产物分页
 - **shell 选择**：`bash` 工具与后台任务跟随系统默认终端——Windows 读取
   Windows Terminal 默认 profile 的 commandline（PowerShell / cmd / Git Bash /
   WSL 都识别），Windows Terminal 不是默认终端或配置不可读时回退 `ComSpec`；

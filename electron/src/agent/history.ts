@@ -222,6 +222,23 @@ export function deriveHistory(events: readonly Envelope[]): ChatMessage[] {
 }
 
 /**
+ * Latest model-visible text per injected channel.
+ *
+ * This must be derived from the surface, not the raw log: compaction hides a
+ * seq range without deleting it, so the newest logged injection can be
+ * invisible to the model while its text is unchanged. Both the injection pass
+ * and the project-instruction renderer compare against this map so a hidden
+ * baseline is treated as absent and re-materialized.
+ */
+export function visibleInjections(events: readonly Envelope[]): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const item of deriveSurface(events)) {
+    if (item.channel !== null) out.set(item.channel, item.message.content)
+  }
+  return out
+}
+
+/**
  * Source channel of an injected user message (null for ordinary messages).
  *
  * The channel field wins; old logs without one fall back to the injection

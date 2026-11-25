@@ -54,7 +54,10 @@ function ExitBadge({ code, reason }: BashExecution) {
   // 退出码拿到了(0)就没什么可说的;旧数据没有 reason,这里自然落空。
   if (code !== undefined || !label) return null
   return (
-    <span className="exit-badge" title={t('bashEndHint')}>
+    <span
+      className="exit-badge"
+      title={t(reason === 'backgrounded' ? 'bashEndBackgroundedHint' : 'bashEndHint')}
+    >
       {t(label)}
     </span>
   )

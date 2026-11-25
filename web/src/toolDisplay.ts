@@ -848,6 +848,9 @@ export const BASH_END_REASON_LABELS: Record<string, TranslationKey> = {
   timeout: 'bashEndTimeout',
   cancelled: 'bashEndCancelled',
   spawn_failed: 'bashEndSpawnFailed',
+  // The command did not fail; its foreground wait ended and the process keeps
+  // running as a job. Shown as a neutral badge, not the red failure line.
+  backgrounded: 'bashEndBackgrounded',
 }
 
 /** bash 参数里的命令正文(剥掉后端注入的输出编码前缀)。 */
@@ -885,5 +888,5 @@ export const EMPTY_BASH_EXECUTION: BashExecution = {}
  */
 export function bashFailed(exit: BashExecution): boolean {
   if (exit.code !== undefined) return exit.code !== 0
-  return exit.reason !== undefined && exit.reason !== 'completed'
+  return exit.reason !== undefined && exit.reason !== 'completed' && exit.reason !== 'backgrounded'
 }

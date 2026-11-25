@@ -193,6 +193,36 @@ export function shellInvocation(choice: ShellChoice, command: string): { file: s
   }
 }
 
+/**
+ * Environment for one tool command. There is no terminal for prompts or
+ * pagers behind this tool, so point them at non-interactive behavior and give
+ * every child the same project facts the foreground shell sees.
+ */
+export function commandEnv(cwd: string, roots: readonly string[]): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    DENIA_PROJECT_DIRS: roots.join(process.platform === 'win32' ? ';' : ':'),
+    DENIA_PROJECT_ROOT: cwd,
+    GIT_PAGER: 'cat',
+    PAGER: 'cat',
+    GIT_TERMINAL_PROMPT: '0',
+    NO_COLOR: '1',
+    TERM: 'dumb',
+  }
+}
+
+/**
+ * A timeout is not proof of interactivity. Name the plausible causes and the
+ * two ways forward without pretending to know which one applies.
+ */
+function timeoutMessage(timeoutMs: number): string {
+  return [
+    `命令超时(${timeoutMs} ms 未结束)`,
+    '超时可能是因为任务耗时较长、等待输入,或等待网络/锁。',
+    '若任务仍需继续,请改用 run_in_background(或提高 timeout_ms);需要输入的命令请改为非交互参数。',
+  ].join('\n')
+}
+
 function splitCommandLine(line: string): { file: string; args: string[] } {
   const trimmed = line.trim()
   if (trimmed.startsWith('"')) {
@@ -487,20 +517,21 @@ export function killTree(child: ChildProcess): void {
 export const BashTool = {
   schema: schema(
     'bash',
-    'Run one shell command for builds, tests, git, installs and process control, and return its output. Do not use it for file work: list directories with ls, find files with glob, search contents with grep, read with read_file, and write or edit with write_file/edit. The runtime context names the shell and its syntax; cwd is the primary project directory, all project directories are in DENIA_PROJECT_DIRS. Prefer non-interactive commands; split long-running work.',
+    'Run one shell command for builds, tests, git, installs and process control, and return its output. stdin is closed and there is no terminal, so use non-interactive flags. Do not use it for file work: list directories with ls, find files with glob, search contents with grep, read with read_file, and write or edit with write_file/edit. The runtime context names the shell and its syntax; cwd is the primary project directory, all project directories are in DENIA_PROJECT_DIRS. If the default wait expires while the command is still running, it is moved to a background job instead of being killed; an explicit timeout_ms still kills it at that point.',
     {
       type: 'object',
       properties: {
         command: { type: 'string', description: 'shell 命令。' },
         timeout_ms: {
           type: 'integer',
-          minimum: 1,
+          minimum: 0,
           maximum: MAX_TIMEOUT_MS,
-          description: '默认 120000,最大 600000。',
+          description: '前台等待上限,默认 120000,最大 600000;0 仅用于后台(不超时)。',
         },
         run_in_background: {
           type: 'boolean',
-          description: '后台执行,返回任务 id;用 job_output 读输出、job_kill 停止。',
+          description:
+            '后台执行,返回任务 id;用 job_output 读输出、job_kill 停止。配合 timeout_ms: 0 可让 dev server 等长驻进程不超时。',
         },
       },
       required: ['command'],
@@ -516,6 +547,7 @@ export const BashTool = {
         errorIdentity: { name: 'bash', code: 'cancelled' },
       }
     }
+    const timeoutArg = optionalNumber(args, 'timeout_ms')
     if (optionalBoolean(args, 'run_in_background') === true) {
       if (!ctx.jobs) {
         return toolError('当前部署未启用后台任务;请直接用前台 bash,或把长任务拆成更小的命令。')
@@ -524,7 +556,9 @@ export const BashTool = {
         const job = ctx.jobs.start({
           owner: ctx.sessionId,
           cwd: ctx.cwd,
+          roots: ctx.roots,
           command,
+          ...(timeoutArg !== undefined ? { timeoutMs: timeoutArg } : {}),
           ...(ctx.permission ? { permission: ctx.permission } : {}),
           cancel: ctx.cancel,
         })
@@ -533,9 +567,12 @@ export const BashTool = {
         return toolError(error instanceof Error ? error.message : String(error))
       }
     }
+    // Explicit positive timeouts keep their kill semantics; the default wait
+    // hands a still-running process to the job registry instead of losing it.
+    const explicitTimeout = timeoutArg !== undefined && timeoutArg > 0
     const timeoutMs = Math.min(
       MAX_TIMEOUT_MS,
-      Math.max(1, Math.round(optionalNumber(args, 'timeout_ms') ?? DEFAULT_TIMEOUT_MS)),
+      Math.max(1, Math.round(explicitTimeout ? timeoutArg! : DEFAULT_TIMEOUT_MS)),
     )
     const shell = shellChoice()
     const started = Date.now()
@@ -616,11 +653,10 @@ export const BashTool = {
           windowsHide: true,
           windowsVerbatimArguments: shell.verbatim,
           detached: process.platform !== 'win32',
-          env: {
-            ...process.env,
-            DENIA_PROJECT_DIRS: ctx.roots.join(process.platform === 'win32' ? ';' : ':'),
-            DENIA_PROJECT_ROOT: ctx.cwd,
-          },
+          // The command has no terminal and no stdin: readers see EOF instead
+          // of hanging until the timeout.
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: commandEnv(ctx.cwd, ctx.roots),
         })
       } catch (spawnError) {
         error = `命令没能启动:${spawnError instanceof Error ? spawnError.message : String(spawnError)}`
@@ -643,7 +679,20 @@ export const BashTool = {
         settleGuard.unref?.()
       }
 
+      const onStdout = (chunk: string) => append('stdout', chunk)
+      const onStderr = (chunk: string) => append('stderr', chunk)
+      const onChildError = (spawnError: Error) => {
+        error = `命令没能启动:${spawnError.message}`
+        ended = 'spawn_failed'
+        finish(null)
+      }
+      const onClose = (code: number | null) => finish(code)
+
       const onAbort = () => {
+        if (timer) {
+          clearTimeout(timer)
+          timer = null
+        }
         ended = 'cancelled'
         error = '命令被用户中断'
         killTree(child)
@@ -651,9 +700,83 @@ export const BashTool = {
       }
       ctx.cancel.addEventListener('abort', onAbort, { once: true })
 
+      /**
+       * The default wait expired while the process is still alive: hand it to
+       * the job registry instead of killing work that may simply be long.
+       * Streams are paused so bytes emitted during the handoff stay buffered
+       * for the job rather than falling between the two capture paths.
+       */
+      const handoff = (): boolean => {
+        if (settled || ctx.cancel.aborted) return false
+        const jobs = ctx.jobs
+        if (jobs?.adopt === undefined) return false
+        if (child.exitCode !== null || child.signalCode !== null) return false
+        child.stdout?.pause()
+        child.stderr?.pause()
+        const initial = stdout + (stderr !== '' ? `\n--- stderr ---\n${stderr}` : '')
+        let job: { id: string }
+        try {
+          job = jobs.adopt({
+            owner: ctx.sessionId,
+            cwd: ctx.cwd,
+            roots: ctx.roots,
+            command,
+            label: command.slice(0, 200),
+            child,
+            output: initial,
+            startedAt: started,
+            timeoutMs: 0,
+          })
+        } catch {
+          child.stdout?.resume()
+          child.stderr?.resume()
+          return false
+        }
+        if (timer) {
+          clearTimeout(timer)
+          timer = null
+        }
+        ctx.cancel.removeEventListener('abort', onAbort)
+        if (flushTimer) {
+          clearTimeout(flushTimer)
+          flushTimer = null
+        }
+        flushStream()
+        child.stdout?.removeListener('data', onStdout)
+        child.stderr?.removeListener('data', onStderr)
+        child.removeListener('error', onChildError)
+        child.removeListener('close', onClose)
+        child.stdout?.resume()
+        child.stderr?.resume()
+        settled = true
+        const durationMs = Date.now() - started
+        // The note comes first so the head/tail result budget cannot drop it,
+        // and stays before the stderr marker so the UI does not paint it red.
+        const parts: string[] = [
+          `[前台等待 ${timeoutMs} ms 后命令仍在运行,已转入后台任务 ${job.id};用 job_output 读取后续输出,完成时会自动通知]`,
+        ]
+        if (stdout !== '') parts.push(stdout)
+        if (stderr !== '') parts.push('--- stderr ---', stderr)
+        resolve(
+          textOutput(parts.join('\n'), {
+            exit_code: null,
+            end_reason: 'backgrounded',
+            job_id: job.id,
+            files: [],
+            duration_ms: durationMs,
+            evidence_complete: false,
+          }),
+        )
+        return true
+      }
+
       timer = setTimeout(() => {
+        if (settled || ctx.cancel.aborted) return
+        if (!explicitTimeout && handoff()) return
+        // The process may have exited just as the timer fired; close will settle it.
+        if (child.exitCode !== null || child.signalCode !== null) return
         ended = 'timeout'
-        error = `命令超时(${timeoutMs} ms 未结束)`
+        error = timeoutMessage(timeoutMs)
         killTree(child)
         armSettleGuard()
       }, timeoutMs)
@@ -661,14 +784,10 @@ export const BashTool = {
 
       child.stdout?.setEncoding('utf8')
       child.stderr?.setEncoding('utf8')
-      child.stdout?.on('data', (chunk: string) => append('stdout', chunk))
-      child.stderr?.on('data', (chunk: string) => append('stderr', chunk))
-      child.on('error', (spawnError) => {
-        error = `命令没能启动:${spawnError.message}`
-        ended = 'spawn_failed'
-        finish(null)
-      })
-      child.on('close', (code) => finish(code))
+      child.stdout?.on('data', onStdout)
+      child.stderr?.on('data', onStderr)
+      child.on('error', onChildError)
+      child.on('close', onClose)
     })
   },
 }

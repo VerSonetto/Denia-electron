@@ -1,5 +1,6 @@
 // Tool protocol shared by every model-facing tool.
 
+import type { ChildProcess } from 'node:child_process'
 import path from 'node:path'
 
 import type { ModelSelection, SessionEvent, ToolOutput, ToolSchema } from '../core/wire.ts'
@@ -7,17 +8,35 @@ import type { PermissionState } from '../core/permission.ts'
 import type { ReadStateStore } from './read-state.ts'
 import type { OutputStore } from '../agent/tool-output.ts'
 
+/** A live foreground child handed to the job registry on timeout. */
+export interface AdoptJobInput {
+  owner: string
+  cwd: string
+  roots?: readonly string[]
+  command: string
+  label?: string
+  child: ChildProcess
+  /** Output captured before adoption, in the shape `job_output` returns. */
+  output: string
+  startedAt?: number
+  /** 0 (and undefined) disable the timeout; a positive value starts one now. */
+  timeoutMs?: number
+}
+
 /** The slice of the job manager the `bash` tool needs for background runs. */
 export interface BackgroundJobs {
   start(input: {
     owner: string
     cwd: string
+    roots?: readonly string[]
     command: string
     label?: string
     timeoutMs?: number
     permission?: PermissionState
     cancel?: AbortSignal
   }): unknown
+  /** Take over a still-running foreground child; returns the registered job. */
+  adopt?(input: AdoptJobInput): { id: string }
 }
 
 /** Backups taken by the host right before a write tool overwrites a file. */
