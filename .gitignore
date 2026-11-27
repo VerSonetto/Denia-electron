@@ -70,6 +70,26 @@
 /.denia-tmp/
 /electron/-y
 
+# cloudflared 二进制由 scripts/fetch-cloudflared.mjs 在打包时下载
+/electron/resources/cloudflared/*
+!/electron/resources/cloudflared/.gitkeep
+
+# Flutter Android 客户端:构建产物、IDE 状态与本机 SDK 路径不入库
+/mobile/.dart_tool/
+/mobile/.flutter-plugins-dependencies
+/mobile/build/
+/mobile/coverage/
+/mobile/.pub/
+/mobile/.pub-cache/
+/mobile/.idea/
+/mobile/*.iml
+/mobile/android/.gradle/
+/mobile/android/.kotlin/
+/mobile/android/local.properties
+/mobile/android/app/debug/
+/mobile/android/app/profile/
+/mobile/android/app/release/
+
 # esbuild 偶发把输出写到包根目录,构建产物不入库
 /electron/main.js
 /electron/main.js.map

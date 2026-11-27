@@ -1,7 +1,7 @@
 {
   "name": "denia",
   "private": true,
-  "version": "0.8.1",
+  "version": "0.9.1",
   "description": "Denia desktop host: TypeScript agent runtime with the shared web console",
   "author": "Denia",
   "type": "module",
@@ -12,7 +12,7 @@
     "test": "node --test test",
     "start": "node scripts/build.mjs && electron .",
     "dev": "node scripts/dev.mjs",
-    "dist": "node scripts/build.mjs && electron-builder --win nsis --publish never"
+    "dist": "node scripts/fetch-cloudflared.mjs && node scripts/build.mjs && electron-builder --win nsis --publish never"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -51,6 +51,13 @@
       {
         "from": "build/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "resources/cloudflared",
+        "to": "cloudflared",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

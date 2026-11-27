@@ -94,6 +94,9 @@ export function followSse(
   const after = queryNumber(url, 'after') ?? 0
   res.writeHead(200, sseHeaders())
   res.write('retry: 1000\n\n')
+  // An immediate frame lets clients distinguish "headers arrived but the body
+  // is buffered by a proxy" from a live stream, without waiting 15 seconds.
+  writeSse(res, { type: 'hb' })
   let lastSent = after
   let replaying = true
   const pending: Envelope[] = []

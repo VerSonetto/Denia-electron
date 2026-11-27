@@ -9,11 +9,13 @@ Electron + TypeScript 的本地 agent 桌面端，复用 `web/` 的 React 控制
 - `electron/`：主进程、HTTP/SSE 宿主、agent loop、工具、MCP、子代理、
   浏览器、会话存储与桌面打包
 - `web/`：React 控制台；Vite 开发服务器把 `/api` 代理到本地宿主
+- `mobile/`：Flutter Android 远程客户端，扫码配对后在外网/LAN 调用桌面端
 - `scripts/`：本地检查与联调脚本
 
 权威的宿主说明、能力范围与目录细节见 [electron/README.md](electron/README.md)。
 远程访问与移动端接入的接口契约见
-[electron/REMOTE-ACCESS.md](electron/REMOTE-ACCESS.md)。
+[electron/REMOTE-ACCESS.md](electron/REMOTE-ACCESS.md)，Android 客户端实现见
+[mobile/README.md](mobile/README.md)。
 
 ## 开发
 

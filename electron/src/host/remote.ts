@@ -16,6 +16,8 @@ import os from 'node:os'
 import path from 'node:path'
 import type { IncomingMessage } from 'node:http'
 
+import { hasRelayProvenance } from './relay-provenance.ts'
+
 /** 远程会话 Cookie 名。 */
 export const SESSION_COOKIE = 'denia_remote_session'
 
@@ -96,6 +98,8 @@ export interface RemoteConfig {
   publicUrl: string | null
   /** 远程监听的独立端口。与回环主端口分开,两端口同号在 Windows 上会争用地址。 */
   listenPort: number
+  /** 启用内置 Cloudflare 快速隧道；publicUrl 由隧道自动写入。 */
+  quickTunnel: boolean
 }
 
 const DEFAULT_CONFIG: RemoteConfig = {
@@ -103,6 +107,7 @@ const DEFAULT_CONFIG: RemoteConfig = {
   bindHost: null,
   publicUrl: null,
   listenPort: 0,
+  quickTunnel: false,
 }
 
 const VALID_KINDS = new Set<ClientKind>(['mobile', 'desktop', 'browser'])
@@ -356,6 +361,7 @@ export class RemoteRuntime {
       listenPort: Number.isInteger(storedPort) && storedPort > 0 && storedPort < 65536
         ? storedPort
         : this.defaultListenPort(),
+      quickTunnel: record.quickTunnel === true,
     }
   }
 
@@ -369,6 +375,7 @@ export class RemoteRuntime {
       listenPort: Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort < 65536
         ? requestedPort
         : current.listenPort,
+      quickTunnel: next.quickTunnel === undefined ? current.quickTunnel : next.quickTunnel === true,
     }
     fs.mkdirSync(path.dirname(this.configPath), { recursive: true })
     fs.writeFileSync(this.configPath, JSON.stringify({
@@ -376,6 +383,7 @@ export class RemoteRuntime {
       bindHost: merged.bindHost,
       publicUrl: merged.publicUrl,
       listenPort: merged.listenPort,
+      quickTunnel: merged.quickTunnel,
     }, null, 2), 'utf8')
     return merged
   }
@@ -725,7 +733,10 @@ export const decideAccess = (
   req: IncomingMessage,
   options: { requireToken: boolean },
 ): AccessDecision => {
-  if (isLocalRequest(req)) return { kind: 'local' }
+  // Loopback is normally trusted, but a relayed request also reaches the
+  // remote port from 127.0.0.1. The per-process proof is the only way to tell
+  // the two apart; without this check the relay would be an auth bypass.
+  if (!hasRelayProvenance(req) && isLocalRequest(req)) return { kind: 'local' }
   if (!options.requireToken) return { kind: 'local' }
 
   const header = req.headers.authorization
@@ -764,8 +775,17 @@ export { GENERIC_REDEEM_ERROR, PAIRING_TTL_MS, SESSION_TTL_MS, TOKEN_PREFIX }
  * `type` 判别而不是直接给一组 URL,是因为手机端的探测逻辑要按类型排序:
  * 直连优先,隧道兜底,以后加 relay 时不用改载荷结构。
  */
+export interface RelayPairingCandidate {
+  type: 'relay'
+  relayUrl: string
+  serverId: string
+  hostEncPubJwk: { kty: 'OKP'; crv: 'X25519'; x: string }
+  priority?: number
+}
+
 export type PairingCandidate =
   | { type: 'lan' | 'tunnel'; url: string; priority?: number }
+  | RelayPairingCandidate
 
 /**
  * 配对链接。手机扫到或粘贴这一条,就能兑换出设备令牌。
@@ -795,6 +815,30 @@ const base64UrlDecode = (value: string): string => Buffer.from(value, 'base64url
 const normalizeCandidate = (value: unknown): PairingCandidate | null => {
   if (typeof value !== 'object' || value === null) return null
   const record = value as Record<string, unknown>
+  const priority = typeof record.priority === 'number' && Number.isFinite(record.priority)
+    ? record.priority
+    : undefined
+  if (record.type === 'relay') {
+    const relayUrl = optionalString(record.relayUrl)
+    const serverId = optionalString(record.serverId)
+    const jwk = record.hostEncPubJwk
+    if (!relayUrl || !serverId || typeof jwk !== 'object' || jwk === null) return null
+    const key = jwk as Record<string, unknown>
+    if (key.kty !== 'OKP' || key.crv !== 'X25519' || typeof key.x !== 'string' || !key.x) return null
+    try {
+      const parsed = new URL(relayUrl)
+      if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') return null
+    } catch {
+      return null
+    }
+    return {
+      type: 'relay',
+      relayUrl,
+      serverId,
+      hostEncPubJwk: { kty: 'OKP', crv: 'X25519', x: key.x },
+      ...(priority === undefined ? {} : { priority }),
+    }
+  }
   const type = record.type === 'lan' || record.type === 'tunnel' ? record.type : null
   const url = optionalString(record.url)
   if (!type || !url) return null
@@ -805,9 +849,6 @@ const normalizeCandidate = (value: unknown): PairingCandidate | null => {
   } catch {
     return null
   }
-  const priority = typeof record.priority === 'number' && Number.isFinite(record.priority)
-    ? record.priority
-    : undefined
   return priority === undefined ? { type, url } : { type, url, priority }
 }
 

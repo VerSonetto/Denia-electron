@@ -27,6 +27,7 @@ import type {
   UsageRange,
   UsageSnapshot,
   ProjectRecord,
+  RemoteStatusView,
   WireProtocol,
 } from './types'
 import { subscribeServerEvents } from './serverEvents'
@@ -1496,7 +1497,7 @@ export function logoutQqbot(): Promise<import('./types').QqbotChannelStatus> {
 
 /* ---- 远程访问 ---- */
 
-export function getRemoteStatus(): Promise<import('./types').RemoteStatusView> {
+export function getRemoteStatus(): Promise<RemoteStatusView> {
   return http('/api/remote/status')
 }
 
@@ -1504,12 +1505,30 @@ export function enableRemote(input: {
   listenPort?: number
   bindHost?: string
   publicUrl?: string
-}): Promise<import('./types').RemoteStatusView> {
+}): Promise<RemoteStatusView> {
   return http('/api/remote/enable', { method: 'POST', body: JSON.stringify(input) }, 30_000)
 }
 
-export function disableRemote(): Promise<import('./types').RemoteStatusView> {
+export function disableRemote(): Promise<RemoteStatusView> {
   return http('/api/remote/disable', { method: 'POST' }, 30_000)
+}
+
+/** 一键建立 Cloudflare 快速隧道；首次可能要先下载 cloudflared。 */
+export function startRemoteTunnel(): Promise<RemoteStatusView> {
+  return http('/api/remote/tunnel/start', { method: 'POST' }, 300_000)
+}
+
+export function stopRemoteTunnel(): Promise<RemoteStatusView> {
+  return http('/api/remote/tunnel/stop', { method: 'POST' }, 30_000)
+}
+
+/** 端到端加密私有中继；首次可能要先建立 Quick Tunnel。 */
+export function startRemoteRelay(): Promise<RemoteStatusView> {
+  return http('/api/remote/relay/start', { method: 'POST' }, 300_000)
+}
+
+export function stopRemoteRelay(): Promise<RemoteStatusView> {
+  return http('/api/remote/relay/stop', { method: 'POST' }, 30_000)
 }
 
 /** 建一次性配对会话:返回链接与手输短码,两者都只出现这一次。 */

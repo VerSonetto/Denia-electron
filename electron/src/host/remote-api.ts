@@ -16,6 +16,9 @@ import {
   type AccessDecision,
   type RemoteRuntime,
 } from './remote.ts'
+import type { QuickTunnelStatus } from './quick-tunnel.ts'
+import type { RelayPairingCandidate } from './relay.ts'
+import type { RelayServiceStatus } from './relay-service.ts'
 
 /** 监听器的当前实况,由 server.ts 提供。 */
 export interface RemoteListenerState {
@@ -33,6 +36,19 @@ export interface RemoteApiDeps {
   listener: () => RemoteListenerState
   startListener: () => Promise<void>
   stopListener: () => Promise<void>
+  /** 内置公网隧道；未接入时相关端点返回 501。 */
+  tunnel?: {
+    start: () => Promise<QuickTunnelStatus>
+    stop: () => Promise<QuickTunnelStatus>
+    status: () => QuickTunnelStatus
+  }
+  /** 私有中继(端到端加密)。 */
+  relay?: {
+    start: () => Promise<RelayServiceStatus>
+    stop: () => Promise<RelayServiceStatus>
+    status: () => RelayServiceStatus
+    pairingCandidate: () => RelayPairingCandidate | null
+  }
   /** 宿主主机名,作为配对设备看到的服务器名。 */
   serverLabel: () => string
 }
@@ -70,9 +86,18 @@ const statusPayload = (deps: RemoteApiDeps, access: AccessDecision): Record<stri
     serverLabel: deps.serverLabel(),
     serverId: deps.remote.serverId(),
   }
-  if (!local) return base
+  // A paired phone needs the current relay address after the host restarts;
+  // unauthenticated callers only get the identity needed for pairing.
+  const relayCandidate = local || access.kind === 'authorized'
+    ? deps.relay?.pairingCandidate() ?? null
+    : null
+  if (!local) return relayCandidate ? { ...base, relayCandidate } : base
   return {
     ...base,
+    quickTunnel: config.quickTunnel,
+    tunnel: deps.tunnel?.status() ?? null,
+    relay: deps.relay?.status() ?? null,
+    relayCandidate,
     clients: deps.remote.listClients(),
     pending: deps.remote.listPendingPairings(),
   }
@@ -140,9 +165,100 @@ export const handleRemoteApi = async (
 
   if (pathname === '/api/remote/disable' && method === 'POST') {
     if (!requireLocal()) return true
-    deps.remote.writeConfig({ enabled: false })
+    const config = deps.remote.readConfig()
+    if (deps.tunnel) await deps.tunnel.stop().catch(() => {})
+    if (deps.relay) await deps.relay.stop().catch(() => {})
+    deps.remote.writeConfig({
+      enabled: false,
+      ...(config.quickTunnel ? { publicUrl: null, quickTunnel: false } : {}),
+    })
     await deps.stopListener()
     deps.json(res, 200, statusPayload(deps, access))
+    return true
+  }
+
+  // —— 内置公网隧道（Cloudflare Quick Tunnel）——
+  if (pathname === '/api/remote/tunnel/start' && method === 'POST') {
+    if (!requireLocal()) return true
+    if (!deps.tunnel) {
+      deps.apiError(res, 501, 'remote/tunnel-unavailable', '当前构建没有内置公网隧道')
+      return true
+    }
+    const state = deps.listener()
+    if (!state.listening) {
+      deps.apiError(res, 400, 'remote/tunnel-needs-listener', '请先开启远程访问')
+      return true
+    }
+    try {
+      const result = await deps.tunnel.start()
+      if (!result.url) throw new Error('隧道没有返回公网地址')
+      deps.remote.writeConfig({ publicUrl: result.url, quickTunnel: true })
+      deps.json(res, 200, statusPayload(deps, access))
+    } catch (error) {
+      deps.apiError(res, 502, 'remote/tunnel-failed', error instanceof Error ? error.message : String(error))
+    }
+    return true
+  }
+
+  if (pathname === '/api/remote/tunnel/stop' && method === 'POST') {
+    if (!requireLocal()) return true
+    if (!deps.tunnel) {
+      deps.apiError(res, 501, 'remote/tunnel-unavailable', '当前构建没有内置公网隧道')
+      return true
+    }
+    await deps.tunnel.stop().catch(() => {})
+    const config = deps.remote.readConfig()
+    deps.remote.writeConfig({
+      ...(config.quickTunnel ? { publicUrl: null, quickTunnel: false } : {}),
+    })
+    deps.json(res, 200, statusPayload(deps, access))
+    return true
+  }
+
+  if (pathname === '/api/remote/tunnel/status' && method === 'GET') {
+    if (!requireLocal()) return true
+    deps.json(res, 200, {
+      tunnel: deps.tunnel?.status() ?? null,
+      publicUrl: deps.remote.readConfig().publicUrl,
+      quickTunnel: deps.remote.readConfig().quickTunnel,
+    })
+    return true
+  }
+
+  // —— 私有中继（端到端加密） ——
+  if (pathname === '/api/remote/relay/start' && method === 'POST') {
+    if (!requireLocal()) return true
+    if (!deps.relay) {
+      deps.apiError(res, 501, 'remote/relay-unavailable', '当前构建没有私有中继')
+      return true
+    }
+    if (!deps.listener().listening) {
+      deps.apiError(res, 400, 'remote/relay-needs-listener', '请先开启远程访问')
+      return true
+    }
+    try {
+      await deps.relay.start()
+      deps.json(res, 200, statusPayload(deps, access))
+    } catch (error) {
+      deps.apiError(res, 502, 'remote/relay-failed', error instanceof Error ? error.message : String(error))
+    }
+    return true
+  }
+
+  if (pathname === '/api/remote/relay/stop' && method === 'POST') {
+    if (!requireLocal()) return true
+    if (!deps.relay) {
+      deps.apiError(res, 501, 'remote/relay-unavailable', '当前构建没有私有中继')
+      return true
+    }
+    await deps.relay.stop().catch(() => {})
+    deps.json(res, 200, statusPayload(deps, access))
+    return true
+  }
+
+  if (pathname === '/api/remote/relay/status' && method === 'GET') {
+    if (!requireLocal()) return true
+    deps.json(res, 200, { relay: deps.relay?.status() ?? null })
     return true
   }
 
@@ -150,7 +266,19 @@ export const handleRemoteApi = async (
   if (pathname === '/api/remote/pairing' && method === 'POST') {
     if (!requireLocal()) return true
     const body = await deps.readJson(req).catch(emptyBody)
-    const candidates = deps.remote.pairingCandidates()
+    const relayCandidate = deps.relay?.pairingCandidate() ?? null
+    const directCandidates = deps.remote.pairingCandidates()
+    // A private relay is the preferred remote path: it works away from home
+    // and the relay cannot read traffic. Direct LAN stays as a fallback.
+    const candidates = relayCandidate
+      ? [
+          relayCandidate,
+          ...directCandidates.map((candidate) => ({
+            ...candidate,
+            priority: candidate.type === 'lan' ? 20 : 30,
+          })),
+        ]
+      : directCandidates
     if (candidates.length === 0) {
       deps.apiError(res, 400, 'remote/no-address', '没有可用的对外地址,请先启用远程访问并确认机器在局域网内')
       return true
@@ -201,11 +329,19 @@ export const handleRemoteApi = async (
   // —— 兑换(远程可达,受限流保护)——
   if (pathname === '/api/remote/redeem' && method === 'POST') {
     const body = await deps.readJson(req).catch(emptyBody)
+    const link = typeof body.link === 'string' ? body.link.trim() : ''
+    // Native clients hand back the whole link the QR encoded. Parsing it here
+    // keeps the payload format server-owned; clients never split `p`.
+    const parsed = link ? parsePairingLink(link) : null
+    if (link && !parsed) {
+      deps.apiError(res, 400, 'remote/redeem-failed', '配对码无效或已过期')
+      return true
+    }
     try {
       const result = deps.remote.redeemPairing({
-        pairingId: body.pairingId,
-        secret: body.secret,
-        code: body.code,
+        pairingId: parsed?.pairingId ?? body.pairingId,
+        secret: parsed?.secret ?? body.secret,
+        code: parsed ? undefined : body.code,
         label: body.label,
         clientKind: body.clientKind,
         deviceName: body.deviceName,

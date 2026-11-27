@@ -26,6 +26,9 @@ import { createModelReviewer } from '../agent/reviewer.ts'
 import type { Reviewer } from '../agent/reviewer.ts'
 import { RemoteRuntime, decideAccess, isBlockedForRemote, type AccessDecision } from './remote.ts'
 import { handleRemoteApi } from './remote-api.ts'
+import { QuickTunnel } from './quick-tunnel.ts'
+import { RelayService } from './relay-service.ts'
+import { consumeRelayProof } from './relay-provenance.ts'
 import { Updater } from './update.ts'
 import {
   findProvider,
@@ -487,6 +490,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     const next = http.createServer((req, res) => {
       void handler(req, res)
     })
+    next.prependListener('request', consumeRelayProof)
     next.on('upgrade', handleUpgrade)
     next.requestTimeout = 0
     try {
@@ -507,6 +511,33 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     remoteListenError = null
   }
 
+  const quickTunnel = new QuickTunnel({
+    home,
+    targetPort: () => remoteListenPort,
+    serverId: () => remote.serverId(),
+    logger: console,
+    onChange: (status) => {
+      // A quick tunnel may be replaced by its watchdog while the host keeps
+      // running. Keep the persisted pairing candidate in step with it.
+      if (!remote.readConfig().enabled) return
+      if (status.state === 'running' && status.url) {
+        if (remote.readConfig().publicUrl !== status.url) {
+          remote.writeConfig({ publicUrl: status.url, quickTunnel: true })
+        }
+      } else if (status.state === 'error' || status.state === 'idle') {
+        if (remote.readConfig().publicUrl !== null) {
+          remote.writeConfig({ publicUrl: null })
+        }
+      }
+    },
+  })
+
+  const relayService = new RelayService({
+    home,
+    serverId: () => remote.serverId(),
+    remotePort: () => remoteListenPort,
+  })
+
   const handleApi = async (
     req: IncomingMessage,
     res: ServerResponse,
@@ -525,6 +556,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
       listener: () => remoteListenerState(),
       startListener: startRemoteListener,
       stopListener: stopRemoteListener,
+      tunnel: quickTunnel,
+      relay: relayService,
       serverLabel: () => os.hostname() || 'Denia',
     })) return
 
@@ -698,6 +731,7 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   const server = http.createServer((req, res) => {
     void handler(req, res)
   })
+  server.prependListener('request', consumeRelayProof)
   server.on('upgrade', handleUpgrade)
   server.requestTimeout = 0
 
@@ -720,6 +754,19 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
   if (remote.readConfig().enabled) {
     try {
       await startRemoteListener()
+      if (remote.readConfig().quickTunnel) {
+        void quickTunnel.start()
+          .then((status) => {
+            if (status.url) remote.writeConfig({ publicUrl: status.url, quickTunnel: true })
+          })
+          .catch((error) => {
+            console.error('[denia] 公网隧道恢复失败:', errorMessage(error))
+            if (remote.readConfig().quickTunnel) remote.writeConfig({ publicUrl: null })
+          })
+      }
+      if (relayService.readConfig().enabled) {
+        void relayService.resume()
+      }
     } catch (error) {
       console.error('[denia] 远程监听启动失败:', errorMessage(error))
     }
@@ -737,6 +784,8 @@ export async function startHost(options: HostOptions = {}): Promise<Host> {
     projects,
     terminals,
     async close() {
+      relayService.dispose()
+      quickTunnel.dispose()
       await stopRemoteListener()
       hub.close()
       terminals.closeAll()

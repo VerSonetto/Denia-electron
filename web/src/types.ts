@@ -554,6 +554,28 @@ export interface RemoteCandidateView {
   priority?: number
 }
 
+export interface RemoteTunnelView {
+  state: 'idle' | 'starting' | 'running' | 'error'
+  url: string | null
+  pid: number | null
+  targetPort: number | null
+  startedAt: string | null
+  error: string | null
+  binary: string | null
+}
+
+export interface RemoteRelayView {
+  enabled: boolean
+  state: 'disabled' | 'starting' | 'running' | 'error'
+  relayUrl: string | null
+  relayPort: number | null
+  publicUrl: string | null
+  serverClients: number
+  host: { state: string; connectedClients: number; lastError: string | null }
+  hostEncPubJwk: { kty: string; crv: string; x: string } | null
+  error: string | null
+}
+
 export interface RemoteStatusView {
   /** true 表示这次请求来自宿主本机(桌面窗口 / 本机浏览器)。 */
   local: boolean
@@ -565,6 +587,12 @@ export interface RemoteStatusView {
   listening: boolean
   listenerError: string | null
   addresses: { lan: string[]; publicUrl: string | null }
+  /** 是否由内置快速隧道提供 publicUrl。 */
+  quickTunnel?: boolean
+  /** 内置隧道状态；仅本机可读。 */
+  tunnel?: RemoteTunnelView | null
+  /** 私有中继状态；仅本机可读。 */
+  relay?: RemoteRelayView | null
   serverLabel?: string
   /** 服务器稳定标识;App 用它防止把令牌发给换了主的局域网地址。 */
   serverId?: string

@@ -74,6 +74,9 @@ test('远程监听:本机免鉴权、远程需令牌、配对可兑换', async (
     assert.equal(shell.status, 200)
     assert.match(shell.headers.get('content-type') ?? '', /text\/html/)
 
+    // 本机可以看到内置隧道状态；远程设备连这个入口都不该看到。
+    // (放在拿到设备令牌之后，远程侧应返回 403 而不是 401。)
+
     // 远程口:未认证的 API 一律 401。
     const denied = await fetch(`${remoteBase}/api/sessions`)
     assert.equal(denied.status, 401)
@@ -88,12 +91,14 @@ test('远程监听:本机免鉴权、远程需令牌、配对可兑换', async (
       authenticated: boolean
       clients?: unknown
       addresses?: { lan: string[] }
+      relayCandidate?: unknown
     }
     assert.equal(statusBody.local, false)
     assert.equal(statusBody.authenticated, false)
     // 未认证也能读到 serverId:App 要先核对身份,再决定要不要发令牌。
     assert.match((statusBody as { serverId?: string }).serverId ?? '', /^[0-9a-f]{32}$/)
     assert.equal(statusBody.clients, undefined)
+    assert.equal(statusBody.relayCandidate, undefined)
     assert.deepEqual(statusBody.addresses, { lan: [], publicUrl: null })
 
     // 未认证的远程来源连这些端点都进不去(401 早于 403)。
@@ -117,15 +122,35 @@ test('远程监听:本机免鉴权、远程需令牌、配对可兑换', async (
     assert.match(pairing.link, /^denia:\/\/connect\?v=2&p=/)
     assert.ok(pairing.candidates.some((candidate) => candidate.type === 'lan'))
 
-    // 远程口兑换:带上短码即可,不需要先认证。
+    // 远程口兑换:原生客户端只回传完整链接,服务端负责拆 payload。
     const redeemed = await fetch(`${remoteBase}/api/remote/redeem`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ pairingId: pairing.pairing.id, secret: pairing.secret, clientKind: 'mobile' }),
+      body: JSON.stringify({
+        link: pairing.link,
+        clientKind: 'mobile',
+        deviceName: '测试手机',
+        devicePlatform: 'android',
+        appVersion: '0.1.0',
+        dedupeKey: 'install:test-device',
+      }),
     })
     assert.equal(redeemed.status, 200)
     const session = (await redeemed.json()) as { clientToken: string }
     assert.match(session.clientToken, /^denia_client_/)
+
+    const tunnelLocal = await fetch(`${host.baseUrl}/api/remote/tunnel/status`)
+    assert.equal(tunnelLocal.status, 200)
+    const tunnelLocalBody = (await tunnelLocal.json()) as {
+      quickTunnel: boolean
+      tunnel: { state: string }
+    }
+    assert.equal(tunnelLocalBody.quickTunnel, false)
+    assert.equal(tunnelLocalBody.tunnel.state, 'idle')
+    const tunnelRemote = await fetch(`${remoteBase}/api/remote/tunnel/status`, {
+      headers: { authorization: `Bearer ${session.clientToken}` },
+    })
+    assert.equal(tunnelRemote.status, 403)
 
     // 兑换时种下的会话 Cookie 同样能通过(浏览器 WebView 走这条)。
     const setCookie = redeemed.headers.get('set-cookie') ?? ''
@@ -139,6 +164,12 @@ test('远程监听:本机免鉴权、远程需令牌、配对可兑换', async (
       headers: { authorization: `Bearer ${session.clientToken}` },
     })
     assert.equal(allowed.status, 200)
+
+    // A paired device can refresh relay candidates; an anonymous caller cannot.
+    const pairedStatus = (await (await fetch(`${remoteBase}/api/remote/status`, {
+      headers: { authorization: `Bearer ${session.clientToken}` },
+    })).json()) as { relayCandidate?: unknown }
+    assert.equal(pairedStatus.relayCandidate, undefined)
 
     // 已认证的远程设备仍然不能管理宿主:开监听、看设备清单一律 403。
     const forbidden = await fetch(`${remoteBase}/api/remote/enable`, {
